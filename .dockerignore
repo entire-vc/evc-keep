@@ -1,0 +1,8 @@
+.git
+.gitlab
+.gitlab-ci.yml
+web/node_modules
+**/*.test
+*.env
+*.key
+*.pem

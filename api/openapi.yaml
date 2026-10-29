@@ -1,0 +1,830 @@
+openapi: 3.1.0
+info:
+  title: Keep Server API
+  version: "0.1.0"
+  description: >
+    Keep's catalog REST API: secret metadata, version history, and
+    agent/service token lifecycle. Every response field is drawn from the
+    threat model's closed per-object field list — see
+    internal/api/closed_fields_test.go, the reflection guard this document
+    is cross-checked against. This surface never returns a secret's value;
+    see pkg/secret.
+security:
+  - bearerAuth: []
+paths:
+  /v1/input-links:
+    post:
+      summary: Issue a single-use ciphertext delivery link
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [secret]
+              properties:
+                secret: {type: string}
+                ttl: {type: string, default: 30m}
+                workspace_id: {type: string, format: uuid}
+                project_id: {type: string, format: uuid}
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        '201': {description: Link URL, expiry and request identifier}
+        '401': {description: Authentication required}
+        '404': {description: No authorized secret}
+        '503': {description: Intake backend unavailable}
+  /v1/input-links/{request_id}:
+    get:
+      summary: Read completion metadata as the link issuer
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        '200': {description: Version and keyed fingerprint only}
+        '202': {description: Input pending}
+        '410': {description: Link unavailable}
+  /v1/restarts/claim:
+    post:
+      summary: Claim pending lane restart requests (restart poller role only)
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Up to ten requests, each leased for five minutes; a lease that ran out returns to pending
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [request_id, lane, key_version, fingerprint, claim_token]
+                  properties:
+                    request_id: {type: string, format: uuid}
+                    lane: {type: string}
+                    key_version: {type: string}
+                    fingerprint: {type: string, description: kfp1 fingerprint}
+                    claim_token: {type: string, description: 128 random bits, hex; new at every claim; present it in the ack}
+        '403': {description: The token does not hold the restart:poll role}
+        '503': {description: Restart queue unavailable}
+  /v1/restarts/{request_id}/ack:
+    post:
+      summary: Acknowledge a claimed restart request (restart poller role only)
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string, format: uuid}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [result, claim_token]
+              properties:
+                result: {type: string, enum: [ok, nothing_running, failed]}
+                claim_token: {type: string, description: the token returned by the claim of this request}
+      responses:
+        '204': {description: Recorded; a repeat with the same token and result is accepted again}
+        '400': {description: Unknown result}
+        '403': {description: The token does not hold the restart:poll role}
+        '404': {description: Unknown, foreign, unclaimed or expired request, or a missing or wrong claim token (including a stale holder)}
+        '409': {description: The request already finished with another result}
+        '503': {description: Restart queue unavailable}
+  /v1/deployments:
+    post:
+      summary: Request a deployment of a secret to a runner target, without the value
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [secret, runner_id, target]
+              properties:
+                secret: {type: string}
+                runner_id: {type: string, format: uuid}
+                request_id: {type: string}
+                workspace_id: {type: string, format: uuid}
+                project_id: {type: string, format: uuid}
+                target:
+                  type: object
+                  additionalProperties: false
+                  required: [kind, path, uid, gid]
+                  properties:
+                    kind: {type: string}
+                    path: {type: string}
+                    field: {type: string}
+                    unit: {type: string}
+                    consumer: {type: string}
+                    mode: {type: string, description: octal permission bits, default: "0600"}
+                    uid: {type: integer}
+                    gid: {type: integer}
+      responses:
+        '200': {description: Terminal result, ok or closed error_class}
+        '202': {description: Pending, or approval required with approval id, status and url}
+        '400': {description: Rejected target or request}
+        '403': {description: Denied by policy}
+        '404': {description: No authorized secret, version or runner}
+        '409': {description: Request id reused with a different deployment}
+        '429': {description: Deployment rate limit reached}
+        '503': {description: Deployment service unavailable}
+  /v1/deployments/{request_id}:
+    get:
+      summary: Read the result of a deployment request
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        '200': {description: Terminal result with ok, fingerprint, version, healthcheck or error_class}
+        '202': {description: Pending or approval required}
+        '404': {description: Request unavailable}
+  /v1/carriers/verify:
+    post:
+      summary: Ask each runner whether its carrier still holds the current version, without the value
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [secret]
+              properties:
+                secret: {type: string}
+                request_id: {type: string}
+                workspace_id: {type: string, format: uuid}
+                project_id: {type: string, format: uuid}
+      responses:
+        '200': {description: Every carrier answered; ok only when all match}
+        '202': {description: Runners still answering}
+        '400': {description: Invalid request or too many carriers}
+        '404': {description: No authorized secret or version}
+        '409': {description: Request id reused for another secret}
+        '429': {description: Verify rate limit reached}
+        '503': {description: Verification service unavailable}
+  /v1/carriers/verify/{request_id}:
+    get:
+      summary: Read the state of a carrier verification
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Every carrier answered}
+        '202': {description: Runners still answering}
+        '404': {description: Request unavailable}
+  /input/assets.js:
+    get:
+      summary: Immutable input-page script with hash-based CSP and SRI
+      security: []
+      responses:
+        '200': {description: Locally embedded script with no-store}
+  /input/{token}:
+    get:
+      summary: Show signed intake descriptor and requester metadata
+      security: []
+      parameters:
+        - {name: token, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Input page with no-store, no-referrer, hash-based CSP and SRI
+          content:
+            text/html:
+              schema: {type: string}
+        '410': {description: Link expired or already consumed}
+        '503': {description: Intake backend unavailable}
+    post:
+      summary: Submit HPKE ciphertext using a single-use capability
+      security: []
+      parameters:
+        - {name: token, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Version and keyed fingerprint only}
+        '400': {description: Invalid ciphertext}
+        '410': {description: Link expired or already consumed}
+  /healthz:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: process is alive
+  /readyz:
+    get:
+      summary: Readiness probe
+      security: []
+      responses:
+        "200":
+          description: process is alive and the database answers
+        "503":
+          description: database not reachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /version:
+    get:
+      summary: Build identity (commit the server was built from)
+      description: >
+        Unauthenticated, like the probes. Reports the VCS commit and build
+        time injected at build time, or "unknown" and an empty build_time when
+        the binary carries none. Nothing else about the build or the
+        environment is reported.
+      security: []
+      responses:
+        "200":
+          description: build identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Version"
+  /orgs/{org_id}/secrets:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    get:
+      summary: List secrets defined exactly at one scope
+      parameters:
+        - name: scope_level
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [org, ws, proj, user]
+        - name: scope_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        "200":
+          description: >
+            secrets at that scope, or an empty list when the caller lacks
+            read_metadata there — the two are indistinguishable on purpose
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Secret"
+    post:
+      summary: Register a new secret reference (metadata only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSecretRequest"
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "404":
+          description: >
+            scope not found, or caller lacks create_ref there — the response
+            never distinguishes the two (never 403)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /orgs/{org_id}/secrets/{secret_id}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: secret_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Secret metadata
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Secret"
+        "404":
+          description: >
+            no such secret, unreachable scope, or no read_metadata right —
+            all three answer identically (anti-oracle guarantee)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /orgs/{org_id}/secrets/{secret_id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: secret_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      summary: Start a two-phase rotation; the body is the mode and nothing else, never a value
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mode]
+              properties:
+                mode: {type: string, enum: [generate, human_input]}
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        "202": {description: "generate - the run id as request_id; human_input - a one-time input link (url, expires_at, request_id)"}
+        "400": {description: Body is not exactly {mode}}
+        "404": {description: Secret not found or no rotate right}
+        "409": {description: A rotation of this secret is already running}
+        "503": {description: Rotation service unavailable}
+  /orgs/{org_id}/secrets/{secret_id}/rotate/{request_id}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: secret_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: request_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Per-carrier progress of a rotation (carrier_id, phase, state), version and fingerprint once done
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        "200": {description: "Terminal: ok with version and fingerprint, or error_class with failed carriers stale; no version is reported for a failed run"}
+        "202": {description: Run in progress}
+        "404": {description: Run unavailable}
+  /orgs/{org_id}/secrets/{secret_id}/versions:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: secret_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: List a secret's version history
+      responses:
+        "429": {description: Per-principal request limit reached; Retry-After says when to retry}
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SecretVersion"
+        "404":
+          description: same anti-oracle rule as GET /orgs/{org_id}/secrets/{secret_id}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /orgs/{org_id}/secrets/{secret_id}/carriers:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: secret_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: List the destinations a secret is registered at
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Carrier"
+        "404":
+          description: missing, foreign or not readable by the caller — one answer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      summary: Register a destination the secret was deployed to
+      description: >
+        The body is the destination only. The fingerprint is taken from the
+        completed deployment record, never from the request; a field outside
+        the list is a 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterCarrierRequest"
+      responses:
+        "201":
+          description: registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Carrier"
+        "403":
+          description: error_class metadata_not_approved — the destination is not approved for this secret
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: missing, foreign or not deployable by the caller — one answer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: error_class deployment_not_confirmed — no completed deployment of this version to this destination
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /orgs/{org_id}/secrets/{secret_id}/carriers/verify:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - {name: secret_id, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      summary: Ask each runner whether its carrier still holds the current version, without the value
+      description: >
+        The body is empty or carries only request_id, the idempotency key. The
+        carriers and their healthcheck come from the server's records; a
+        healthcheck_ref or any other field is a 400. A carrier whose
+        fingerprint differs is reported with fingerprint_match false.
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                request_id: {type: string}
+      responses:
+        '200': {description: Every carrier answered; ok only when all match}
+        '202': {description: Runners still answering}
+        '400': {description: Invalid request or too many carriers}
+        '404': {description: missing, foreign or not readable by the caller — one answer}
+        '409': {description: Request id reused for another secret}
+        '429': {description: Verify rate limit reached}
+        '503': {description: Verification service unavailable}
+  /orgs/{org_id}/secrets/{secret_id}/carriers/verify/{request_id}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - {name: secret_id, in: path, required: true, schema: {type: string, format: uuid}}
+      - {name: request_id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read the state of a carrier verification
+      security: [{bearerAuth: []}]
+      responses:
+        '200': {description: Every carrier answered}
+        '202': {description: Runners still answering}
+        '404': {description: secret missing, foreign or not readable (secret_not_found), or request unknown or made for another secret (not_found) — the last two are one answer}
+  /orgs/{org_id}/tokens:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    post:
+      summary: Issue an agent or service token
+      description: >
+        Only a human user holding the admin role at the organization's own
+        scope may call this route. The minted token's plaintext appears
+        exactly once, in this response's own "token" field — never again,
+        and never in a log or the audit journal.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueTokenRequest"
+      responses:
+        "201":
+          description: issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssueTokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "404":
+          description: caller is not an org admin, or the principal does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /orgs/{org_id}/tokens/{token_id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - name: token_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      summary: Revoke a token immediately
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Result"
+        "404":
+          description: caller is not an org admin, or the token does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /orgs/{org_id}/audit/verify:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    get:
+      summary: Verify the organization's audit journal hash chain
+      description: >
+        Walks the caller's own organization's R-AUD-1 chain and reports
+        whether it verifies — never the records themselves; see the threat
+        model's §4.8.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditVerifyResult"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    OrgID:
+      name: org_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    PayloadTooLarge:
+      description: >
+        request body above the route's ceiling (64 KiB for creating a secret,
+        4 KiB for issuing a token); error_class payload_too_large, the body is
+        never echoed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadRequest:
+      description: malformed request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    StoreRef:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        provider:
+          type: string
+    Secret:
+      type: object
+      description: threat model §4.3 Secret row — the closed field list
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scope:
+          type: string
+        class:
+          type: string
+        type:
+          type: string
+        description:
+          type: string
+        store:
+          $ref: "#/components/schemas/StoreRef"
+        provider_ref:
+          type: string
+          description: a locator (builtin://, op://, sops://, vault://), never a free string
+        current_version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        owner:
+          type: string
+    SecretVersion:
+      type: object
+      description: threat model §4.3 Version row — the closed field list
+      properties:
+        version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        fingerprint:
+          type: string
+          description: kfp1:<key_id>:<base32(HMAC-SHA256)[0:10]> — never the value
+        length:
+          type: integer
+        status:
+          type: string
+          enum: [current, previous, disabled, erased]
+    Carrier:
+      type: object
+      description: threat model §4.3 Carrier row — the closed field list
+      properties:
+        id:
+          type: string
+          format: uuid
+        secret_id:
+          type: string
+          format: uuid
+        host:
+          type: string
+        runner_id:
+          type: string
+          format: uuid
+        target:
+          type: object
+          properties:
+            kind:
+              type: string
+            path:
+              type: string
+        consumer:
+          type: string
+        healthcheck:
+          type: string
+        status:
+          type: string
+          enum: [registered, stale, unknown]
+        last_verified_at:
+          type: string
+          format: date-time
+        fingerprint_match:
+          type: boolean
+    RegisterCarrierRequest:
+      type: object
+      required: [version, host, target_kind, target_path]
+      properties:
+        version:
+          type: string
+        host:
+          type: string
+        target_kind:
+          type: string
+          enum: [env-file, file, launchd-env, systemd-credential, mcp-config, hermes-config]
+        target_path:
+          type: string
+        target_field:
+          type: string
+        consumer:
+          type: string
+    CreateSecretRequest:
+      type: object
+      required: [scope_level, scope_id, name, class, type, provider_ref]
+      properties:
+        scope_level:
+          type: string
+          enum: [org, ws, proj, user]
+        scope_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        class:
+          type: string
+        type:
+          type: string
+        description:
+          type: string
+        provider_ref:
+          type: string
+    IssueTokenRequest:
+      type: object
+      required: [kind, principal_id, scope]
+      properties:
+        kind:
+          type: string
+          enum: [a, s]
+          description: agent or service — never a user token
+        principal_id:
+          type: string
+          format: uuid
+        scope:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+    IssueTokenResponse:
+      type: object
+      description: >
+        identity.IssueResponse's own closed shape — "token" is this route's
+        one documented exception to the threat model's per-object field
+        lists (no §4.3 row covers token issuance; raised with Calvin)
+      properties:
+        token:
+          type: string
+        token_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+    Result:
+      type: object
+      description: threat model §4.3 result shape, this route's subset
+      properties:
+        ok:
+          type: boolean
+        request_id:
+          type: string
+    AuditVerifyResult:
+      type: object
+      description: threat model §4.8/§4.3 audit-verify-result row — the closed field list
+      properties:
+        ok:
+          type: boolean
+        request_id:
+          type: string
+        checked:
+          type: integer
+          format: int64
+        broken_id:
+          type: string
+          description: a ULID, or "(malformed id)" — never the raw id column value
+        broken_position:
+          type: integer
+          format: int64
+        break_kind:
+          type: string
+          enum: [hash, link, sequence, head]
+    Version:
+      type: object
+      required: [commit, build_time]
+      properties:
+        commit:
+          type: string
+          description: 40-digit lowercase hex commit, or "unknown"
+          pattern: "^([0-9a-f]{40}|unknown)$"
+        build_time:
+          type: string
+          description: RFC 3339 build time, or empty when unknown
+    Error:
+      type: object
+      description: threat model §4.3 Error row — the closed field list
+      properties:
+        error_class:
+          type: string
+        message:
+          type: string
+        request_id:
+          type: string

@@ -1,0 +1,127 @@
+# Input of scripts/mutation-select.py. One directive per line, '#' starts a comment.
+#
+#   script <id> roots=<pkg>[,<pkg>...] [always]
+#       <id> is the mutation script: scripts/check-<id>-mutations.sh (or
+#       scripts/<id>-mutations.sh). roots are the packages (relative to the
+#       module, 'dir/...' = everything below) whose code the script mutates or
+#       whose tests it runs. The script is selected when a changed package is a
+#       root or anything a root (or its tests) imports, transitively.
+#       'always' = security zone: selected on every diff.
+#
+#   path <glob> -> pkg <package>[,<package>...]
+#       Links that imports do not show: a file under <glob> counts as a change
+#       to those packages. A path matched by no rule and by no package
+#       directory is "unknown" and selects every script.
+#
+#   path <glob> -> script <id>[,<id>...]
+#       A file outside the import graph that those scripts mutate or test:
+#       a change selects exactly them, not the security zone.
+#
+#   path <glob> -> inert
+#       Changing it cannot alter any mutation result.
+#
+# Fixed rules in the selector (not in this file): go.mod, go.sum,
+# .golangci.yml, internal/testutil/**, internal/zonecheck/**, the selector,
+# this map, scripts/mutation-range.py and scripts/generate-mutation-pipeline.py
+# select every script.
+# A file under scripts/ selects the scripts and post-review jobs that run it
+# (directly or through other scripts), every script if several post-review
+# jobs share it, and nothing if no mutation suite runs it. A change to
+# .gitlab-ci.yml selects the post-review jobs whose definitions changed, or
+# every one if it touches workflow/variables/default, the selection jobs, or a
+# template, extends parent or anchor a post-review job is built from;
+# .gitlab/ci/full-tests.yml (the test child pipeline) selects nothing, any
+# other file under .gitlab/ci/ is unknown. A file under <package>/testdata/
+# counts as a change to <package>; a non-Go file directly in a package
+# directory (embedded assets) likewise. The security zone ('always') is
+# selected by every diff that changes a package.
+
+# ── security zone: always selected ───────────────────────────────────────
+script sealer          roots=internal/builtin/sealer always
+script fingerprint     roots=pkg/fingerprint always
+script execpolicy      roots=pkg/execpolicy always
+script providertest    roots=pkg/provider/providertest always
+script bootstrap-org   roots=cmd/keep-server,internal/tenancy,internal/identity,internal/audit,internal/builtin/orgpki,internal/catalog,internal/store
+script identity        roots=internal/identity,internal/obs,internal/reqid,internal/tokenshape,cmd/keep-server always
+script identity-attack roots=internal/identity,internal/obs,internal/testutil/canary,test/... always
+script audit           roots=internal/audit,internal/obs,cmd/keep-server always
+script loghygiene      roots=internal/store,internal/testutil/pgscratch,cmd/keep-server always
+script targets         roots=internal/targets,pkg/runnerproto always
+script runnerproto     roots=pkg/runnerproto always
+script deploy          roots=internal/runner/deploy always
+script discovery       roots=internal/runner/discover always
+script health          roots=internal/runner/health always
+script loop            roots=internal/runner/loop,internal/builtin,cmd/keep-runner,pkg/fingerprint,pkg/secret always
+script execrun         roots=internal/runner/execrun,pkg/execpolicy,pkg/secret always
+# Scans every tracked file outside docs/ and must pass on the real tree first, so any file can turn it red.
+script public-hygiene  roots=pkg/secret always
+script resolve-callers roots=internal/api,cmd/keep-server,internal/builtin always
+script runner-enroll   roots=cmd/keep-runner,cmd/keep-server,cmd/keep,internal/api,internal/builtin/...,internal/registry,internal/enrolltoken,internal/mtls,internal/runner/...,internal/config,internal/store always
+
+# ── selected by the dependency graph ─────────────────────────────────────
+script netns           roots=internal/runner/execrun
+script approvals       roots=internal/api,internal/deployment,internal/identity,internal/notify,cmd/keep-server
+script tenancy         roots=internal/tenancy,internal/catalog,internal/identity
+script carriers        roots=internal/carriers
+script rotation        roots=internal/rotation,test/security
+script rotate-audit    roots=internal/rotation,internal/api,internal/audit,internal/deployment,cmd/keep-server
+script rotation-wiring roots=cmd/keep-server,internal/rotation/...,internal/intake/...,internal/api,internal/store,internal/deployment
+script mesh-plugin     roots=cmd/keep-server/app,internal/config,pkg/provider,pkg/provider/svctoken,pkg/rotation,pkg/secret
+script mesh-rotation-e2e roots=internal/rotation,internal/store,internal/targets,pkg/rotation,pkg/secret,cmd/keep-server,cmd/keep-server/app
+script lanepoller      roots=internal/testutil/canary
+script carrier-verify  roots=internal/deployment,internal/dispatch,internal/api,internal/audit,internal/store,test/...
+script deployment      roots=internal/deployment,internal/store
+script mesh            roots=cmd/keep-server,internal/api,internal/meshext,internal/testutil/meshfake,internal/identity,internal/builtin,pkg/fingerprint,internal/store
+script keylevel-reconcile roots=cmd/keep-server,internal/builtin,internal/reqid,internal/audit
+script mesh-ui         roots=cmd/keep-server,internal/api,internal/meshext,internal/testutil/meshfake,internal/identity,internal/store
+script mesh-ui-browser roots=cmd/keep-server,internal/api,internal/meshext,internal/testutil/meshfake,internal/identity,internal/store
+script meshgate        roots=internal/meshgate,pkg/gatecard,internal/deployment,internal/api,cmd/keep-server,internal/store
+script mesh-hierarchy  roots=cmd/keep-server,internal/api,internal/meshext,internal/builtin,internal/store
+script deploy-api      roots=cmd/keep,cmd/keep-runner,cmd/keep-server,internal/api,internal/deployment,internal/apperr
+script dispatch        roots=internal/dispatch,internal/api,internal/builtin/...,internal/store,pkg/runnerproto,pkg/fingerprint,pkg/secret,cmd/keep-server
+script builtin         roots=internal/builtin,internal/builtin/...,pkg/...
+script keep-cli        roots=cmd/keep,cmd/keep-server,pkg/...
+script intake-browser  roots=internal/api,internal/builtin,web/intake
+script intake-page     roots=internal/api,internal/builtin,internal/intake/...,web/intake
+script intake-receiver roots=internal/builtin
+script intake-service  roots=cmd/keep,cmd/keep-server,internal/api,internal/builtin,internal/builtin/sealer,internal/catalog,internal/intake/...,internal/config,internal/metatext,internal/tenancy,internal/store,web/intake
+script metadata        roots=internal/api,internal/catalog,internal/metatext,internal/tenancy
+script mcp             roots=internal/mcp
+script pgscratch       roots=internal/testutil/pgscratch,test/security
+
+# ── links imports do not show ────────────────────────────────────────────
+# Migrations are applied by every test that opens a scratch database.
+path internal/store/migrations/** -> pkg internal/store,internal/testutil/pgscratch
+path mesh-extension.json -> pkg cmd/keep-server
+path mesh-extension.keep-rotator.json -> pkg cmd/keep-server
+# A Go module of its own, outside the root import graph: no root package
+# imports it. Its own suites and meshgate (which mutates plugins/mesh/gate.go)
+# run on it.
+# The lane poller is in the same module; besides the module suites, its own
+# mutation script runs on it (first matching rule wins, so these come first).
+path plugins/mesh/lanepoller/** -> script lanepoller,mesh-plugin,mesh-rotation-e2e,meshgate
+path plugins/mesh/cmd/keep-lane-poller/** -> script lanepoller,mesh-plugin,mesh-rotation-e2e,meshgate
+path plugins/mesh/** -> script mesh-plugin,mesh-rotation-e2e,meshgate
+
+# ── cannot change a mutation result ──────────────────────────────────────
+path **/*.md -> inert
+path docs/** -> inert
+path LICENSE -> inert
+path NOTICE -> inert
+# Read only by the tests of deploy and internal/version, which no mutation
+# script runs; the image itself is built and smoke-tested outside post-review.
+path Dockerfile -> inert
+# Read only by internal/api's openapi_test, which compares it with the route
+# table. On main both sides agree (full-tests is a merge gate), so a mutant of
+# the route table is killed the same way whatever the document says.
+path api/openapi.yaml -> inert
+#
+# Deliberately not here:
+# - .gitlab-ci.yml: the selector compares job definitions and selects the
+#   post-review jobs whose definition changed (everything for a shared key).
+# - scripts/mutation-*: the selector, the range and the generator select
+#   everything (they decide what runs); the other files are followed through
+#   the scripts that name them, like any script.
+# - internal/zonecheck/plaintext_api.txt: the export list of the plaintext
+#   zone. A change moves the boundary every security-zone suite relies on,
+#   so it selects everything (fixed rule in the selector).

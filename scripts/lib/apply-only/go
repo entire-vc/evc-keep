@@ -1,0 +1,30 @@
+#!/bin/sh
+# First on PATH in an apply-only mutation run (scripts/mutation-helpers.sh).
+# Applying a mutation needs no Go toolchain run: a suite that reaches one here
+# did not skip its baseline or tests. Fail, and leave a mark for the driver
+# (scripts/check-mutant-anchors.sh), since the suite may read the failure as a
+# caught mutant.
+case ${1:-} in
+	env | version) ;;
+	*)
+		echo "FAIL apply-only: go ${1:-} started; the suite must stop after applying its mutations" >&2
+		if [ -n "${MUTATION_APPLY_ONLY_TRAP:-}" ]; then
+			echo "go ${1:-}" >>"$MUTATION_APPLY_ONLY_TRAP"
+		fi
+		exit 97 ;;
+esac
+# Drop this directory from PATH, under any spelling (symlinked temp dirs), so
+# exec reaches the real toolchain instead of this script again.
+self=$(cd "$(dirname "$0")" && pwd -P)
+rest= IFS_SAVE=$IFS
+IFS=:
+for dir in $PATH; do
+	if [ -n "$dir" ] && [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$self" ]; then
+		continue
+	fi
+	rest=${rest:+$rest:}$dir
+done
+IFS=$IFS_SAVE
+PATH=$rest
+export PATH
+exec go "$@"

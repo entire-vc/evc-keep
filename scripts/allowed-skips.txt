@@ -1,0 +1,50 @@
+# Tests that may report "--- SKIP" in a check-no-silent-skip.sh run.
+# One test per line: <name or Parent/subtest> <reason>. Anything that skips
+# and is not listed here fails the run, so a dependency that silently went
+# missing from a CI image is red instead of a quiet "ok".
+# Adding a line is a review decision: say who runs the test for real.
+
+# Executed for real, and fail on SKIP, by the targets-loaders job
+# (scripts/check-targets-loaders.sh): need a Hermes venv / trusted systemd-creds.
+TestHermesConfigReadableByHermesLoader      loader job runs it (KEEP_HERMES_PYTHON)
+TestHermesConfigRefusesEveryKnownKeyInValue loader job runs it (KEEP_HERMES_PYTHON)
+TestTargetsAttack_HermesDifferentialLoader  loader job runs it (KEEP_HERMES_PYTHON)
+TestSystemdCredentialWithBinary             loader job runs it (trusted /usr/bin/systemd-creds)
+
+# Need CAP_NET_ADMIN (KEEP_NETNS_TESTS=1). Executed for real, and checked to PASS, by the
+# netns-tests job (scripts/check-netns-ran.sh): they skip everywhere else.
+TestNetnsNoneIsolates                                netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsAllowlistPinsDestinations                   netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsChildIsUnprivileged                         netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsInsideRulesetIsDefaultDropWithThePinnedPair netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsLeavesNothingBehind                         netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsSweepRemovesStrays                          netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestRunWithRealIsolatorNone                          netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsAllowlistReachesARemoteHost                 netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsRefusesWithoutRootOrWithARootChild          netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsRunSweepsWhatLeftTheProcessGroup            netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsUnenforcedChildRunsAsItsOwnAccount          netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsRunRefusesWhileTheAccountHasAProcess        netns-tests job runs it (KEEP_NETNS_TESTS=1)
+TestNetnsRunSweepsNestedSharedDirectories            netns-tests job runs it (KEEP_NETNS_TESTS=1)
+
+# Needs a hard core-size limit above 0; container runners often start with 0.
+TestRunChildCannotDumpCore                           host-bound: RLIMIT_CORE hard limit is 0 in CI containers
+
+# Demonstration of a red suite, opt-in by design (KEEP_CONFORMANCE_DEMO_RED=1).
+TestDemoBrokenStubThroughRun                demo, skips by design
+
+# Real launchd / systemd units: opt-in, platform-bound.
+TestLaunchdRealRestartAndHealthcheck        darwin-only, opt-in (KEEP_LAUNCHD_INTEGRATION)
+TestSystemdRealRestartAndHealthcheck        linux-only, opt-in (KEEP_SYSTEMD_INTEGRATION)
+
+# Needs python3, absent from the alpine CI image; the helper is exercised on hosts that have it.
+TestRunnerCheck_FieldNameEchoLiveChannel    python3 not on PATH
+
+# W3 attack stubs: pending until the W3 target exists (scripts/check-w3-stubs.sh tracks them).
+TestW3_A03_SamePrefixValueIsStale           pending target
+TestW3_A04_FingerprintIsKeyedHMACNotSha256  pending target
+TestW3_A05_ScannerStaysInsideList           pending target
+TestW3_A06_ScannerRefusesSymlink            pending target
+TestW3_A10_ForeignTenantCarriersInvisible   pending target
+TestW3_A11_CarrierGuessOracleBlocked        pending target
+TestW3_A13_AgentCannotInjectRotationValue   pending target

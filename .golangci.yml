@@ -1,0 +1,273 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - gosec
+    - depguard
+    - forbidigo
+    - gocritic
+  settings:
+    gocritic:
+      disable-all: true
+      enabled-checks: [ruleguard]
+      settings:
+        ruleguard:
+          rules: '${config-path}/scripts/lint/descriptor-sign.go'
+          failOn: all
+    depguard:
+      # Import boundaries that keep a plaintext secret away from every
+      # surface that talks to a caller (threat model, contract 4.4).
+      # scripts/check-import-boundaries.sh proves in CI that these rules fail.
+      rules:
+        secret-value:
+          files:
+            - "**/internal/api/**"
+            - "**/internal/mcp/**"
+            - "**/internal/audit/**"
+            - "**/internal/intake/**"
+            - "**/web/intake/**"
+            - "**/cmd/keep/**"
+          deny:
+            - pkg: github.com/entire-vc/evc-keep/pkg/secret
+              desc: "plaintext secret.Value must not reach API, MCP, audit, intake or CLI code"
+        # The runner protocol carries names, versions and fingerprints, never
+        # a value (ADR-001, runner protocol). It must not even see the type.
+        runnerproto-no-plaintext:
+          files:
+            - "**/pkg/runnerproto/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/entire-vc/evc-keep/pkg/secret
+              desc: "the runner protocol never carries a plaintext value"
+        # Exclusion globs (`!...`) are anchored with ${base-path}: a bare
+        # `!**/zone/**` also matched the zone name nested under an unrelated
+        # package (internal/api/internal/builtin/x.go) and gave it the zone's
+        # trust. Positive globs keep `**/`: a nested lookalike there only
+        # gets MORE rules, never fewer. scripts/check-import-boundaries.sh
+        # carries one nested-lookalike probe per exclusion.
+        sealer:
+          files:
+            - $all
+            - "!${base-path}/internal/builtin/**"
+          deny:
+            - pkg: github.com/entire-vc/evc-keep/internal/builtin/sealer
+              desc: "only the built-in provider may call the sealer"
+        # Threat model 4.1, guard (d): no bare digest of a value anywhere.
+        # Plaintext is reachable only inside the plaintext zone (rule
+        # expose-callers below); inside it, only pkg/fingerprint may import a
+        # hash or MAC. Outside the zone hashing stays allowed (token hashes,
+        # audit chain) because there is no value there to hash.
+        plaintext-digest:
+          files:
+            - "**/pkg/secret/**"
+            - "**/pkg/provider/**"
+            - "**/internal/builtin/**"
+            - "**/internal/runner/**"
+            - "**/internal/targets/**"
+            - "!${base-path}/pkg/fingerprint/**"
+          deny:
+            - pkg: crypto/sha
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: crypto/md5
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: crypto/hmac
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: crypto/hkdf
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: crypto/pbkdf2
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: hash
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/blake2
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/sha3
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/md4
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/ripemd160
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/argon2
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/scrypt
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/hkdf
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+            - pkg: golang.org/x/crypto/pbkdf2
+              desc: "digest of a plaintext value: use pkg/fingerprint (threat model 4.1)"
+        # The Mesh handlers carry secrets as strings in internal/api (the
+        # handshake's signing secret, a secret put by Mesh). Their digests and
+        # MACs are computed and compared in the zone, through MeshVault; no
+        # Mesh file of internal/api may hash or compare. The two exclusions
+        # each hold one function: the hash of a signed request body and the
+        # CSRF comparison of the Mesh screen.
+        mesh-handshake-digest:
+          files:
+            - "**/internal/api/mesh*.go"
+            - "!$test"
+            - "!${base-path}/internal/api/mesh_body_digest.go"
+            - "!${base-path}/internal/api/mesh_ui_csrf.go"
+          deny:
+            - pkg: crypto/sha
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+            - pkg: crypto/md5
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+            - pkg: crypto/hmac
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+            - pkg: crypto/hkdf
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+            - pkg: crypto/pbkdf2
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+            - pkg: crypto/subtle
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+            - pkg: hash
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+            - pkg: golang.org/x/crypto
+              desc: "the handshake's signing secret is digested and compared only in the zone (MeshVault, pkg/fingerprint)"
+        # HPKE primitives are confined to intake and runner delivery. Tests may
+        # construct attacker ciphertexts and interoperability controls.
+        intake-circl:
+          files:
+            - $all
+            - "!$test"
+            - "!${base-path}/internal/builtin/intake*.go"
+            - "!${base-path}/internal/builtin/delivery.go"
+          deny:
+            - pkg: github.com/cloudflare/circl
+              desc: "HPKE primitives belong only in intake and runner delivery"
+        # Zone internals are reachable only from the zone and from the binary
+        # that wires them, so an export from them cannot reach server code.
+        zone-internals:
+          files:
+            - $all
+            - "!${base-path}/pkg/secret/**"
+            - "!${base-path}/pkg/fingerprint/**"
+            - "!${base-path}/pkg/provider/**"
+            - "!${base-path}/internal/builtin/**"
+            - "!${base-path}/internal/runner/**"
+            - "!${base-path}/internal/targets/**"
+            - "!${base-path}/cmd/keep-server/**"
+            - "!${base-path}/cmd/keep-runner/**"
+          deny:
+            - pkg: github.com/entire-vc/evc-keep/internal/runner
+              desc: "runner internals are reachable only from the plaintext zone and cmd/keep-runner"
+            - pkg: github.com/entire-vc/evc-keep/internal/targets
+              desc: "target internals are reachable only from the plaintext zone and cmd/keep-runner"
+            - pkg: github.com/entire-vc/evc-keep/internal/builtin
+              desc: "builtin provider internals are reachable only from the plaintext zone and cmd/keep-server"
+            # svctoken.Store.Token returns the service token as text for an
+            # Authorization header. Only the binary that wires it may call it.
+            - pkg: github.com/entire-vc/evc-keep/pkg/provider/svctoken
+              desc: "svctoken hands out token text: reachable only from the plaintext zone and cmd/keep-server"
+        # reflect reads unexported fields (a Value's bytes included) and
+        # unsafe reads anything. Production code needs neither; tests may.
+        no-reflect:
+          files:
+            - $all
+            - "!$test"
+          deny:
+            - pkg: reflect
+              desc: "reflect can read a secret.Value's unexported bytes; not allowed outside tests"
+            - pkg: unsafe
+              desc: "unsafe can read a secret.Value's bytes; not allowed outside tests"
+    forbidigo:
+      analyze-types: true
+      forbid:
+        # The plaintext zone: the only code that may read a value's bytes.
+        # Everywhere else Expose is an error (exclusions below lift it).
+        - pattern: '^secret\.Expose$'
+          pkg: '^github\.com/entire-vc/evc-keep/pkg/secret$'
+          msg: "expose-callers: plaintext is readable only in pkg/fingerprint, pkg/provider, internal/builtin, internal/runner, internal/targets"
+        - pattern: '^fingerprint\.ExposeKey$'
+          pkg: '^github\.com/entire-vc/evc-keep/pkg/fingerprint$'
+          msg: "fpkey-expose: fingerprint key bytes are readable only in pkg/fingerprint, internal/builtin, internal/runner"
+        - pattern: '^hpke\.(KDF_.*|KDF\.(Extract|Expand))$'
+          pkg: '^github\.com/cloudflare/circl/hpke$'
+          msg: "intake-kdf: HKDF is permitted only in intake.go and tests"
+        - pattern: '^(ed25519\.(Sign|PrivateKey\.Sign)|ecdsa\.(Sign.*|PrivateKey\.Sign)|rsa\.(Sign.*|PrivateKey\.Sign))$'
+          pkg: '^crypto/(ed25519|ecdsa|rsa)$'
+          msg: "descriptor-sign: signing is permitted only for job and intake descriptors"
+        - pattern: '^crypto\.Signer\.Sign$'
+          pkg: '^crypto$'
+          msg: "descriptor-sign: signing is permitted only for job and intake descriptors"
+        # An identity token's text leaves its type only where it is minted,
+        # hashed and returned once (internal/identity); anywhere else the
+        # Token type redacts itself, and Reveal would undo that. Reveal is a
+        # package function, not a method of Token, for the same reason
+        # secret.Expose is a package function of pkg/secret: a method can be
+        # reached through an interface or a generic constraint asking only
+        # for a Reveal() string method, which this rule's type-based match
+        # cannot see through (the type at the call site is the interface,
+        # not identity.Token) — see nocompile probe "iface-token" in
+        # scripts/check-import-boundaries.sh.
+        - pattern: '^identity\.Reveal$'
+          pkg: '^github\.com/entire-vc/evc-keep/internal/identity$'
+          msg: "token-reveal: an identity token's text is readable only in internal/identity"
+
+  exclusions:
+    rules:
+      - path: '^internal/builtin/intake\.go$|_test\.go$'
+        linters: [forbidigo]
+        text: "intake-kdf:"
+      - path: '^pkg/runnerproto/[^/]+\.go$|^internal/builtin/intake\.go$|^internal/builtin/orgpki/sign_job\.go$|_test\.go$'
+        linters: [forbidigo, gocritic]
+        text: "descriptor-sign:"
+      # Root-anchored: `(^|/)` previously matched the zone name nested
+      # ANYWHERE in the tree (e.g. a smuggled internal/api/pkg/secret/x.go
+      # would inherit the plaintext zone's trust), the same shape as the
+      # token-reveal hole fixed in 168d2bb. Unlike token-reveal, these two
+      # zones keep real subpackages (internal/builtin/sealer,
+      # pkg/provider/memory, pkg/provider/providertest) that must stay
+      # trusted, so the fix stops at `^` and does not also bound depth with
+      # `[^/]+\.go$`.
+      - path: '^(pkg/secret|pkg/fingerprint|pkg/provider|internal/builtin|internal/runner|internal/targets)/'
+        linters: [forbidigo]
+        text: "expose-callers:"
+      - path: '^(pkg/fingerprint|internal/builtin|internal/runner)/'
+        linters: [forbidigo]
+        text: "fpkey-expose:"
+      # internal/identity mints, hashes and returns a token's text; the
+      # attacks in test/security present it as a credential to hunt for, and
+      # internal/api's own e2e tests present it the same way — a real Bearer
+      # header for httptest requests against the router under test, the only
+      # way to exercise RequireAuth end to end. Nowhere else may call Reveal.
+      # Root-anchored, scoped to files directly in internal/identity or
+      # internal/api (not a subpackage of either, which would be a different
+      # import path the token-reveal rule shouldn't quietly trust), and to
+      # test/security's _test.go files only: `(^|/)` previously matched ANY
+      # nested "test/security/" directory (e.g. a smuggled
+      # internal/api/test/security/helper.go) and any file in it, not just
+      # the top-level attack-test package's actual tests.
+      # cmd/keep's e2e test spawns the built CLI against a real server and
+      # must hand it a real token (KEEP_TOKEN / token file) — one file only.
+      - path: '^internal/identity/[^/]+\.go$|^internal/api/[^/]+_test\.go$|^test/security/.*_test\.go$|^cmd/keep/cli_e2e_test\.go$'
+        linters: [forbidigo]
+        text: "token-reveal:"
+      # plugins/mesh is a separate module whose end-to-end test drives the real
+      # carrier engine (internal/targets) on tmp files and reads the fake test
+      # value back from a carrier to compare. One test file, root-anchored; the
+      # plugin's own code stays under both rules.
+      - path: '^plugins/mesh/e2e_test\.go$'
+        linters: [forbidigo]
+        text: "expose-callers:"
+      - path: '^plugins/mesh/e2e_test\.go$'
+        linters: [depguard]
+        text: "target internals are reachable only"
+      # The service-account tests seal a fake token in a memory-backed svctoken
+      # store and read the sink's copy back to prove the issued value is wiped.
+      # Two test files, root-anchored, fake values only; the plugin's own code
+      # stays under both rules.
+      - path: '^plugins/mesh/(ext|service)_test\.go$'
+        linters: [depguard]
+        text: "svctoken hands out token text"
+      - path: '^plugins/mesh/service_test\.go$'
+        linters: [forbidigo]
+        text: "expose-callers:"

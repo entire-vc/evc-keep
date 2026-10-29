@@ -1,0 +1,68 @@
+# Sourced only by check-keep-cli-mutations.sh. Existing whole-parent witnesses.
+cli_mutation_witness() {
+    case "$1" in
+        debug-leaks-authorization) printf '%s\n' 'TestCLI_TokenNeverLeaksToStdoutStderrOrDebug' ;;
+        wide-permission-accepted) printf '%s\n' 'TestResolveToken_RefusesWidePermissions' ;;
+        wide-permission-guard-removed) printf '%s\n' 'TestResolveToken_RefusesWidePermissions' ;;
+        group-readable-accepted) printf '%s\n' 'TestResolveToken_RefusesGroupReadableEvenWithoutOtherAccess' ;;
+        login-skips-chmod-fixup) printf '%s\n' 'TestRunLogin_WritesFileWithOwnerOnlyMode' ;;
+        login-echoes-token) printf '%s\n' 'TestCLI_LoginTokenNeverLeaks' ;;
+        login-echoes-token-file) printf '%s\n' 'TestCLI_LoginTokenFileNeverEchoesPath' ;;
+        unknown-command-echoes-argument) printf '%s\n' 'TestCLI_UnknownCommandNeverEchoesArgument' ;;
+        path-error-printed) printf '%s\n' 'TestCLI_TokenFileErrorsNeverEchoPath' ;;
+        link-error-printed) printf '%s\n' 'TestCLI_TokenFileErrorsNeverEchoPath' ;;
+        filesystem-error-guard-noop) printf '%s\n' 'TestCLI_TokenFileErrorsNeverEchoPath' ;;
+        token-permission-error-echoes-path) printf '%s\n' 'TestCLI_TokenFileErrorsNeverEchoPath' ;;
+        token-empty-error-echoes-path) printf '%s\n' 'TestCLI_TokenFileErrorsNeverEchoPath' ;;
+        login-help-fails) printf '%s\n' 'TestCLI_LoginHelpIsStaticAndSucceeds' ;;
+        name-resolution-swallows-miss) printf '%s\n' 'TestCLI_UnknownNameAnswersSecretNotFound' ;;
+        insecure-server-accepted) printf '%s\n' 'TestGlobalOptsNewClientRefusesInsecureServer' ;;
+        redirect-cap-removed) printf '%s\n' 'TestClientCheckRedirectCapsRedirectCount' ;;
+        login-drops-flagged-token-arg) printf '%s\n' 'TestRunLoginSubcommandRejectsTokenAfterFlags' ;;
+        login-leaks-extra-args-in-error) printf '%s\n' 'TestRunLoginSubcommandRejectsTokenAfterFlags' ;;
+        login-flagset-output-to-stderr) printf '%s\n' 'TestRunLoginSubcommandLeadingDashTokenNotEchoed' ;;
+        login-dash-token-cause-unnamed) printf '%s\n' 'TestRunLoginSubcommandLeadingDashTokenNamesCause' ;;
+        isloopback-always-true) printf '%s\n' 'TestRequireSecureURL' ;;
+        debug-trace-leaks-server-userinfo) printf '%s\n' 'TestClientDebugTraceRedactsServerUserinfo' ;;
+        redirect-downgrade-unchecked) printf '%s\n' 'TestClientRefusesRedirectToInsecureHost' ;;
+        login-positional-warning-silenced) printf '%s\n' 'TestCLI_LoginWithPositionalTokenWarns' ;;
+        server-parse-error-leaks-userinfo) printf '%s\n' 'TestGlobalOptsNewClientServerParseErrorDoesNotLeakUserinfo' ;;
+        debug-traces-response-body) printf '%s\n' 'TestCLI_MetadataCanaryStaysOutOfDebugTrace' ;;
+        refused-token-file-swallowed) printf '%s\n' 'TestCLI_RefusesWideOpenTokenFileAndNeverCallsTheServer' ;;
+        server-env-as-flag-default) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        redirect-host-unchecked) printf '%s\n' 'TestClientRefusesRedirectToDifferentHost' ;;
+        testmain-exits-past-defer) printf '%s\n' 'TestMainRemovesItsBinaryDirectory' ;;
+        audit-verify-ignores-broken-chain) printf '%s\n' 'TestCLI_AuditVerify_TamperedChain' ;;
+        audit-verify-unfiltered-fields) printf '%s\n' 'TestCLI_AuditVerify_FreeFormFieldsStayInsideClosedSets' ;;
+        audit-verify-unchecked-request-id) printf '%s\n' 'TestCLI_AuditVerify_FreeFormFieldsStayInsideClosedSets' ;;
+        reporterr-class-unfiltered) printf '%s\n' 'TestReportErrStripsControlCharsFromServerBody' ;;
+        reporterr-message-unfiltered) printf '%s\n' 'TestReportErrStripsControlCharsFromServerBody' ;;
+        printapierror-message-unfiltered) printf '%s\n' 'TestPrintAPIErrorStripsControlChars' ;;
+        printapierror-request-id-unfiltered) printf '%s\n' 'TestPrintAPIErrorStripsControlChars' ;;
+        safeclass-accepts-anything) printf '%s\n' 'TestReportErrStripsControlCharsFromServerBody' ;;
+        sanitize-control-filter-noop) printf '%s\n' 'TestReportErrStripsControlCharsFromServerBody' ;;
+        request-id-length-unchecked) printf '%s\n' 'TestSafeRequestIDRejectsEachBadShape' ;;
+        request-id-charset-lets-esc-through) printf '%s\n' 'TestSafeRequestIDRejectsEachBadShape' ;;
+        apierror-error-unfiltered) printf '%s\n' 'TestAPIErrorErrorIsTerminalSafe' ;;
+        sanitize-line-separators-kept) printf '%s\n' 'TestReportErrStripsControlCharsFromServerBody' ;;
+        output-cell-unfiltered) printf '%s\n' 'TestOutputWritersStripStoredControlChars' ;;
+        debug-header-dump-unfiltered) printf '%s\n' 'TestRedactedHeaderDumpStripsControlChars' ;;
+        sanitize-newline-kept) printf '%s\n' 'TestSanitizeControlHasPositiveControl' ;;
+        token-open-follows-symlink) printf '%s\n' 'TestResolveToken_RefusesSymlink' ;;
+        flag-parse-error-printed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        subcommand-help-fails) printf '%s\n' 'TestCLI_SubcommandHelpIsStaticAndSucceeds' ;;
+        runner-flagset-output-not-discarded) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        runner-unknown-command-echoes-argument) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        server-url-echoed-in-https-error) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        request-failure-detail-echoed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        secret-name-echoed-in-not-found) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        runner-server-ca-path-echoed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        runner-policy-error-echoed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        org-unescaped-and-build-error-echoed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        debug-trace-prints-full-url) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        runner-enroll-request-failure-echoed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        runner-revoke-request-failure-echoed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        runner-new-request-error-echoed) printf '%s\n' 'TestCLI_AnySubcommandNeverEchoesPastedValue' ;;
+        *) return 1 ;;
+    esac
+}
