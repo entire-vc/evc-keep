@@ -1,0 +1,30 @@
+# systemd unit for keep-server installed as /usr/local/bin/keep-server.
+# Configuration comes from /etc/keep/keep-server.env (mode 0600, root-owned;
+# see deploy/keep-server.env.example for the variable names).
+# Run `keep-server migrate up` before the first start and after each upgrade.
+[Unit]
+Description=Keep server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keep
+Group=keep
+EnvironmentFile=/etc/keep/keep-server.env
+ExecStart=/usr/local/bin/keep-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

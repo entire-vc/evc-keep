@@ -1,0 +1,7 @@
+#!/bin/sh
+# First on PATH in an apply-only mutation run: see scripts/lib/apply-only/go.
+echo "FAIL apply-only: node started; the suite must stop after applying its mutations" >&2
+if [ -n "${MUTATION_APPLY_ONLY_TRAP:-}" ]; then
+	echo node >>"$MUTATION_APPLY_ONLY_TRAP"
+fi
+exit 97

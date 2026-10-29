@@ -1,0 +1,27 @@
+# Build artifacts
+/bin/
+*.test
+*.out
+
+# Go
+/.gocache/
+/.gomodcache/
+
+# Tool-specific instruction files — not part of this repository.
+# Human/agent norms for this repo live in CONTRIBUTING.md and SECURITY.md.
+CLAUDE.md
+CLAUDE-*.md
+.claude/
+dev-docs/
+
+# Local tool logs
+/logs/
+
+# Local editor/OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Python bytecode
+__pycache__/

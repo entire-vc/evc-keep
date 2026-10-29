@@ -1,0 +1,21 @@
+{
+  "schema": 1, "id": "keep-rotator", "name": "Keep rotator", "version": "0.1.0",
+  "kind": "plugin", "runtime": "external", "mesh_api": ">=1 <2",
+  "publisher": "entire-vc",
+  "description": "Service account of Keep that rotates Mesh agent keys and its own token. No events, no screens.",
+  "category": "security", "license": "Apache-2.0",
+  "levels": { "instance": true, "workspace": true, "project": false },
+  "settings": {
+    "instance": { "type": "object", "properties": {
+      "keep_url": { "type": "string", "format": "uri", "title": "Keep URL" } },
+      "required": ["keep_url"] }
+  },
+  "capabilities": {
+    "api": ["agent_keys:read", "agent_key:rotate", "ext_token:self_rotate"],
+    "secrets": []
+  },
+  "external": {
+    "base_url_setting": "keep_url", "health_path": "/healthz",
+    "install_path": "/mesh/install", "events_path": "/mesh/events"
+  }
+}

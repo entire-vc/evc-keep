@@ -1,0 +1,29 @@
+{
+  "schema": 1, "id": "keep", "name": "Keep", "version": "0.6.4",
+  "kind": "plugin", "runtime": "external", "mesh_api": ">=1 <2",
+  "publisher": "entire-vc",
+  "description": "Store and distribute secrets to people and agents; values never enter model context.",
+  "category": "security", "license": "Apache-2.0",
+  "levels": { "instance": true, "workspace": true, "project": false },
+  "settings": {
+    "instance": { "type": "object", "properties": {
+      "keep_url": { "type": "string", "format": "uri", "title": "Keep URL" },
+      "org_key_level": { "type": "string", "enum": ["store", "org", "workspace"], "title": "Organization key level", "default": "store" } },
+      "required": ["keep_url"] },
+    "workspace": { "type": "object", "properties": {
+      "approvals_via_mesh": { "type": "boolean", "title": "Approvals through Mesh cards", "default": true } } }
+  },
+  "capabilities": {
+    "api": ["workspaces:read", "projects:read", "members:read", "agents:read", "agent_keys:read", "tasks:write", "comments:write", "secrets:write"],
+    "events": ["workspace.member.added", "workspace.member.removed", "project.created", "project.updated", "agent.key.issued", "agent.key.revoked", "task.gate.decided"],
+    "network": { "allowed_domains": ["{settings.keep_url}"], "reasoning": "calls to the Keep API" },
+    "ui": ["sidebar.item", "workspace.settings"],
+    "secrets": []
+  },
+  "external": {
+    "base_url_setting": "keep_url", "health_path": "/healthz",
+    "install_path": "/mesh/install", "events_path": "/mesh/events",
+    "token_path": "/mesh/token",
+    "ui": { "sidebar.item": { "path": "/mesh/ui/secrets", "title": "Keep", "icon": "key" } }
+  }
+}

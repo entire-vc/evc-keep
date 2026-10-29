@@ -1,0 +1,53 @@
+// Compiled only in check-intake-receiver-mutations.sh's private dependency
+// copy. That copy retains the actual Open buffer; production has no hook.
+package builtin
+
+import (
+	"context"
+	"github.com/cloudflare/circl/hpke"
+	"github.com/entire-vc/evc-keep/internal/builtin/sealer"
+	"github.com/entire-vc/evc-keep/internal/intake/descriptor"
+	"github.com/entire-vc/evc-keep/internal/testutil/canary"
+	"testing"
+)
+
+func TestIntakePlaintextWipe(t *testing.T) {
+	for _, refuse := range []bool{false, true} {
+		ctx := context.Background()
+		pool := testPool(t)
+		seal, _ := testSealer(t, pool)
+		p := New(pool, seal, sealer.Scope{Org: randID(t, "wipe-probe"), User: "alice"}, nil)
+		const request = "019a0000-0000-7000-8000-000000000001"
+		public, _, _, err := p.IntakeDescriptor(ctx, request, descriptor.Metadata{})
+		if err != nil {
+			t.Fatal("prepare wipe descriptor")
+		}
+		plain := []byte(canary.New().Value(1))
+		defer clear(plain)
+		enc, ct := intakeTestCiphertext(t, public, request, plain)
+		tx, err := pool.BeginTx(ctx, readCommitted)
+		if err != nil {
+			t.Fatal("begin wipe probe")
+		}
+		if refuse {
+			if _, err := tx.Exec(ctx, `DELETE FROM keep_envelope WHERE store_org=$1 AND secret_id=$2`, p.scope.Org, fpKeySecretID); err != nil {
+				t.Fatal("prepare wipe refusal")
+			}
+		}
+		hpke.IntakePlaintextProbe = nil
+		_, _, _, err = p.AcceptIntake(ctx, tx, request, "wipe-target", enc, ct)
+		_ = tx.Rollback(ctx)
+		if (err != nil) != refuse {
+			t.Fatal("wipe control did not reach intended result")
+		}
+		if len(hpke.IntakePlaintextProbe) != len(plain) {
+			t.Fatal("wipe probe did not observe Open buffer")
+		}
+		for _, b := range hpke.IntakePlaintextProbe {
+			if b != 0 {
+				t.Fatal("intake plaintext wipe missing")
+			}
+		}
+		hpke.IntakePlaintextProbe = nil
+	}
+}

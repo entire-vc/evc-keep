@@ -1,0 +1,167 @@
+# Full test matrix and browser coverage, generated into a child pipeline.
+.go-module-cache:
+  image: golang:1.25.14-alpine3.24@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59
+  variables:
+    GOMODCACHE: $CI_PROJECT_DIR/.gomodcache
+  cache:
+    key:
+      files: [go.mod, go.sum]
+      prefix: go-1.25.14-linux-amd64
+    paths: [.gomodcache/]
+    policy: pull
+
+.go-module-cache-bookworm:
+  image: golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
+  variables:
+    GOMODCACHE: $CI_PROJECT_DIR/.gomodcache
+  cache:
+    key:
+      files: [go.mod, go.sum]
+      prefix: go-1.25.14-linux-amd64
+    paths: [.gomodcache/]
+    policy: pull
+
+test:
+  resource_group: keep-test-$TEST_SUITE
+  rules:
+    - when: on_success
+  stage: test
+  extends: .go-module-cache
+  # 30m: the single core leg ran 1020-1120s under a 20m limit and timed out
+  # when the shared runner was loaded. core is now two shards; the limit stays
+  # generous because runner load, not test work, is what moves the duration.
+  timeout: 30m
+  parallel:
+    matrix:
+      - TEST_SUITE: [core-1, core-2, targets, targets-heavy]
+  services:
+    # auto_explain preloaded, disabled (its own default is -1) — so
+    # CheckLogSettings' auto_explain.log_min_duration check runs against a
+    # session where the setting actually exists, matching production
+    # (see internal/store/loghygiene.go's doc), while every other test
+    # keeps seeing the same disabled default it would see unloaded.
+    - name: postgres:17
+      alias: postgres
+      # Throwaway test database: skip fsync so CREATE/DROP DATABASE (each
+      # forces a checkpoint) do not stall on the shared runner disk.
+      command: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off", "-c", "shared_preload_libraries=auto_explain"]
+  variables:
+    # internal/targets tests write and fsync thousands of files; on the
+    # shared runner disk one fsync can take seconds (a test sat 9m54s in
+    # fsync). That test alone writes to this tmpfs directory, where fsync is
+    # a no-op; the code under test is unchanged. Not TMPDIR: /dev/shm is
+    # mounted noexec on the runner (the tests' fake binaries must run) and is
+    # only 64 MB (a -race build overflows it).
+    KEEP_TEST_TMPFS: /dev/shm
+    POSTGRES_DB: keep
+    POSTGRES_USER: keep
+    POSTGRES_PASSWORD: keep
+    KEEP_DATABASE_URL: "postgres://keep:keep@postgres:5432/keep?sslmode=disable&connect_timeout=5"
+    HEAVY_TARGETS: "^(TestEnvFileAcceptedFilesAreReadEntryPerLine|TestBareCharsEachByteThroughShell|TestTargetsAttack_LiveSymlinkFlipNeverEscapes|TestTargetsAttack_EnvFileDifferentialShells)$"
+  before_script:
+    # go test -race needs a C toolchain; alpine has none by default. bash,
+    # dash, zsh and mksh (ksh is not packaged for alpine; mksh is its
+    # closest available relative and is also what internal/targets' shell
+    # list already names) are the consumers TestTargetsAttack_EnvFileDifferentialShells
+    # sources the written env-file with — without at least one, that test
+    # would otherwise SKIP instead of running (it now hard-fails in CI
+    # instead, see its own os.Getenv("CI") check).
+    - apk add --no-cache git build-base bash dash zsh mksh nodejs
+    # Migrate once, here, before any test binary starts — not inside a
+    # test helper. `go test ./...` runs each package as a separate,
+    # concurrent OS process, and internal/identity's tests were the first
+    # to actually touch real tables: every test package independently
+    # calling migrate-up against this one shared service raced on the
+    # same CREATE TABLE ("relation already exists", 42P07), even with
+    # goose's own session-advisory-lock enabled (see
+    # internal/store.NewProvider's doc) — the lock serializes concurrent
+    # migrators, it doesn't make re-running a non-idempotent SQL migration
+    # safe. One migration, before test binaries exist to race each other,
+    # is the fix.
+    - go run ./cmd/keep-server migrate up
+  script:
+    # Not a bare `go test ./... -race`: without KEEP_DATABASE_URL,
+    # internal/store's tests silently t.Skip and `go test` prints "ok" —
+    # a skip and a pass look identical. This job always sets the var
+    # (above), so this call is also this repo's positive control that the
+    # guard itself still works. The script's own `go test` runs with
+    # `-p 1` — see its doc for why (internal/store's migration tests reset
+    # the whole schema mid-run, which races any other package's real-table
+    # queries under the default per-package parallelism).
+    # Require an explicit ash child as well as sh and dash in this Alpine job.
+    - TEMP_WORKSPACE_REQUIRE_ASH=1 ./scripts/check-temp-workspace.sh
+    - |
+      case "$TEST_SUITE" in
+        core-1|core-2)
+          packages=$(go list ./...)
+          packages=$(printf '%s\n' "$packages" | grep -v '/internal/targets$')
+          test -n "$packages"
+          # Two shards balanced by per-package seconds (scripts/core-shard-weights.txt;
+          # round-robin left core-2 at 900-960s against core-1 at 350-680s).
+          # The check proves the shards are an exact partition of the package list.
+          ./scripts/check-core-shards.sh
+          ./scripts/check-core-shard-balance.sh
+          shard=${TEST_SUITE#core-}
+          packages=$(printf '%s\n' "$packages" | ./scripts/core-shard.sh "$shard" 2)
+          test -n "$packages"
+          # Catalog contract findings remain measurements while the four known
+          # findings are open (organization errors, issuance fields, body size,
+          # and enumeration rate). Enable strict=all only after all four close.
+          # Explicitly clear inherited strict mode for this observation job;
+          # strict_all independently proves strict requirements fail tests.
+          # The inner limit sits below the job's 30m so a slow runner reads as
+          # CI-TIMEOUT in the log, not as a silent kill or a failing test.
+          # shellcheck disable=SC2086
+          timeout 1620 env KEEP_CATALOG_AUDIT_STRICT= ./scripts/check-no-silent-skip.sh $packages
+          rc=$?
+          # GNU timeout exits 124, busybox (this alpine image) 143.
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then echo "CI-TIMEOUT: suite $TEST_SUITE exceeded 27m (runner load, not a test failure)"; fi
+          exit "$rc"
+          ;;
+        # The four slowest internal/targets tests spawn shells by the
+        # hundred; under runner load they alone exceeded the 10m package
+        # deadline (pipeline 7233). They get a job of their own, and the
+        # other leg skips exactly them: run and skip share one list.
+        targets) KEEP_TEST_SKIP="$HEAVY_TARGETS" ./scripts/check-no-silent-skip.sh ./internal/targets/... ;;
+        targets-heavy) KEEP_TEST_RUN="$HEAVY_TARGETS" ./scripts/check-no-silent-skip.sh ./internal/targets/... ;;
+        *) echo "unknown test suite"; exit 1 ;;
+      esac
+
+# Browser crypto remains mandatory whenever the diff is not proven docs-only.
+# Its mutation suites run after review, in intake-browser-mutations
+# (.gitlab-ci.yml), only when the diff reaches them.
+intake-browser:
+  tags: [keep-intake]
+  rules:
+    - when: on_success
+  services:
+    - name: postgres:17
+      alias: postgres
+      command: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
+  variables:
+    KEEP_CHROMIUM_PROFILE_ROOT: /run/keep-chromium-profile
+    KEEP_MESH_UI_SHOTS: $CI_PROJECT_DIR/mesh-ui-shots
+    POSTGRES_DB: keep
+    POSTGRES_USER: keep
+    POSTGRES_PASSWORD: keep
+    KEEP_DATABASE_URL: "postgres://keep:keep@postgres:5432/keep?sslmode=disable&connect_timeout=5"
+  stage: test
+  extends: .go-module-cache-bookworm
+  cache:
+    policy: pull-push
+  timeout: 30m
+  artifacts:
+    when: always
+    expire_in: 2 weeks
+    paths: [mesh-ui-shots/*.png]
+  image: "$CI_REGISTRY_IMAGE/ci/intake-browser@sha256:b7f19981fd754b2dcfaf09b0ee5cdaa4b6cfbebd1233571c082676a9aee65c66"
+  before_script:
+    - test "$(node --version)" = v22.22.3
+    - go version && chromium --version && python3 --version
+  script:
+    - node scripts/test_chromium_startup.mjs
+    - go run ./cmd/keep-server migrate up
+    - ./scripts/check-intake-browser.sh
+    # The Mesh screen in a real browser, framed from another origin. The proof it
+    # can fail (check-mesh-ui-browser-mutations.sh) runs in intake-browser-mutations.
+    - go test -race -tags mesh_ui_browser -timeout 240s -count=1 -run '^TestMeshUIBrowserScenario$' ./cmd/keep-server/app

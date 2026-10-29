@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Secure input · Keep</title><style>{{.Style}}</style></head>
+<body><header><a aria-label="Keep">KEEP<span> / SECURE INPUT</span></a><span class="badge">ONE USE</span></header>
+<main><div class="eyebrow">A PRIVATE HANDOFF</div><h1>Share a secret.<br>Keep it protected.</h1><p class="intro">Your input is encrypted in this browser before it is sent to the selected storage.</p>
+<section class="card" aria-label="Input request"><div class="card-top"><span>INPUT REQUEST</span><span class="badge" id="metadata-Class">{{metadataText .Class}}</span></div><h2 id="metadata-SecretName">{{metadataText .SecretName}}</h2>
+<dl><div><dt>Requested by</dt><dd id="metadata-RequestedBy">{{metadataText .RequestedBy}}</dd></div>{{if .Sponsor}}<div><dt>Sponsor</dt><dd id="metadata-Sponsor">{{metadataText .Sponsor}}</dd></div>{{end}}<div><dt>Scope</dt><dd id="metadata-Scope">{{metadataText .Scope}}</dd></div><div><dt>Storage</dt><dd id="metadata-StoreName">{{metadataText .StoreName}}</dd></div></dl>
+<form data-request="{{.RequestID}}" data-public="{{.PublicKey}}" data-signing="{{.SigningKey}}" data-signature="{{.Signature}}"><label for="secret">Secret value</label><textarea id="secret" name="secret" rows="4" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" disabled required placeholder="Enter the value to protect"></textarea><p class="hint">Confirm the requester and storage before continuing. This link works once.</p><button type="submit" disabled>Encrypt &amp; save <span aria-hidden="true">→</span></button></form>
+<div id="result" hidden><h3>Input saved</h3><p>Version <strong id="version"></strong></p><label>Fingerprint</label><code id="fingerprint"></code></div>
+<p id="status" role="status" aria-live="polite">Verifying this link…</p></section><footer>No account needed. Your input is never stored in browser storage.</footer></main>
+<script src="/input/assets.js" integrity="{{.Integrity}}" crossorigin="anonymous" defer></script></body></html>

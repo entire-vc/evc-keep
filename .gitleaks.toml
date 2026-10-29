@@ -1,0 +1,35 @@
+# gitleaks config for evc-keep. useDefault keeps every stock rule (AWS
+# keys, private keys, generic high-entropy secrets, …) — this file only
+# ADDS Keep's own token format, it does not replace the defaults.
+#
+# See CONTRIBUTING.md and .gitlab-ci.yml's secret-scan job.
+
+title = "evc-keep gitleaks config"
+
+[extend]
+useDefault = true
+
+# Keep's own token shape: keep_<kind>_<base32(32 random bytes)>, kind in
+# {a,s,u} — see internal/identity/token.go. The literal "keep_" prefix
+# plus kind letter exists specifically so a scanner can recognize a token
+# on sight without needing entropy heuristics; this rule matches that
+# shape directly rather than relying on the default generic-api-key rule,
+# which is entropy-gated and not guaranteed to fire on every token.
+[[rules]]
+id = "keep-identity-token"
+description = "Keep identity token (agent/service/user)"
+regex = '''keep_[asu]_[a-z2-7]{52}'''
+tags = ["keep", "secret"]
+
+# RFC 9180's published keys and example messages are inert interoperability fixtures.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+paths = ['''^web/intake/testdata/rfc9180-x25519-aes256\.json$''']
+# The runner enrollment token — internal/enrolltoken/token.go. Same
+# reasoning as keep-identity-token above, distinct literal ("renr") so this
+# rule and that one can each be narrowed or widened independently.
+[[rules]]
+id = "keep-runner-enroll-token"
+description = "Keep runner enrollment token"
+regex = '''keep_renr_[a-z2-7]{52}'''
+tags = ["keep", "secret"]
