@@ -58,9 +58,10 @@ configures:
 
 - `keep-server` connects to its PostgreSQL database (`KEEP_DATABASE_URL`).
 - With the Mesh integration enabled, `keep-server` calls the Mesh API at
-  `KEEP_MESH_URL` (workspace and agent metadata, approval cards, comments,
-  token verification keys), and Mesh calls Keep at the configured
-  `keep_url`.
+  `KEEP_MESH_URL` (workspace and agent metadata, approval cards, token
+  verification keys), and Mesh calls Keep at the configured `keep_url`.
+  What each Mesh permission is used for is listed under
+  [Permissions](#permissions).
 - If `KEEP_TELEGRAM_BOT_TOKEN` and `KEEP_TELEGRAM_CHAT_ID` are set,
   `keep-server` sends approval notices to `api.telegram.org`. The notice
   carries the secret's name and class, never its value.
@@ -70,6 +71,63 @@ configures:
   runner's host.
 - The Mesh plugin's `keep-lane-poller` connects only to the Keep server at
   `KEEP_URL`.
+
+## Permissions
+
+What Keep does with each permission, event, domain and screen its Mesh
+manifest ([`mesh-extension.json`](mesh-extension.json)) declares. Mesh
+gives these to Keep's extension actor in a workspace where Keep is
+installed. Keep itself sends no secret value to Mesh and puts none on a
+card, comment or event: what Keep writes to Mesh or keeps from Mesh is
+names, ids, versions, fingerprints and the hash that binds a confirmation
+card to its request. The one exception is a read-back: a
+Mesh workspace, authenticated by the install's signature, reads the value of
+an extension setting it wrote itself with
+`POST /orgs/{org_id}/mesh/secrets/{ref}/resolve`. It reaches only the refs
+of its own prefix; each call is rate limited, journaled before the value is
+released, and answered with `Cache-Control: no-store`. Details:
+[docs/mesh-extension.md](docs/mesh-extension.md).
+
+### API
+
+| Permission | What Keep does with it | What it does not do |
+|---|---|---|
+| `workspaces:read` | Reads the workspace's hierarchy, `GET /api/v1/workspaces/{id}/export/hierarchy`, every five minutes (an unchanged snapshot is one `304`), to reconcile its mirror of the workspace. | Reads no other workspace. Changes nothing in Mesh. |
+| `projects:read` | Takes the projects from that snapshot (id, slug, name, archived) and keeps them in its mirror. | Creates, edits or archives no project. Reads no task or document. |
+| `members:read` | Takes the members from that snapshot (user id and role) and keeps them in its mirror; a member Mesh no longer reports is marked, not deleted. | Reads no email, name or profile. Invites or removes no one. A Mesh membership grants no right in Keep. |
+| `agents:read` | Takes the agents from that snapshot (id, slug, sponsoring user) and keeps them in its mirror. | Creates, edits or deletes no agent. |
+| `agent_keys:read` | Keeps the key id, label and state (active, revoked) of agent keys, from the snapshot's active keys and the `agent.key.*` events. Keep makes no call to the agent-keys API under this permission. | Never sees or stores a key's secret part. Issues, rotates or revokes no key: that is the separate `keep-rotator` extension ([service account](docs/mesh-service-account.md)). |
+| `tasks:write` | When `KEEP_MESH_EXTENSION=1` and the card settings are configured, opens a confirmation card for a Keep request that needs a person's approval (`POST /api/v1/projects/{id}/tasks`), binds it to the request (`PUT /api/v1/tasks/{id}/external-ref`, request id and hash), arms its human gate, and moves it to cancelled when the request lapses. The card holds the secret's name and class, the target kind and the request id. | Puts no secret value, provider text or free text of the request on a card. Reads, edits or moves no other card. |
+| `comments:write` | Declared, but not used: Keep writes no comment to Mesh. | Reads or writes no comment. |
+| `secrets:write` | Declared, but Keep makes no call to Mesh under it. In the other direction, Mesh stores the values of its extension settings in Keep (`PUT` and `POST .../resolve` under `/orgs/{org_id}/mesh/secrets/{ref}`), signed with the install's events secret; Keep answers a write with `ref`, `version` and `fingerprint` only, and `resolve` with the stored value (the one exception above: rate limited, journaled before release, `Cache-Control: no-store`). | Pushes no secret value into Mesh on its own: a value leaves Keep for Mesh only as the answer to the workspace's signed `resolve` call. A workspace reaches only the refs it wrote itself. |
+
+### Events
+
+Keep receives events at `/mesh/events`, signed with the install's events
+secret; each event is applied once.
+
+| Event | What Keep does with it | What it does not do |
+|---|---|---|
+| `workspace.member.added` | Marks the member (user id, role) active in its mirror. | Creates no Keep user and grants no Keep role. |
+| `workspace.member.removed` | Marks the member removed in its mirror. | Deletes no secret or access that hangs off the member. |
+| `project.created` | Adds the project (id, slug, name, archived) to its mirror. | Creates nothing in Keep's catalog. |
+| `project.updated` | Updates the project's slug, name or archived flag in its mirror. | Deletes no project or secret. |
+| `agent.key.issued` | Records the agent and the key's id and label as active. | Never receives or stores the key's secret part. |
+| `agent.key.revoked` | Marks the key revoked in its mirror. | Revokes nothing itself. |
+| `task.gate.decided` | Applies the answer on a confirmation card it opened: approve or reject, only from a person, never the one who asked, only someone allowed to approve in the secret's scope, only for the request whose hash the card carries, only once. Any other answer changes nothing. | Keeps, logs or returns no free text of the decision. Acts on no card it did not open. |
+
+### Network
+
+`{settings.keep_url}` only: the Keep server's own API (install handshake,
+events, the secrets screen, token exchange). Keep's extension declares no
+other domain.
+
+### UI
+
+| Slot | What it shows | What it does not do |
+|---|---|---|
+| `sidebar.item` | The `Keep` item, opening `/mesh/ui/secrets` in a frame: secrets of the organization and of the signed-in user by name, scope, class, version, fingerprint, length and status. Organization admins can change the organization key level there. | Never renders a value. |
+| `workspace.settings` | Mesh's settings form for the workspace setting `approvals_via_mesh`. Keep does not read this setting yet: confirmation cards are switched on by the server's own settings (`KEEP_MESH_*`). | Holds no secret value. |
 
 ## Accounts
 

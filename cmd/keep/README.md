@@ -10,6 +10,7 @@ keep meta    <name> --scope-level L --scope-id ID [--json]
 keep version <name> --scope-level L --scope-id ID [--json]
 keep create-ref <name> --scope-level L --scope-id ID --class C --type T --provider-ref REF [--description TEXT] [--json]
 keep audit verify [--json]
+keep mesh uninstall <workspace_id> [--yes] [--json]
 ```
 
 Common flags: `--server URL` (or `KEEP_SERVER`), `--org ID` (or `KEEP_ORG`),
@@ -39,3 +40,23 @@ usage error. A clean chain prints:
 ok:       true
 checked:  42
 ```
+
+## mesh uninstall
+
+`keep mesh uninstall <workspace_id>` calls
+`DELETE /orgs/{org_id}/mesh/installations/{workspace_id}` (organisation admin
+only): it crypto-erases every secret the Mesh workspace stored in Keep and
+removes the installation. It asks for confirmation on the terminal and
+removes nothing unless the answer is `y`; `--yes` skips the question for
+scripts. It prints the workspace, the number of erased versions and the
+request id, nothing else:
+
+```
+workspace_id:  0b0e…
+erased:        7
+request_id:    req-…
+```
+
+Exit code: `0` removed, `1` not confirmed or the request failed (a workspace
+not installed in this organisation is `not_found`), `2` usage error, including
+a workspace id that is not a UUID (it is not echoed).

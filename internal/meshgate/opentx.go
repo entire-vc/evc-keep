@@ -26,7 +26,8 @@ type Request struct {
 // TxStore is the part of a Store that works inside the transaction creating
 // the approval.
 type TxStore interface {
-	// WorkspacesOfTx lists the Mesh workspaces installed for org.
+	// WorkspacesOfTx lists the Mesh workspaces installed for org as an
+	// extension: a store-only workspace has no Keep extension to answer a card.
 	WorkspacesOfTx(ctx context.Context, tx pgx.Tx, org uuid.UUID) ([]uuid.UUID, error)
 	InsertTx(ctx context.Context, tx pgx.Tx, g Gate) error
 }

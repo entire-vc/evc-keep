@@ -73,7 +73,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 	ws := uuid.New()
 	cn := canary.New()
 	b, _ := json.Marshal(map[string]string{"mesh_url": m.URL(), "workspace_id": ws.String(),
-		"extension_token": cn.Value(8), "events_endpoint_secret": cn.Value(9)})
+		"extension_token": cn.Value(8), "events_endpoint_secret": cn.Value(9), "mode": "extension"})
 	if rec := f.post("/mesh/install", f.admin, b, nil); rec.Code != http.StatusOK {
 		t.Fatalf("install: %d", rec.Code)
 	}
@@ -481,7 +481,7 @@ func TestMeshUIKeyLevelReadOnlyWhenChangeIsNotWired(t *testing.T) {
 	m := meshfake.New(meshfake.NewKey("k1"))
 	t.Cleanup(m.Close)
 	ws := uuid.New()
-	b, _ := json.Marshal(map[string]string{"mesh_url": m.URL(), "workspace_id": ws.String(), "extension_token": canary.New().Value(1), "events_endpoint_secret": canary.New().Value(2)})
+	b, _ := json.Marshal(map[string]string{"mesh_url": m.URL(), "workspace_id": ws.String(), "extension_token": canary.New().Value(1), "events_endpoint_secret": canary.New().Value(2), "mode": "extension"})
 	if rec := f.post("/mesh/install", f.admin, b, nil); rec.Code != http.StatusOK {
 		t.Fatalf("install: %d", rec.Code)
 	}
@@ -508,7 +508,7 @@ func TestMeshUIKeyLevelChangeWiredInProduction(t *testing.T) {
 	m := meshfake.New(meshfake.NewKey("k1"))
 	t.Cleanup(m.Close)
 	ws := uuid.New()
-	b, _ := json.Marshal(map[string]string{"mesh_url": m.URL(), "workspace_id": ws.String(), "extension_token": canary.New().Value(1), "events_endpoint_secret": canary.New().Value(2)})
+	b, _ := json.Marshal(map[string]string{"mesh_url": m.URL(), "workspace_id": ws.String(), "extension_token": canary.New().Value(1), "events_endpoint_secret": canary.New().Value(2), "mode": "extension"})
 	if rec := f.post("/mesh/install", f.admin, b, nil); rec.Code != http.StatusOK {
 		t.Fatalf("install: %d", rec.Code)
 	}

@@ -33,7 +33,7 @@ func newSessionFixture(t *testing.T, opts ...func(*api.MeshDeps)) *sessionFixtur
 	ws := uuid.New()
 	cn := canary.New()
 	b, _ := json.Marshal(map[string]string{"mesh_url": m.URL(), "workspace_id": ws.String(),
-		"extension_token": cn.Value(8), "events_endpoint_secret": cn.Value(9)})
+		"extension_token": cn.Value(8), "events_endpoint_secret": cn.Value(9), "mode": "extension"})
 	if rec := f.post("/mesh/install", f.admin, b, nil); rec.Code != http.StatusOK {
 		t.Fatalf("install: %d", rec.Code)
 	}

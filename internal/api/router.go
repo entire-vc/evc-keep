@@ -128,7 +128,8 @@ type Deps struct {
 	// Carriers serves the carrier routes; nil answers not_ready.
 	Carriers CarrierService
 	// Mesh wires the optional Mesh extension (POST /mesh/install, POST
-	// /mesh/events, POST /mesh/token, ...); nil leaves its routes unregistered.
+	// /mesh/events, POST /mesh/token, DELETE /orgs/{org_id}/mesh/installations/
+	// {workspace_id}, ...); nil leaves its routes unregistered.
 	Mesh     *MeshDeps
 	Audit    audit.Journaler
 	Identity *identity.Repo
@@ -233,6 +234,8 @@ func NewRouter(logger *slog.Logger, pool *pgxpool.Pool, deps Deps) http.Handler 
 			mr.handleMeshInstall(installAuth(http.HandlerFunc(mr.handleInstall)), requireTLS(http.HandlerFunc(mr.handleHandshake))).ServeHTTP))
 		mux.Handle("POST /orgs/{org_id}/mesh/pending-installs", logged("/orgs/{org_id}/mesh/pending-installs", logger,
 			chain(requireTLS, authenticate(ir, logger, false), identity.RequireOrgMatch("org_id"))(http.HandlerFunc(mr.handlePendingInstall)).ServeHTTP))
+		mux.Handle("DELETE /orgs/{org_id}/mesh/installations/{workspace_id}", logged("/orgs/{org_id}/mesh/installations/{workspace_id}", logger,
+			chain(requireTLS, authenticate(ir, logger, false), identity.RequireOrgMatch("org_id"))(http.HandlerFunc(mr.handleUninstall)).ServeHTTP))
 		// No bearer: the HMAC over the body is the authentication.
 		mux.Handle("POST /mesh/events", logged("/mesh/events", logger, mr.handleEvents))
 		// No bearer: the HMAC over the body with the bound events secret is the

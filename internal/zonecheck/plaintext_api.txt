@@ -30,6 +30,7 @@ internal/builtin.MeshFetchError: struct{class string}
 internal/builtin.MeshFetched: struct{NotModified bool; ETag string; Body []byte}
 internal/builtin.MeshSecretMeta: struct{Version string; Fingerprint string; Length int}
 internal/builtin.MeshVault.Checkpoint: func(ctx context.Context, org string, workspace string) (*builtin.MeshCheckpoint, error)
+internal/builtin.MeshVault.EraseWorkspace: func(ctx context.Context, tx pgx.Tx, org string, workspace string) (int, error)
 internal/builtin.MeshVault.ExtensionToken: func(ctx context.Context, org string, workspace string) (string, error)
 internal/builtin.MeshVault.FetchHierarchy: func(ctx context.Context, org string, workspace string, meshURL string, etag string) (builtin.MeshFetched, error)
 internal/builtin.MeshVault.Generate: func(ctx context.Context, org string, workspace string, kind string) (string, error)

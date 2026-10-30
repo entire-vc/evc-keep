@@ -115,7 +115,7 @@ migration=internal/store/migrations/00005_audit.sql
 # any mutation made only to that earlier migration's copy. Point the action-
 # CHECK mutations at whichever migration is currently last to touch it; when
 # a future migration adds another action, this must move again.
-migration_action=internal/store/migrations/00044_mesh_token_delivery.sql
+migration_action=internal/store/migrations/00047_mesh_uninstall_audit.sql
 # The downgrade test goes down to version 37, so the Down CHECK it exercises
 # last is 00038's: a mutation of a later migration's Down is healed by it.
 migration_action_down=internal/store/migrations/00038_audit_key_level_requested.sql
@@ -215,9 +215,10 @@ mutate action-list-drift-go        "$record" 'ActionKEKPurge,' 'ActionKEKPurge, 
 mutate action-mesh-put-dropped-up   "$migration_action" "'secret.rotate','mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'secret.rotate','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
 mutate action-mesh-resolve-dropped-up "$migration_action" "'mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'mesh.secret.put','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
 mutate action-mesh-pending-dropped-up "$migration_action" "'org.bootstrap','mesh.install.pending'," "'org.bootstrap'," '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-store-bind-default-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token'));" "'deploy.policy_set','mesh.token'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-deploy-policy-set-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token'));" "'store.bind_default','mesh.token'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-mesh-token-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token'));" "'store.bind_default','deploy.policy_set'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-store-bind-default-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall'));" "'deploy.policy_set','mesh.token','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-deploy-policy-set-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall'));" "'store.bind_default','mesh.token','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-mesh-token-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall'));" "'store.bind_default','deploy.policy_set','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-mesh-uninstall-dropped-up "$migration_action" "'mesh.token','mesh.uninstall'));" "'mesh.token'));" '^TestActionRegistryMatchesMigrationCheck$'
 mutate action-mesh-put-dropped-down "$migration_action_down" "'mesh.secret.put','mesh.secret.resolve')) NOT VALID" "'mesh.secret.resolve')) NOT VALID" '^TestKeyLevelAuditMigration_DowngradeKeepsHistory$' ./internal/store/...
 mutate action-mesh-resolve-dropped-down "$migration_action_down" "'mesh.secret.resolve')) NOT VALID" "'mesh.secret.put')) NOT VALID" '^TestKeyLevelAuditMigration_DowngradeKeepsHistory$' ./internal/store/...
 

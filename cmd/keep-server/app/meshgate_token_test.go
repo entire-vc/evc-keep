@@ -29,7 +29,7 @@ type fakeOwners struct {
 	err error
 }
 
-func (o fakeOwners) Installation(context.Context, uuid.UUID) (uuid.UUID, string, bool, error) {
+func (o fakeOwners) ExtensionInstallation(context.Context, uuid.UUID) (uuid.UUID, string, bool, error) {
 	u := o.url
 	if u == "" {
 		u = meshAt

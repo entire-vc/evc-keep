@@ -34,6 +34,20 @@ func ExternalRef(meshURL, userID string) string {
 	return "mesh:" + strings.TrimRight(meshURL, "/") + ":" + userID
 }
 
+// ExtensionInstallation is Installation for a workspace connected as an
+// extension only: a store-only installation is not found, so nothing that
+// calls Mesh with the actor token is handed one for it.
+func (r *Repo) ExtensionInstallation(ctx context.Context, workspace uuid.UUID) (org uuid.UUID, meshURL string, found bool, err error) {
+	err = r.pool.QueryRow(ctx, `SELECT org_id, mesh_url FROM mesh_installations WHERE workspace_id = $1 AND mode = $2`, workspace, string(ModeExtension)).Scan(&org, &meshURL)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, "", false, nil
+	}
+	if err != nil {
+		return uuid.Nil, "", false, fmt.Errorf("meshext: lookup installation: %w", err)
+	}
+	return org, meshURL, true, nil
+}
+
 // Installation returns the organisation and Mesh address of a connected workspace.
 func (r *Repo) Installation(ctx context.Context, workspace uuid.UUID) (org uuid.UUID, meshURL string, found bool, err error) {
 	err = r.pool.QueryRow(ctx, `SELECT org_id, mesh_url FROM mesh_installations WHERE workspace_id = $1`, workspace).Scan(&org, &meshURL)

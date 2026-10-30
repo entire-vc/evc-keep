@@ -18,17 +18,18 @@ type GateTokenSource interface {
 	Token(ctx context.Context) (string, error)
 }
 
-// ErrGateToken is every failure of the vault source: no installation of the
-// workspace, its record or vault unavailable, a KEEP_MESH_URL that is not the
+// ErrGateToken is every failure of the vault source: no extension installation
+// of the workspace, its record or vault unavailable, a KEEP_MESH_URL that is not the
 // Mesh the workspace was installed from, or no token sealed. It names
 // neither the workspace nor the vault path, and carries no text of the cause.
 var ErrGateToken = errors.New("mesh gate token unavailable")
 
 // installations is the installation record: which organisation a workspace is
-// connected to, and the Mesh address recorded at install. *meshext.Repo is the
+// connected to as an extension, and the Mesh address recorded at install. A
+// store-only installation has no actor token to hand out. *meshext.Repo is the
 // implementation.
 type installations interface {
-	Installation(ctx context.Context, workspace uuid.UUID) (org uuid.UUID, meshURL string, found bool, err error)
+	ExtensionInstallation(ctx context.Context, workspace uuid.UUID) (org uuid.UUID, meshURL string, found bool, err error)
 }
 
 // gateVault is the sealed side. *builtin.MeshVault is the implementation.
@@ -52,7 +53,7 @@ var _ GateTokenSource = vaultGateToken{}
 
 // Token implements GateTokenSource.
 func (s vaultGateToken) Token(ctx context.Context) (string, error) {
-	org, installedFrom, ok, err := s.installs.Installation(ctx, s.workspace)
+	org, installedFrom, ok, err := s.installs.ExtensionInstallation(ctx, s.workspace)
 	if err != nil || !ok {
 		return "", ErrGateToken
 	}

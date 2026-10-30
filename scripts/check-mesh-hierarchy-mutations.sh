@@ -217,11 +217,49 @@ mutate key-id-shape-open   $M "CHECK (key_id ~ '^[A-Za-z0-9._:-]{1,128}\$')" "CH
 mutate down-leaves-table   $M 'DROP TABLE mesh_sync_state;' '' TestMeshHierarchyMigrationDowngradeAndUpgrade
 mutate down-drops-events   $M 'DROP TABLE mesh_members;' 'DROP TABLE mesh_members; DROP TABLE mesh_events;' TestMeshHierarchyMigrationDowngradeAndUpgrade
 
+# Installation mode: Keep calls Mesh (reconciliation, gate cards, gate token)
+# only for an extension installation; every install path records the mode it
+# is given, and the 00046 backfill marks store only what never worked as an
+# extension.
+pkg=./internal/meshext
+MH=internal/meshext/hierarchy.go
+MF=internal/meshext/federation.go
+MR=internal/meshext/repo.go
+mutate reconcile-all-mode-off     $MH 'FROM mesh_installations WHERE mode = $1 ORDER BY workspace_id`, string(ModeExtension))' 'FROM mesh_installations ORDER BY workspace_id`)' TestReconcileAllSkipsStoreInstallations
+mutate reconcile-all-mode-noop    $MH 'WHERE mode = $1 ORDER BY workspace_id' 'WHERE $1 <> '"''"' ORDER BY workspace_id' TestReconcileAllSkipsStoreInstallations
+mutate ext-installation-mode-off  $MF 'WHERE workspace_id = $1 AND mode = $2`, workspace, string(ModeExtension))' 'WHERE workspace_id = $1`, workspace)' TestExtensionInstallationSkipsStore
+mutate upsert-mode-unchecked      $MR 'meshURL string, mode Mode) error {
+	if !mode.Valid() {
+		return ErrBadMode
+	}' 'meshURL string, mode Mode) error {' TestInstallRecordsExplicitMode
+mutate reinstall-keeps-mode       $MR 'mode = EXCLUDED.mode, ' '' TestInstallRecordsExplicitMode
+mutate bind-ignores-mode          $MR 'p.OpenedBy, string(mode))' 'p.OpenedBy, string(ModeExtension))' TestInstallRecordsExplicitMode
+pkg=./internal/meshgate
+mutate gate-workspace-mode-off    internal/meshgate/pgstore.go " AND mode='extension'" '' TestWorkspacesOfTxListsExtensionsOnly
+pkg=./cmd/keep-server/app
+mutate store-install-reconciled   $MH 'FROM mesh_installations WHERE mode = $1 ORDER BY workspace_id`, string(ModeExtension))' 'FROM mesh_installations ORDER BY workspace_id`)' TestMeshStoreInstallServesSecretsAndIsNeverCalled
+mutate store-gate-token           $MF 'WHERE workspace_id = $1 AND mode = $2`, workspace, string(ModeExtension))' 'WHERE workspace_id = $1`, workspace)' TestMeshStoreInstallServesSecretsAndIsNeverCalled
+mutate admin-ignores-mode         internal/api/mesh.go 'req.MeshURL, req.Mode)' 'req.MeshURL, meshext.ModeStore)' TestMeshStoreInstallServesSecretsAndIsNeverCalled
+mutate admin-mode-unchecked       internal/api/mesh.go ' ||
+		!req.Mode.Valid() {' ' {' TestMeshInstallAuthorizationAndOwnership
+mutate handshake-installs-store   internal/api/mesh_handshake.go 'meshext.ModeExtension, func(' 'meshext.ModeStore, func(' TestMeshHandshakeInstallsAnExtension
+pkg=./internal/store
+M46=internal/store/migrations/00046_mesh_install_mode.sql
+mutate backfill-off               $M46 "UPDATE mesh_installations i SET mode = 'store'" "UPDATE mesh_installations i SET mode = 'extension'" TestMeshInstallModeMigration
+mutate backfill-ok-only           $M46 "IN ('ok','not_modified')" "IN ('ok')" TestMeshInstallModeMigration
+mutate backfill-ignores-token     $M46 ' WHERE i.token_signed_at IS NULL
+   AND NOT EXISTS' ' WHERE NOT EXISTS' TestMeshInstallModeMigration
+mutate mode-check-open            $M46 "CHECK (mode IN ('store','extension'))" 'CHECK (true)' TestMeshInstallModeMigration
+mutate mode-down-noop             $M46 'ALTER TABLE mesh_installations DROP COLUMN mode;' 'SELECT 1;' TestMeshInstallModeMigration
+
 # The unmutated tree is green with nothing skipped.
 if mutation_apply_only; then
 	:
 elif (cd "$root" && go test -count=1 -p 1 -v -run 'TestMeshReconcile|TestMeshFailedFetch|TestMeshEventsApply|TestMeshHierarchy|TestMeshFetchDoesNot|TestMeshPoisonous|TestMeshFetchRefuses|TestMeshSnapshotNever|TestMeshProjectAndAgent|TestMeshIncomplete|TestMeshKeysAreScoped|TestMeshNetworkFailure|TestMeshPartialMemberAgentKey|TestMeshStaleEventDoesNotReviveOrphanedEntities|TestMeshFlat|TestMeshAcceptsMeshsOwnFlatDelivery' ./cmd/keep-server/app >"$work/base" 2>&1) &&
-	(cd "$root" && go test -count=1 -p 1 -v -run 'TestParseEventFlat|TestReconcile' ./internal/meshext >>"$work/base" 2>&1) && ! grep -q -- '--- SKIP' "$work/base" && [ "$(grep -c -- '--- PASS' "$work/base")" -ge 23 ]; then
+	(cd "$root" && go test -count=1 -p 1 -v -run 'TestParseEventFlat|TestReconcile|TestInstallRecordsExplicitMode|TestExtensionInstallationSkipsStore' ./internal/meshext >>"$work/base" 2>&1) &&
+	(cd "$root" && go test -count=1 -p 1 -v -run 'TestMeshStoreInstallServesSecretsAndIsNeverCalled|TestMeshHandshakeInstallsAnExtension' ./cmd/keep-server/app >>"$work/base" 2>&1) &&
+	(cd "$root" && go test -count=1 -p 1 -v -run 'TestWorkspacesOfTxListsExtensionsOnly' ./internal/meshgate >>"$work/base" 2>&1) &&
+	(cd "$root" && go test -count=1 -p 1 -v -run 'TestMeshInstallModeMigration' ./internal/store >>"$work/base" 2>&1) && ! grep -q -- '--- SKIP' "$work/base" && [ "$(grep -c -- '--- PASS' "$work/base")" -ge 30 ]; then
 	echo "ok   baseline: hierarchy tests green on the real code, none skipped"
 else
 	echo "FAIL baseline: hierarchy tests red or skipped on the real code"

@@ -469,13 +469,13 @@ DELETE FROM mesh_pending_installs' $B "$R" '	if err := seal(ctx); err != nil {
 	}
 	if err := tx.Commit(ctx); err != nil {' '	if err := tx.Commit(ctx); err != nil {'
 mutate hs-seal-error-ignored  $R '	if err := seal(ctx); err != nil {' '	if err := seal(ctx); err != nil && false {' $B
-mutate hs-seal-outside-tx     $HS '	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, func(ctx context.Context) error {
+mutate hs-seal-outside-tx     $HS '	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(ctx context.Context) error {
 		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)
 	}); err != nil {' '	if err := m.deps.Vault.Put(r.Context(), pend.Org.String(), ws.String(), meshKindEvents, signingSecret); err != nil {
 		writeError(w, http.StatusInternalServerError, apperr.ClassInternal, "internal error", requestID)
 		return
 	}
-	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, func(context.Context) error { return nil }); err != nil {' $B
+	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(context.Context) error { return nil }); err != nil {' $B
 # BindPending refuses a window that expired after the lookup on its own.
 mutate hs-bind-expiry-off     $R ' AND secret_sha256 = $4 AND expires_at > now()`' ' AND secret_sha256 = $4`' $B
 # The route and handler guards: TLS, limiter, lock, no-store, org match,
@@ -703,6 +703,47 @@ mutate preauth-session-noop   $A '	refund, ok := m.preauthTake(w, r, requestID)
 		return
 	}
 	handle, _, err' TestMeshPreauthLimitsSessionSignIn
+
+R=internal/meshext/repo.go
+U=internal/api/mesh_uninstall.go
+# Removal of an installation: erasure first and for real, the delete, a failed
+# erasure keeping the row, the admin and organisation bounds, the workspace
+# lock shared with secret writes.
+mutate uninstall-erase-noop   $R 'erased, err := erase(ctx, tx)' 'erased, err := 0, error(nil); _ = erase' TestMeshUninstallErasesAndCascades
+mutate uninstall-vault-erase-noop internal/builtin/mesh_vault.go 'if err := p.Erase(ctx, provider.Ref{Path: v.secretID, Version: versionString(v.version)}); err != nil {' 'if err := func() error { _ = v; return nil }(); err != nil {' TestMeshUninstallErasesAndCascades
+mutate uninstall-erase-prefix-off internal/builtin/store.go 'AND left(secret_id, $5) = $6 AND (wrapped_dek' 'AND length($6) >= $5 AND (wrapped_dek' TestMeshUninstallErasesAndCascades
+mutate uninstall-delete-off   $R 'DELETE FROM mesh_installations WHERE workspace_id = $1 AND org_id = $2' 'SELECT 1 WHERE $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL' TestMeshUninstallErasesAndCascades
+mutate uninstall-erase-error-ignored $R '	erased, err := erase(ctx, tx)
+	if err != nil {
+		return 0, err
+	}' '	erased, err := erase(ctx, tx)
+	_ = err' TestMeshUninstallEraseFailureKeepsInstallation
+mutate uninstall-orphans-kept $R '		if _, err := erase(ctx, tx); err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return 0, fmt.Errorf("meshext: uninstall: %w", err)
+		}
+		return 0, ErrNotInstalled' '		return 0, ErrNotInstalled' TestMeshUninstallErasesOrphanedCredentials
+mutate uninstall-erase-outside-tx internal/builtin/mesh_vault.go '	p.db = p.db.withTx(tx)' '	_ = tx' TestMeshUninstallEraseFailureKeepsInstallation
+mutate uninstall-pending-off  $U 'if m.auditUninstall(r, p, requestID, "", audit.StatusPending, audit.ErrClassNone) != nil {' 'if false {' TestMeshUninstallNoRemovalWithoutAuditRecord
+mutate uninstall-final-audit-ignored $U 'if m.auditUninstall(r, p, requestID, reason, result, ec) != nil {' 'if m.auditUninstall(r, p, requestID, reason, result, ec) != nil && false {' TestMeshUninstallNoRemovalWithoutAuditRecord
+mutate uninstall-erase-skips-disabled internal/builtin/store.go "(wrapped_dek IS NOT NULL OR kek_id IS NOT NULL OR status <> 'erased')" "status = 'active'" TestMeshUninstallErasesAndCascades
+mutate uninstall-window-kept  $R 'DELETE FROM mesh_pending_installs WHERE workspace_id = $1 AND org_id = $2' 'SELECT 1 WHERE $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL' TestMeshUninstallErasesAndCascades
+mutate uninstall-reason-fingerprint $U '" erased="+strconv.Itoa(erased)' '" erased="+strconv.Itoa(erased)+" kfp1:k1:abcdefghij"' TestMeshUninstallNeverLeaks
+mutate uninstall-admin-off    $U 'if !admin {' 'if !admin && false {' TestMeshUninstallAuthorization
+mutate uninstall-org-unbound  $R 'WHERE workspace_id = $1 AND org_id = $2 FOR UPDATE' 'WHERE workspace_id = $1 AND $2::uuid IS NOT NULL FOR UPDATE' TestMeshUninstallAuthorization $R 'DELETE FROM mesh_installations WHERE workspace_id = $1 AND org_id = $2' 'DELETE FROM mesh_installations WHERE workspace_id = $1 AND $2::uuid IS NOT NULL'
+mutate uninstall-lock-off     $R '	conn, unlock, err := r.lock(ctx, workspaceLock, workspace)
+	if err != nil {
+		return 0, fmt.Errorf("meshext: uninstall: %w", err)' '	conn, unlock, err := r.lock(ctx, workspaceLock+"x", workspace)
+	if err != nil {
+		return 0, fmt.Errorf("meshext: uninstall: %w", err)' TestMeshUninstallSerializesWithSecretWrites
+mutate secret-put-lock-off    $R '	conn, unlock, err := r.lock(ctx, workspaceLock, workspace)
+	if err != nil {
+		return fmt.Errorf("meshext: lock workspace: %w", err)' '	conn, unlock, err := r.lock(ctx, workspaceLock+"x", workspace)
+	if err != nil {
+		return fmt.Errorf("meshext: lock workspace: %w", err)' TestMeshUninstallSerializesWithSecretWrites
+mutate secret-put-unguarded   $A 'err = m.deps.Repo.WhileInstalled(r.Context(), ws, org, func(ctx context.Context) error {' 'err = func(fn func(context.Context) error) error { return fn(r.Context()) }(func(ctx context.Context) error {' TestMeshUninstallSerializesWithSecretWrites
 
 # The unmutated tree is green with nothing skipped.
 if mutation_apply_only; then

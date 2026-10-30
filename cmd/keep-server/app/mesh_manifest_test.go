@@ -5,6 +5,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -120,5 +121,93 @@ func TestMeshRotatorManifestIsNarrow(t *testing.T) {
 	// would deliver it to /mesh/token, which refuses any id but keep.
 	if m.External.TokenPath != "" {
 		t.Errorf("keep-rotator declares token_path %q", m.External.TokenPath)
+	}
+}
+
+// TestReadmeDescribesEveryManifestPermission holds the catalog rule that the
+// README says what Keep does with each right it asks for: every API right,
+// event and UI slot of the keep manifest has its own row in the Permissions
+// section, and every network domain is named there.
+func TestReadmeDescribesEveryManifestPermission(t *testing.T) {
+	m := readManifestCaps(t, keepManifestPath)
+	raw, err := os.ReadFile("../../../README.md")
+	if err != nil {
+		t.Fatalf("README: %v", err)
+	}
+	section := readmeSection(string(raw), "## Permissions")
+	if section == "" {
+		t.Fatal("README has no ## Permissions section")
+	}
+	var net struct {
+		AllowedDomains []string `json:"allowed_domains"`
+	}
+	if err := json.Unmarshal(m.Capabilities.Network, &net); err != nil {
+		t.Fatalf("manifest network: %v", err)
+	}
+	if len(m.Capabilities.API) == 0 || len(m.Capabilities.Events) == 0 || len(m.Capabilities.UI) == 0 || len(net.AllowedDomains) == 0 {
+		t.Fatal("manifest declares an empty api, events, ui or network list: nothing to check")
+	}
+	for _, list := range [][]string{m.Capabilities.API, m.Capabilities.Events, m.Capabilities.UI} {
+		for _, name := range list {
+			if !readmeHasRow(section, name) {
+				t.Errorf("README Permissions has no row for %s that says what Keep does", name)
+			}
+		}
+	}
+	for _, d := range net.AllowedDomains {
+		if !strings.Contains(section, "`"+d+"`") {
+			t.Errorf("README Permissions does not name the domain %s", d)
+		}
+	}
+	// handleResolveSecret answers a Mesh workspace with a stored value, so the
+	// section may not claim that no value ever reaches Mesh.
+	if strings.Contains(section, "No secret value is sent to Mesh") {
+		t.Error("README Permissions claims no value reaches Mesh, but resolve returns one")
+	}
+	if !strings.Contains(section, "/mesh/secrets/{ref}/resolve") || !strings.Contains(section, "no-store") {
+		t.Error("README Permissions does not name the resolve exception and its no-store answer")
+	}
+}
+
+// readmeSection returns the text from the heading line to the next heading of
+// the same level, or "" when the heading is absent.
+func readmeSection(doc, heading string) string {
+	start := strings.Index(doc, "\n"+heading+"\n")
+	if start < 0 {
+		return ""
+	}
+	rest := doc[start+1+len(heading):]
+	if end := strings.Index(rest, "\n## "); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest
+}
+
+// readmeHasRow reports whether section has a table row for name whose next
+// cell, what Keep does with it, is not empty.
+func readmeHasRow(section, name string) bool {
+	for _, line := range strings.Split(section, "\n") {
+		cells := strings.Split(line, "|")
+		if len(cells) > 3 && strings.TrimSpace(cells[1]) == "`"+name+"`" && strings.TrimSpace(cells[2]) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestReadmeSectionStopsAtNextHeading(t *testing.T) {
+	doc := "# T\n\n## Permissions\n\n| `a:read` | reads |\n\n## Accounts\n\n| `b:read` | reads |\n"
+	section := readmeSection(doc, "## Permissions")
+	if !readmeHasRow(section, "a:read") {
+		t.Error("row inside the section not found")
+	}
+	if readmeHasRow(section, "b:read") {
+		t.Error("row after the next ## heading counted as inside the section")
+	}
+	if readmeSection(doc, "## Rights") != "" {
+		t.Error("absent heading returned text")
+	}
+	if readmeHasRow("| `a:read` | | |", "a:read") {
+		t.Error("row with an empty description counted")
 	}
 }
