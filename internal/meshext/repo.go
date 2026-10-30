@@ -143,15 +143,19 @@ func (r *Repo) lock(ctx context.Context, prefix string, workspace uuid.UUID) (*p
 	}, nil
 }
 
-// Upsert records workspace as connected to org. A workspace already held by
-// a different organisation is refused.
-func (r *Repo) Upsert(ctx context.Context, org, workspace, installedBy uuid.UUID, meshURL string) error {
+// Upsert records workspace as connected to org in mode. A reinstall records
+// the mode it states. A workspace already held by a different organisation is
+// refused.
+func (r *Repo) Upsert(ctx context.Context, org, workspace, installedBy uuid.UUID, meshURL string, mode Mode) error {
+	if !mode.Valid() {
+		return ErrBadMode
+	}
 	tag, err := r.pool.Exec(ctx, `
-INSERT INTO mesh_installations (workspace_id, org_id, mesh_url, installed_by)
-VALUES ($1, $2, $3, $4)
+INSERT INTO mesh_installations (workspace_id, org_id, mesh_url, installed_by, mode)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (workspace_id) DO UPDATE
-   SET mesh_url = EXCLUDED.mesh_url, installed_by = EXCLUDED.installed_by, updated_at = now()
- WHERE mesh_installations.org_id = EXCLUDED.org_id`, workspace, org, meshURL, installedBy)
+   SET mesh_url = EXCLUDED.mesh_url, installed_by = EXCLUDED.installed_by, mode = EXCLUDED.mode, updated_at = now()
+ WHERE mesh_installations.org_id = EXCLUDED.org_id`, workspace, org, meshURL, installedBy, string(mode))
 	if err != nil {
 		return fmt.Errorf("meshext: upsert installation: %w", err)
 	}
@@ -319,13 +323,16 @@ SELECT org_id, opened_by, mesh_url, secret_sha256 FROM mesh_pending_installs
 }
 
 // BindPending consumes the live window p of workspace and records the
-// installation it describes in one transaction, and runs seal after both
+// installation it describes, in mode, in one transaction, and runs seal after both
 // statements and before the commit: the window is single-use, a window that
 // expired or was replaced in the meantime binds nothing and seal never runs,
 // and a failing seal rolls the window and the installation back. seal works
 // on its own connection, so its write is not undone if the commit fails; its
 // error is returned as is.
-func (r *Repo) BindPending(ctx context.Context, workspace uuid.UUID, p Pending, seal func(context.Context) error) error {
+func (r *Repo) BindPending(ctx context.Context, workspace uuid.UUID, p Pending, mode Mode, seal func(context.Context) error) error {
+	if !mode.Valid() {
+		return ErrBadMode
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("meshext: bind: %w", err)
@@ -342,8 +349,8 @@ DELETE FROM mesh_pending_installs
 		return ErrNoWindow
 	}
 	tag, err = tx.Exec(ctx, `
-INSERT INTO mesh_installations (workspace_id, org_id, mesh_url, installed_by)
-VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id) DO NOTHING`, workspace, p.Org, p.MeshURL, p.OpenedBy)
+INSERT INTO mesh_installations (workspace_id, org_id, mesh_url, installed_by, mode)
+VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workspace_id) DO NOTHING`, workspace, p.Org, p.MeshURL, p.OpenedBy, string(mode))
 	if err != nil {
 		return fmt.Errorf("meshext: insert installation: %w", err)
 	}
@@ -393,4 +400,82 @@ UPDATE mesh_installations SET token_signed_at = $3, updated_at = now()
 		return ErrStaleToken
 	}
 	return seal(ctx)
+}
+
+// Uninstall removes the installation of workspace held by org; a workspace
+// never installed, already removed or held by another organisation is one
+// answer, ErrNotInstalled. Under the
+// workspace lock, in one transaction, it locks the installation row, runs
+// erase (the crypto-erasure of the workspace's sealed versions, in that same
+// transaction) and only then deletes the row, which cascades to every table
+// keyed by the workspace. Any failure rolls back the erasure with the rest
+// and leaves the installation in place, so a repeat starts over. Install,
+// token delivery and secret writes of the workspace take the same lock, so
+// none of them lands between the erasure and the delete.
+func (r *Repo) Uninstall(ctx context.Context, workspace, org uuid.UUID, erase func(context.Context, pgx.Tx) (int, error)) (int, error) {
+	conn, unlock, err := r.lock(ctx, workspaceLock, workspace)
+	if err != nil {
+		return 0, fmt.Errorf("meshext: uninstall: %w", err)
+	}
+	defer unlock()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("meshext: uninstall: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	var one int
+	err = tx.QueryRow(ctx, `SELECT 1 FROM mesh_installations WHERE workspace_id = $1 AND org_id = $2 FOR UPDATE`, workspace, org).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// An install or handshake that failed after sealing may have left
+		// credentials under the workspace with no installation to remove:
+		// erase them all the same. erase reaches only this organisation's
+		// store, so the answer stays that of a workspace never installed.
+		if _, err := erase(ctx, tx); err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return 0, fmt.Errorf("meshext: uninstall: %w", err)
+		}
+		return 0, ErrNotInstalled
+	}
+	if err != nil {
+		return 0, fmt.Errorf("meshext: uninstall: %w", err)
+	}
+	erased, err := erase(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM mesh_installations WHERE workspace_id = $1 AND org_id = $2`, workspace, org); err != nil {
+		return 0, fmt.Errorf("meshext: delete installation: %w", err)
+	}
+	// An install window left open would let the next handshake connect the
+	// workspace again right after its removal.
+	if _, err := tx.Exec(ctx, `DELETE FROM mesh_pending_installs WHERE workspace_id = $1 AND org_id = $2`, workspace, org); err != nil {
+		return 0, fmt.Errorf("meshext: delete install window: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("meshext: uninstall: %w", err)
+	}
+	return erased, nil
+}
+
+// WhileInstalled runs fn under the workspace lock if workspace is still
+// connected to org, and returns ErrNotInstalled otherwise. A write into the
+// workspace's sealed namespace goes through it, so it either lands before an
+// Uninstall, which then erases it, or finds the installation gone.
+func (r *Repo) WhileInstalled(ctx context.Context, workspace, org uuid.UUID, fn func(context.Context) error) error {
+	conn, unlock, err := r.lock(ctx, workspaceLock, workspace)
+	if err != nil {
+		return fmt.Errorf("meshext: lock workspace: %w", err)
+	}
+	defer unlock()
+	var one int
+	err = conn.QueryRow(ctx, `SELECT 1 FROM mesh_installations WHERE workspace_id = $1 AND org_id = $2`, workspace, org).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotInstalled
+	}
+	if err != nil {
+		return fmt.Errorf("meshext: lookup installation: %w", err)
+	}
+	return fn(ctx)
 }

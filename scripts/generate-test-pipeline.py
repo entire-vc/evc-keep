@@ -51,6 +51,8 @@ def render(skip, main):
               "  rules:\n    - when: always\n"
               "stages: [test]\n"
               "default:\n  tags: [docker]\n  interruptible: true\n"
+              "  retry:\n    max: 2\n"
+              "    when: [runner_system_failure, scheduler_failure, api_failure]\n"
               'variables:\n  GOFLAGS: "-buildvcs=false"\n')
     if skip:
         return header + ("docs-only:\n  stage: test\n  image: alpine:3.22\n"

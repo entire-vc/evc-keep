@@ -130,7 +130,7 @@ func (f *meshFixture) installAt(ws uuid.UUID, meshURL, token string) string {
 	evSecret := "events-secret-" + uuid.NewString()
 	b, _ := json.Marshal(map[string]string{
 		"mesh_url": meshURL, "workspace_id": ws.String(),
-		"extension_token": token, "events_endpoint_secret": evSecret,
+		"extension_token": token, "events_endpoint_secret": evSecret, "mode": "extension",
 	})
 	installedKeepSecret(f.t, f.post("/mesh/install", f.admin, b, nil))
 	return evSecret

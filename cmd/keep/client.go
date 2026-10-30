@@ -170,7 +170,7 @@ func (c *client) doEndpoint(method, endpoint string, body any) (int, []byte, err
 		reqBody = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequest(method, endpoint, reqBody)
+	req, err := http.NewRequest(method, endpoint, reqBody) //nolint:gosec // G704: the host is the operator's own --server; argv reaches only the path, as a UUID-parsed and path-escaped workspace id
 	if err != nil {
 		return 0, nil, errors.New("build request: invalid URL")
 	}
@@ -183,7 +183,7 @@ func (c *client) doEndpoint(method, endpoint string, body any) (int, []byte, err
 	// credential pasted into the wrong flag.
 	c.debugf("%s %s://%s\n%s", method, req.URL.Scheme, req.URL.Host, redactedHeaderDump(req.Header))
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:gosec // G704: see NewRequest above
 	if err != nil {
 		return 0, nil, errors.New("request failed: " + requestFailureKind(err))
 	}

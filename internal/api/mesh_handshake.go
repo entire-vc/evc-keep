@@ -245,7 +245,7 @@ func (m *meshRoutes) handleHandshake(w http.ResponseWriter, r *http.Request) {
 	// installation; nothing reads it, since every reader looks the
 	// installation up first, and the next binding replaces it.
 	installer := identity.Principal{OrgID: pend.Org, ID: pend.OpenedBy, Kind: identity.KindUser, Scope: "org:" + pend.Org.String()}
-	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, func(ctx context.Context) error {
+	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(ctx context.Context) error {
 		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)
 	}); err != nil {
 		if errors.Is(err, meshext.ErrNoWindow) {

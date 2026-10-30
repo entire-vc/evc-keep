@@ -577,4 +577,34 @@ func (s *store) erase(ctx context.Context, scope sealer.Scope, secretID string, 
 	return nil
 }
 
+// openVersion names one version that erase has not reached yet.
+type openVersion struct {
+	secretID string
+	version  int64
+}
+
+// openUnder lists every version in scope whose secret id starts with prefix
+// and that still holds a wrapped DEK or a KEK reference: the ones erase has
+// work left on. The prefix is compared as a string, not as a LIKE pattern.
+func (s *store) openUnder(ctx context.Context, scope sealer.Scope, prefix string) ([]openVersion, error) {
+	rows, err := s.db.Query(ctx, `SELECT secret_id, version FROM keep_envelope
+		WHERE store_org = $1 AND store_workspace = $2 AND store_project = $3 AND store_user = $4
+		  AND left(secret_id, $5) = $6 AND (wrapped_dek IS NOT NULL OR kek_id IS NOT NULL OR status <> 'erased')
+		ORDER BY secret_id, version`,
+		scope.Org, scope.Workspace, scope.Project, scope.User, len(prefix), prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []openVersion
+	for rows.Next() {
+		var v openVersion
+		if err := rows.Scan(&v.secretID, &v.version); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func versionString(n int64) string { return fmt.Sprintf("%d", n) }

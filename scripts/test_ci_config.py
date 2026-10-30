@@ -2015,6 +2015,95 @@ class CIConfig(unittest.TestCase):
         self.assertEqual(interruptible_violations(inherited), ["fmt-vet"])
 
 
+# A job is retried only when the runner or GitLab failed it, never when its
+# own code did: script_failure, unknown_failure and the timeouts would turn a
+# red mutant or a hung test green on the second try.
+RETRY_WHEN = {"runner_system_failure", "scheduler_failure", "api_failure"}
+RETRY_FORBIDDEN = {"always", "script_failure", "unknown_failure",
+                   "stuck_or_timeout_failure", "job_execution_timeout"}
+gen_spec = importlib.util.spec_from_file_location(
+    "generate_mutation_pipeline", ROOT / "scripts/generate-mutation-pipeline.py")
+mutation_gen = importlib.util.module_from_spec(gen_spec)
+gen_spec.loader.exec_module(mutation_gen)
+
+
+def retry_violations(config):
+    """`default.retry` other than the infrastructure set, and any job-level
+    retry that also covers a failure of the job itself."""
+    def bad_retry(retry, exact):
+        # A bare number, or a dict without `when`, retries on every failure;
+        # `exit_codes` retries a script failure whatever `when` says.
+        if not isinstance(retry, dict) or set(retry) != {"max", "when"}:
+            return True
+        when = retry["when"]
+        when = {when} if isinstance(when, str) else set(when or [])
+        if not when or not when <= RETRY_WHEN or (exact and when != RETRY_WHEN):
+            return True
+        return not isinstance(retry["max"], int) or isinstance(retry["max"], bool) \
+            or not 1 <= retry["max"] <= 2
+
+    bad = []
+    if bad_retry(config.get("default", {}).get("retry"), True):
+        bad.append(f"default: {config.get('default', {}).get('retry')!r}")
+    for name, job in config.items():
+        if name != "default" and isinstance(job, dict) and "retry" in job and bad_retry(job["retry"], False):
+            bad.append(f"{name}: {job['retry']!r}")
+    return bad
+
+class RetryPolicy(unittest.TestCase):
+    def setUp(self):
+        self.config = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
+
+    def test_retry_only_on_infrastructure_failures(self):
+        self.assertEqual(retry_violations(self.config), [])
+        child = yaml.safe_load((ROOT / ".gitlab/ci/full-tests.yml").read_text())
+        child["default"] = self.config["default"]
+        self.assertEqual(retry_violations(child), [])
+
+    def test_retry_violations_broken_controls(self):
+        cases = {
+            "missing": lambda c: c["default"].pop("retry"),
+            "script_failure": lambda c: c["default"]["retry"]["when"].append("script_failure"),
+            "unknown_failure": lambda c: c["default"]["retry"]["when"].append("unknown_failure"),
+            "narrowed": lambda c: c["default"]["retry"]["when"].remove("api_failure"),
+            "max 3": lambda c: c["default"]["retry"].update(max=3),
+            "bare number": lambda c: c["default"].update(retry=2),
+            "job always": lambda c: c["fmt-vet"].update(retry=1),
+            "job no when": lambda c: c["fmt-vet"].update(retry={"max": 1}),
+            "job timeout": lambda c: c["fmt-vet"].update(retry={"max": 1, "when": "stuck_or_timeout_failure"}),
+            "job execution timeout": lambda c: c["fmt-vet"].update(
+                retry={"max": 1, "when": ["api_failure", "job_execution_timeout"]}),
+            "default exit_codes": lambda c: c["default"]["retry"].update(exit_codes=[1]),
+            "job exit_codes": lambda c: c["fmt-vet"].update(
+                retry={"max": 1, "when": "api_failure", "exit_codes": [1]}),
+            "job max 5": lambda c: c["fmt-vet"].update(retry={"max": 5, "when": "api_failure"}),
+            "job no max": lambda c: c["fmt-vet"].update(retry={"when": "api_failure"}),
+            "job empty when": lambda c: c["fmt-vet"].update(retry={"max": 1, "when": []}),
+        }
+        for name, edit in cases.items():
+            with self.subTest(name):
+                config = copy.deepcopy(self.config)
+                edit(config)
+                self.assertNotEqual(retry_violations(config), [])
+        config = copy.deepcopy(self.config)
+        config["fmt-vet"]["retry"] = {"max": 1, "when": "runner_system_failure"}
+        self.assertEqual(retry_violations(config), [])
+
+    def test_child_pipelines_carry_the_same_retry(self):
+        retry = self.config["default"].get("retry")
+        self.assertIsNotNone(retry)
+        names = sorted(mutation_gen.ms.post_review_jobs(self.config))
+        for batch in (True, False):
+            for selected in (names, names[:1], []):
+                with self.subTest(batch=batch, jobs=len(selected)):
+                    child = yaml.safe_load(mutation_gen.render(self.config, selected, batch=batch))
+                    self.assertEqual(child["default"]["retry"], retry)
+        for docs, main in ((False, False), (False, True), (True, False)):
+            with self.subTest(docs=docs, main=main):
+                child = yaml.safe_load(selector.render(docs, main))
+                self.assertEqual(child["default"], self.config["default"])
+
+
 class MutationSelector(unittest.TestCase):
     def test_transport_dependencies_and_broken_controls(self):
         with tempfile.TemporaryDirectory() as tmp:

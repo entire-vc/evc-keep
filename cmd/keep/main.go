@@ -32,12 +32,15 @@ Usage:
                                            serves MCP tools on stdin/stdout: list_secrets, get_secret_meta,
                                            request_secret_input, deploy; no tool takes or returns a value
   keep audit verify [--json]               checks the organization's audit chain; exit 1 if it is broken
+  keep mesh uninstall <workspace_id> [--yes] [--json]
+                                           org admin: removes a Mesh installation and crypto-erases
+                                           every secret of the workspace; asks first unless --yes
   keep runner enroll-token --host HOST --policy FILE [--uid-shared=true|false] [--environment LABEL] [--platform LABEL]
   keep runner revoke RUNNER_ID
   keep -h | --help
   keep -V | --version
 
-Global flags (list, meta, version, create-ref, audit verify):
+Global flags (list, meta, version, create-ref, audit verify, mesh uninstall):
   --server URL       Keep server base URL (or KEEP_SERVER)
   --org ID           organization id (or KEEP_ORG)
   --token-file PATH  token file to read when KEEP_TOKEN is unset (default: $XDG_CONFIG_HOME/keep/token or $HOME/.config/keep/token)
@@ -85,6 +88,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		return runRunner(rest)
 	case "audit":
 		return runAuditSubcommand(rest, stdout, stderr, getenv)
+	case "mesh":
+		return runMeshSubcommand(rest, stdin, stdout, stderr, getenv)
 	default:
 		_, _ = fmt.Fprint(stderr, "keep: unknown command\n\n")
 		_, _ = fmt.Fprint(stderr, usage)

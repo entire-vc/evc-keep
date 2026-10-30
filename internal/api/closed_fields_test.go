@@ -163,6 +163,8 @@ var closedFieldsRegistry = []closedFieldsEntry{
 	// ref is the name the workspace gave its own setting; the value is never
 	// part of the answer (it is returned only by resolve, which has no struct).
 	{name: "MeshSecretPutResult", typ: reflect.TypeOf(MeshSecretPutResult{}), allowed: fieldSet("ref", "version", "fingerprint")},
+	// erased is a count of versions; no fingerprint, version or name of them.
+	{name: "MeshUninstallResult", typ: reflect.TypeOf(MeshUninstallResult{}), allowed: fieldSet("workspace_id", "erased", "request_id")},
 	{name: "MeshSessionResult", typ: reflect.TypeOf(MeshSessionResult{}), allowed: fieldSet("ok", "request_id")},
 	// commit and build_time identify the build, the same for every caller.
 	{name: "VersionResult", typ: reflect.TypeOf(VersionResult{}), allowed: fieldSet("commit", "build_time")},

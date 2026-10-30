@@ -183,6 +183,10 @@ const (
 	// ActionMeshToken is Mesh delivering the extension actor token of a
 	// connected workspace (POST /mesh/token).
 	ActionMeshToken Action = "mesh.token"
+	// ActionMeshUninstall is an organization admin removing a Mesh
+	// installation (DELETE /orgs/{org}/mesh/installations/{workspace}). The
+	// reason carries the workspace id and the number of erased versions.
+	ActionMeshUninstall Action = "mesh.uninstall"
 	// ActionOrgBootstrap is keep-server bootstrap-org: an organization, its
 	// CA and its first admin created by the operator on the host.
 	ActionOrgBootstrap Action = "org.bootstrap"
@@ -224,6 +228,7 @@ var registeredActions = []Action{
 	ActionMeshSecretPut,
 	ActionMeshSecretResolve,
 	ActionMeshToken,
+	ActionMeshUninstall,
 	ActionOrgBootstrap,
 	ActionStoreBindDefault,
 	ActionDeployPolicySet,

@@ -23,6 +23,7 @@ import (
 	"github.com/entire-vc/evc-keep/internal/meshgate"
 	"github.com/entire-vc/evc-keep/internal/reqid"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // MeshVault seals the credentials of the Mesh extension; the concrete type
@@ -54,6 +55,10 @@ type MeshVault interface {
 	// metadata for the journal. A ref the workspace never wrote is
 	// ErrMeshSecretNotFound, a malformed one ErrMeshSecretInvalid.
 	ResolveSecret(ctx context.Context, org, workspace, ref string) ([]byte, MeshSecretMeta, error)
+	// EraseWorkspace crypto-erases, inside tx, every version of the
+	// workspace (its credentials and its secrets) and returns how many it
+	// erased.
+	EraseWorkspace(ctx context.Context, tx pgx.Tx, org, workspace string) (int, error)
 }
 
 // MeshSecretMeta describes a stored version without revealing it.
@@ -167,6 +172,9 @@ type meshInstallRequest struct {
 	WorkspaceID          string   `json:"workspace_id"`
 	ExtensionToken       meshCred `json:"extension_token"`
 	EventsEndpointSecret meshCred `json:"events_endpoint_secret"`
+	// Mode is required: "extension" when Keep is installed as an extension of
+	// the workspace, "store" when that Mesh only keeps its secrets in Keep.
+	Mode meshext.Mode `json:"mode"`
 }
 
 // meshCred is a credential received in the install body. Every formatter,
@@ -243,7 +251,8 @@ func (m *meshRoutes) auditAction(r *http.Request, p identity.Principal, requestI
 }
 
 // handleInstall serves POST /mesh/install: an org admin connects a Mesh
-// workspace. The Mesh actor token and Mesh's events secret are sealed; Keep's
+// workspace, as an extension or as a secret store only (the request names
+// which). The Mesh actor token and Mesh's events secret are sealed; Keep's
 // own secret is generated, sealed and returned once.
 func (m *meshRoutes) handleInstall(w http.ResponseWriter, r *http.Request) {
 	requestID := reqid.FromContext(r.Context())
@@ -271,7 +280,8 @@ func (m *meshRoutes) handleInstall(w http.ResponseWriter, r *http.Request) {
 	ws, wsErr := uuid.Parse(req.WorkspaceID)
 	if wsErr != nil || !meshext.ValidMeshURL(req.MeshURL) ||
 		req.ExtensionToken == "" || len(req.ExtensionToken) > meshMaxTokenLen ||
-		len(req.EventsEndpointSecret) < meshMinSecret || len(req.EventsEndpointSecret) > meshMaxSecret {
+		len(req.EventsEndpointSecret) < meshMinSecret || len(req.EventsEndpointSecret) > meshMaxSecret ||
+		!req.Mode.Valid() {
 		writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid mesh install fields", requestID)
 		return
 	}
@@ -318,7 +328,7 @@ func (m *meshRoutes) handleInstall(w http.ResponseWriter, r *http.Request) {
 		generated, err = m.deps.Vault.Generate(r.Context(), org, wss, meshKindKeepSecret)
 	}
 	if err == nil {
-		err = m.deps.Repo.Upsert(r.Context(), p.OrgID, ws, p.ID, req.MeshURL)
+		err = m.deps.Repo.Upsert(r.Context(), p.OrgID, ws, p.ID, req.MeshURL, req.Mode)
 	}
 	if err != nil {
 		_ = cp.Restore(r.Context())
@@ -730,7 +740,23 @@ func (m *meshRoutes) handlePutSecret(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "secret storage not reachable", requestID)
 		return
 	}
-	meta, err := m.deps.Vault.PutSecret(r.Context(), org.String(), ws.String(), ref, string(req.Value))
+	// Under the workspace lock and only while the installation exists: a
+	// write racing a removal either lands first and is erased by it, or finds
+	// the workspace gone and stores nothing.
+	var meta MeshSecretMeta
+	err = m.deps.Repo.WhileInstalled(r.Context(), ws, org, func(ctx context.Context) error {
+		var perr error
+		meta, perr = m.deps.Vault.PutSecret(ctx, org.String(), ws.String(), ref, string(req.Value))
+		return perr
+	})
+	if errors.Is(err, meshext.ErrNotInstalled) {
+		if aerr := m.auditSecret(r, org, ws, audit.ActionMeshSecretPut, ref, MeshSecretMeta{}, audit.StatusFailed, audit.ErrClassPermissionDenied); aerr != nil {
+			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "secret storage not reachable", requestID)
+			return
+		}
+		writeError(w, http.StatusForbidden, apperr.ClassPermissionDenied, "request refused", requestID)
+		return
+	}
 	if err != nil {
 		m.secretFailure(w, r, org, ws, audit.ActionMeshSecretPut, ref, err)
 		return

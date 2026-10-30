@@ -550,6 +550,10 @@ class GuardTests(unittest.TestCase):
                 # (manual on a merge request, scheduled, not on a main push).
                 # resource_group (the fan-out cap) is pinned by test_ci_config.py.
                 same(key, skip_keys={"rules", "stage", "resource_group"})
+            elif key == "default":
+                # retry on runner and GitLab failures only, pinned by
+                # test_ci_config.py (RetryPolicy); every other field as in the base.
+                same(key, skip_keys={"retry"})
             else:
                 self.assertEqual(current[key], previous[key], key)
         old, new = previous["tenancy-mutations"], current["tenancy-mutations"]

@@ -642,11 +642,12 @@ ON CONFLICT (workspace_id) DO UPDATE
 	return orphaned, nil
 }
 
-// ReconcileAll reconciles every connected workspace once. A failure of one
-// does not stop the others. Newly orphaned entities raise a warning, the alert
-// the tenancy model asks for.
+// ReconcileAll reconciles every workspace connected as an extension once. A
+// store-only installation has no Keep extension in its Mesh, so it is never
+// fetched. A failure of one does not stop the others. Newly orphaned entities
+// raise a warning, the alert the tenancy model asks for.
 func (r *Repo) ReconcileAll(ctx context.Context, f Fetcher, log *slog.Logger) {
-	rows, err := r.pool.Query(ctx, `SELECT workspace_id FROM mesh_installations ORDER BY workspace_id`)
+	rows, err := r.pool.Query(ctx, `SELECT workspace_id FROM mesh_installations WHERE mode = $1 ORDER BY workspace_id`, string(ModeExtension))
 	if err != nil {
 		log.Error("mesh reconcile: list installations", "action", "mesh.reconcile", "error_class", "store")
 		return

@@ -191,7 +191,7 @@ func (f *meshFixture) send(path, bearer string, body []byte, hdr map[string]stri
 func (f *meshFixture) install(bearer string, ws uuid.UUID, token, eventsSecret string) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(map[string]string{
 		"mesh_url": "https://mesh.example.test", "workspace_id": ws.String(),
-		"extension_token": token, "events_endpoint_secret": eventsSecret,
+		"extension_token": token, "events_endpoint_secret": eventsSecret, "mode": "extension",
 	})
 	return f.post("/mesh/install", bearer, b, nil)
 }
@@ -500,7 +500,7 @@ func TestMeshInstallAuthorizationAndOwnership(t *testing.T) {
 	valid := func() map[string]any {
 		return map[string]any{
 			"mesh_url": "https://m.example.test", "workspace_id": ws.String(),
-			"extension_token": "t", "events_endpoint_secret": strings.Repeat("e", 16),
+			"extension_token": "t", "events_endpoint_secret": strings.Repeat("e", 16), "mode": "store",
 		}
 	}
 	bad := map[string]func(m map[string]any){
@@ -517,6 +517,10 @@ func TestMeshInstallAuthorizationAndOwnership(t *testing.T) {
 		"secret 15":     func(m map[string]any) { m["events_endpoint_secret"] = strings.Repeat("e", 15) },
 		"secret long":   func(m map[string]any) { m["events_endpoint_secret"] = strings.Repeat("s", 513) },
 		"token long":    func(m map[string]any) { m["extension_token"] = strings.Repeat("t", 4097) },
+		"no mode":       func(m map[string]any) { delete(m, "mode") },
+		"empty mode":    func(m map[string]any) { m["mode"] = "" },
+		"unknown mode":  func(m map[string]any) { m["mode"] = "both" },
+		"mode case":     func(m map[string]any) { m["mode"] = "Store" },
 	}
 	cases := map[string]string{"not json": "nope"}
 	for name, brk := range bad {
@@ -850,7 +854,7 @@ func TestMeshInstallNotServedOverPlainHTTP(t *testing.T) {
 	tok, evs := "tok-plain-"+uuid.NewString(), "events-plain-"+uuid.NewString()
 	b, _ := json.Marshal(map[string]string{
 		"mesh_url": "https://mesh.example.test", "workspace_id": ws.String(),
-		"extension_token": tok, "events_endpoint_secret": evs,
+		"extension_token": tok, "events_endpoint_secret": evs, "mode": "extension",
 	})
 	rec := f.send("/mesh/install", f.admin, b, nil, false)
 	if rec.Code != http.StatusNotFound {

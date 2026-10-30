@@ -98,6 +98,20 @@ Request body (unknown fields are refused):
 | `workspace_id` | UUID of the Mesh workspace |
 | `extension_token` | the Mesh actor token Keep will call Mesh with, at most 4096 bytes |
 | `events_endpoint_secret` | the secret Mesh signs events with, 16 to 512 bytes |
+| `mode` | required: `extension` or `store`, see below |
+
+`mode` says how the workspace uses Keep:
+
+- `extension`: Keep is installed as an extension of the workspace. Keep calls
+  Mesh with the actor token: the hierarchy sync, gate cards and the gate token.
+- `store`: the Mesh only keeps its workspace secrets in Keep, through its own
+  `MESH_KEEP_*` settings, and no Keep extension exists there. Keep never calls
+  that Mesh; the calls Mesh makes into Keep (secrets, events, token delivery)
+  work as for an extension.
+
+An admin reinstall records the mode it states. The Mesh handshake installs a
+new workspace as an `extension`; it never changes the mode of a workspace that
+is already installed.
 
 Response `200`: `{"ok": true, "request_id": "...", "keep_secret": "..."}`.
 `keep_secret` is Keep's own secret for this workspace. It is shown exactly once
@@ -254,6 +268,42 @@ Connecting a workspace this way:
    workspace is connected. To speed it up, run the extension health check in
    Mesh.
 
+### Removing an installation: `DELETE /orgs/{org_id}/mesh/installations/{workspace_id}`
+
+An organisation admin disconnects a workspace from Keep (`keep mesh uninstall
+<workspace_id>` in the CLI). Under the workspace lock that install, token
+delivery and secret writes also take, and in one database transaction, Keep
+first crypto-erases every version
+stored under `mesh/<workspace_id>/` in the organisation's store, the three
+install credentials and every secret the workspace wrote: the wrapped data key
+is dropped and the version is marked `erased`, so the remaining ciphertext can
+no longer be opened through Keep. Only then does it delete the installation,
+and with it the workspace's events, sync state, mirror of the Mesh hierarchy,
+nonces and gate requests, and close an open install window for it.
+
+The organisation's key-encryption key stays, as its other secrets need it: a
+wrapped data key surviving in a database backup stays unwrappable until that
+key is purged.
+
+If any step fails, the transaction rolls back, erasure included: the
+installation and its secrets stay as they were, the answer is `500 internal`,
+and a repeat completes the removal. A removed workspace, one never
+installed and one of another organisation all answer the same `404
+not_found`; credentials a failed install left in this organisation's store
+without an installation are erased all the same. A caller who is not an
+organisation admin gets `403 permission_denied`. Success answers:
+
+```json
+{"workspace_id": "…", "erased": 7, "request_id": "…"}
+```
+
+`erased` is the number of sealed versions crypto-erased. The attempt is
+journalled as `mesh.uninstall` before anything changes, and the outcome after;
+a successful removal's record names the workspace and that count. If the
+journal cannot take a record the answer is `503 not_ready`: before the removal
+nothing is changed, after it the removal stands but is not acknowledged. No
+value, token or fingerprint appears in the answer or the journal. To connect the
+workspace again, install the extension anew.
 
 ## `POST /mesh/events`
 

@@ -20,6 +20,7 @@ import (
 	"github.com/entire-vc/evc-keep/pkg/fingerprint"
 	"github.com/entire-vc/evc-keep/pkg/provider"
 	"github.com/entire-vc/evc-keep/pkg/secret"
+	"github.com/jackc/pgx/v5"
 )
 
 // Credential kinds the Mesh extension keeps sealed, per Mesh workspace.
@@ -300,6 +301,31 @@ func (m *MeshVault) SameEventsSecret(ctx context.Context, org, workspace, candid
 	same := false
 	secret.Expose(v, func(b []byte) { same = subtle.ConstantTimeCompare(b, c) == 1 })
 	return same, nil
+}
+
+// EraseWorkspace crypto-erases, inside tx, every version stored under
+// mesh/<workspace>/ in the organisation's store: the three credentials of the
+// install and every secret the workspace wrote. It returns how many versions
+// it erased; a repeat finds none left and returns 0. Nothing is committed
+// here: the caller's transaction makes the erasure and its own changes one
+// outcome, and the error names neither a path nor a value.
+func (m *MeshVault) EraseWorkspace(ctx context.Context, tx pgx.Tx, org, workspace string) (int, error) {
+	if !meshWorkspaceRe.MatchString(workspace) {
+		return 0, errMeshRef
+	}
+	p := m.local.Provider(org, "", "", "")
+	p.db = p.db.withTx(tx)
+	p.seal = p.seal.WithStore(p.db)
+	versions, err := p.db.openUnder(ctx, p.scope, "mesh/"+workspace+"/")
+	if err != nil {
+		return 0, errMeshVault
+	}
+	for _, v := range versions {
+		if err := p.Erase(ctx, provider.Ref{Path: v.secretID, Version: versionString(v.version)}); err != nil {
+			return 0, errMeshVault
+		}
+	}
+	return len(versions), nil
 }
 
 // MeshCheckpoint holds the credentials a workspace had before an install

@@ -66,7 +66,7 @@ func (p *PG) Insert(ctx context.Context, g Gate) error {
 
 // WorkspacesOfTx implements TxStore.
 func (p *PG) WorkspacesOfTx(ctx context.Context, tx pgx.Tx, org uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := tx.Query(ctx, `SELECT workspace_id FROM mesh_installations WHERE org_id=$1 ORDER BY workspace_id LIMIT 2`, org)
+	rows, err := tx.Query(ctx, `SELECT workspace_id FROM mesh_installations WHERE org_id=$1 AND mode='extension' ORDER BY workspace_id LIMIT 2`, org)
 	if err != nil {
 		return nil, err
 	}

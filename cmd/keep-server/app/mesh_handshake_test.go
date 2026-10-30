@@ -549,7 +549,7 @@ func TestMeshHandshakeBindConsumesWindowBeforeSealing(t *testing.T) {
 	}
 	bind := func(ws uuid.UUID, p meshext.Pending) (bool, error) {
 		sealed := false
-		err := f.repo.BindPending(ctx, ws, p, func(ctx context.Context) error {
+		err := f.repo.BindPending(ctx, ws, p, meshext.ModeExtension, func(ctx context.Context) error {
 			sealed = true
 			return f.local.MeshVault().Put(ctx, p.Org.String(), ws.String(), builtin.MeshEventsSecret, secret)
 		})
