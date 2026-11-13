@@ -79,9 +79,9 @@ func loadServerCAPool(path string) (*x509.CertPool, error) {
 	if path == "" {
 		return nil, nil
 	}
-	pem, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied path, same trust level as any CLI config flag
+	pem, err := readServerCAFile(path, maxServerCABytes)
 	if err != nil {
-		return nil, errors.New("reading -server-ca: file could not be read")
+		return nil, err
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pem) {
@@ -161,7 +161,7 @@ func runRunnerEnrollToken(args []string) int {
 		return 2
 	}
 
-	policyBytes, err := os.ReadFile(*policyPath) //nolint:gosec // G304: operator-supplied path
+	policyBytes, err := readPolicyFile(*policyPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "keep runner enroll-token: reading policy file: could not be read")
 		return 1
@@ -201,8 +201,18 @@ func runRunnerEnrollToken(args []string) int {
 	}
 
 	var res enrollTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		fmt.Fprintf(os.Stderr, "keep runner enroll-token: decoding response: %v\n", err)
+	if err := decodeBounded(resp.Body, &res); err != nil {
+		// The decoder's own error quotes body text (time.ParseError, SyntaxError,
+		// UnmarshalTypeError), so only a static line is printed.
+		fmt.Fprintln(os.Stderr, "keep runner enroll-token: decoding response: server answer is not valid")
+		return 1
+	}
+
+	// A 201 with an empty or missing token would otherwise print a blank
+	// line and exit 0, and `keep-runner enroll` would be fed an empty
+	// token: fail closed with a static message.
+	if strings.TrimSpace(res.Token) == "" {
+		fmt.Fprintln(os.Stderr, "keep runner enroll-token: server returned no token")
 		return 1
 	}
 
@@ -214,8 +224,25 @@ func runRunnerEnrollToken(args []string) int {
 	// excludes enrollment credentials (security contract section 4.3).
 	// https://mesh.entire.host/d/ca015950-a138-416f-accd-7915631eaab0
 	fmt.Println(res.Token)
+	// Closed field list for the success line: token_id only as a canonical UUID,
+	// host only when the server echoes the operator's own -host, last4
+	// derived locally.
+	echoedTokenID := unexpectedValue
+	if id, err := uuid.Parse(res.TokenID); err == nil && id.String() == res.TokenID {
+		echoedTokenID = id.String()
+	}
+	echoedHost := unexpectedValue
+	if res.Host == *host {
+		echoedHost = *host
+	}
+	// last4 is derived from the token this process already holds, never taken
+	// from the response: a server-chosen string would print its first runes.
+	last4 := res.Token
+	if len(last4) > 4 {
+		last4 = last4[len(last4)-4:]
+	}
 	fmt.Fprintf(os.Stderr, "issued token %s (…%s) for host %q, expires %s\n",
-		sanitizeText(res.TokenID, maxRequestIDLen), sanitizeText(res.Last4, 8), sanitizeText(res.Host, maxErrTextRunes), res.ExpiresAt.Format(time.RFC3339))
+		echoedTokenID, sanitizeText(last4, 8), echoedHost, res.ExpiresAt.Format(time.RFC3339))
 	return 0
 }
 
@@ -276,11 +303,15 @@ func runRunnerRevoke(args []string) int {
 		return 1
 	}
 	var res revokeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		fmt.Fprintf(os.Stderr, "keep runner revoke: decoding response: %v\n", err)
+	if err := decodeBounded(resp.Body, &res); err != nil {
+		fmt.Fprintln(os.Stderr, "keep runner revoke: decoding response: server answer is not valid")
 		return 1
 	}
-	fmt.Printf("revoked runner_id=%s ok=%t request_id=%s\n", runnerID, res.OK, safeRequestID(res.RequestID))
+	if !res.OK {
+		fmt.Fprintln(os.Stderr, "keep runner revoke: server did not confirm the revocation")
+		return 1
+	}
+	fmt.Printf("revoked runner_id=%s ok=true request_id=%s\n", runnerID, safeRequestID(res.RequestID))
 	return 0
 }
 
@@ -292,9 +323,11 @@ type apperrBody struct {
 
 func printAPIError(w io.Writer, body io.Reader) {
 	var e apperrBody
-	if err := json.NewDecoder(body).Decode(&e); err != nil {
+	if err := decodeBounded(body, &e); err != nil {
 		_, _ = fmt.Fprintln(w, "keep: server rejected the request")
 		return
 	}
-	_, _ = fmt.Fprintf(w, "keep: %s: %s (request_id=%s)\n", safeClass(e.ErrorClass), sanitizeText(e.Message, maxErrTextRunes), safeRequestID(e.RequestID))
+	// The server's message is never printed: only the closed-set class and
+	// the request id reach the terminal (threat model section 4.3).
+	_, _ = fmt.Fprintf(w, "keep: %s (request_id=%s)\n", safeClass(e.ErrorClass), safeRequestID(e.RequestID))
 }

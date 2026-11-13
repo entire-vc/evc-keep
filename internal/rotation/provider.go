@@ -221,6 +221,20 @@ func (r *ProviderRevoker) Revoke(ctx context.Context, ref Ref, runID uuid.UUID, 
 	if err != nil {
 		return ErrRevoke
 	}
+	// The generator's stand-in key is what a generated run records as the
+	// original. A run that recorded anything else (a real key, or none because
+	// the provider could not name it) was issued by an external provider; if the
+	// binding is gone now, the generator's revoke would end nothing and its check
+	// would say "inactive", and the run would report success with the original
+	// key alive. Refuse, and say so.
+	if _, isGen := r.d.Provider.(Generator); isGen {
+		if stand, _, _ := (Generator{}).Current(ctx, t.Subject); rec.orig != stand {
+			if r.d.Incident != nil {
+				_ = r.d.Incident.Open(context.WithoutCancel(ctx), IncidentRecord{Ref: ref, RunID: runID, Class: ClassOriginalKeyUnknown})
+			}
+			return ErrRevoke
+		}
+	}
 	// Nothing known to revoke: never revoke what is not known. The old version
 	// is still disabled, and the run says so (after the disable, so the journal
 	// names the last thing that went wrong).

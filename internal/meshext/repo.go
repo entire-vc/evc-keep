@@ -150,7 +150,12 @@ func (r *Repo) Upsert(ctx context.Context, org, workspace, installedBy uuid.UUID
 	if !mode.Valid() {
 		return ErrBadMode
 	}
-	tag, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("meshext: upsert installation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	tag, err := tx.Exec(ctx, `
 INSERT INTO mesh_installations (workspace_id, org_id, mesh_url, installed_by, mode)
 VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (workspace_id) DO UPDATE
@@ -161,6 +166,19 @@ ON CONFLICT (workspace_id) DO UPDATE
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrWorkspaceTaken
+	}
+	// A reinstall rotates every signing key and may point at another Mesh: the
+	// rotator was bound to the old state and must be connected again through
+	// a window. Its sealed secret is no longer reachable without a binding and
+	// is replaced at the next one.
+	if _, err := tx.Exec(ctx, `DELETE FROM mesh_rotator_bindings WHERE workspace_id = $1`, workspace); err != nil {
+		return fmt.Errorf("meshext: unbind rotator: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM mesh_rotator_pending_installs WHERE workspace_id = $1`, workspace); err != nil {
+		return fmt.Errorf("meshext: drop rotator window: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: upsert installation: %w", err)
 	}
 	return nil
 }
@@ -299,6 +317,9 @@ func (r *Repo) DropExpiredPending(ctx context.Context) error {
 	if _, err := r.pool.Exec(ctx, `DELETE FROM mesh_pending_installs WHERE expires_at <= now()`); err != nil {
 		return fmt.Errorf("meshext: drop expired install windows: %w", err)
 	}
+	if _, err := r.pool.Exec(ctx, `DELETE FROM mesh_rotator_pending_installs WHERE expires_at <= now()`); err != nil {
+		return fmt.Errorf("meshext: drop expired rotator windows: %w", err)
+	}
 	return nil
 }
 
@@ -320,6 +341,117 @@ SELECT org_id, opened_by, mesh_url, secret_sha256 FROM mesh_pending_installs
 		return Pending{}, false, fmt.Errorf("meshext: lookup install window: %w", err)
 	}
 	return p, true, nil
+}
+
+// ErrNoKeepBinding means the workspace has no keep installation of the
+// window's organisation at the window's Mesh address: keep-rotator is a
+// companion of that installation and binds only to it.
+var ErrNoKeepBinding = errors.New("meshext: no keep installation for the rotator")
+
+// OpenRotatorPending opens (or replaces) the keep-rotator window of workspace
+// and returns when it closes. The workspace must hold a keep installation of
+// p.Org at p.MeshURL (ErrNoKeepBinding otherwise); a live window of another
+// organisation is ErrWindowTaken. p.MeshURL is only compared, never stored.
+func (r *Repo) OpenRotatorPending(ctx context.Context, workspace uuid.UUID, p Pending) (time.Time, error) {
+	if err := r.DropExpiredPending(ctx); err != nil {
+		return time.Time{}, err
+	}
+	var expires time.Time
+	err := r.pool.QueryRow(ctx, `
+INSERT INTO mesh_rotator_pending_installs (workspace_id, org_id, opened_by, secret_sha256, expires_at)
+SELECT i.workspace_id, i.org_id, $3, $4, now() + make_interval(secs => $5)
+  FROM mesh_installations i
+ WHERE i.workspace_id = $1 AND i.org_id = $2 AND rtrim(i.mesh_url, '/') = rtrim($6::text, '/')
+ON CONFLICT (workspace_id) DO UPDATE
+   SET opened_by = EXCLUDED.opened_by, secret_sha256 = EXCLUDED.secret_sha256,
+       opened_at = now(), expires_at = EXCLUDED.expires_at
+ WHERE mesh_rotator_pending_installs.org_id = EXCLUDED.org_id OR mesh_rotator_pending_installs.expires_at <= now()
+RETURNING expires_at`, workspace, p.Org, p.OpenedBy, p.SecretSHA256, PendingTTL.Seconds(), p.MeshURL).Scan(&expires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No keep installation of this organisation to attach to, or a live
+		// window of another one: the same answer, so an admin of another
+		// organisation learns nothing about the workspace.
+		return time.Time{}, ErrNoKeepBinding
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("meshext: open rotator window: %w", err)
+	}
+	return expires, nil
+}
+
+// LiveRotatorPending returns the open, unexpired keep-rotator window of
+// workspace; expired windows are deleted first.
+func (r *Repo) LiveRotatorPending(ctx context.Context, workspace uuid.UUID) (Pending, bool, error) {
+	if err := r.DropExpiredPending(ctx); err != nil {
+		return Pending{}, false, err
+	}
+	var p Pending
+	err := r.pool.QueryRow(ctx, `
+SELECT org_id, opened_by, secret_sha256 FROM mesh_rotator_pending_installs
+ WHERE workspace_id = $1`, workspace).Scan(&p.Org, &p.OpenedBy, &p.SecretSHA256)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Pending{}, false, nil
+	}
+	if err != nil {
+		return Pending{}, false, fmt.Errorf("meshext: lookup rotator window: %w", err)
+	}
+	return p, true, nil
+}
+
+// BindRotator consumes the live rotator window p of workspace and records the
+// binding, in one transaction, then runs seal before the commit (see
+// BindPending). A window that expired, was replaced or belongs to another
+// organisation is ErrNoWindow; a workspace whose keep installation is gone or
+// belongs to another organisation is ErrNoKeepBinding, and either way the
+// window is left as it was. A second window on a bound rotator replaces the
+// binding (the reconnect with a new secret).
+func (r *Repo) BindRotator(ctx context.Context, workspace uuid.UUID, p Pending, seal func(context.Context) error) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("meshext: bind rotator: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	tag, err := tx.Exec(ctx, `
+DELETE FROM mesh_rotator_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume rotator window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+INSERT INTO mesh_rotator_bindings (workspace_id, org_id, bound_by)
+SELECT workspace_id, org_id, $3 FROM mesh_installations WHERE workspace_id = $1 AND org_id = $2
+ON CONFLICT (workspace_id) DO UPDATE SET bound_by = EXCLUDED.bound_by, bound_at = now()`,
+		workspace, p.Org, p.OpenedBy)
+	if err != nil {
+		return fmt.Errorf("meshext: insert rotator binding: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoKeepBinding
+	}
+	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: bind rotator: %w", err)
+	}
+	return nil
+}
+
+// RotatorOwner returns the organisation workspace's keep-rotator is bound for.
+func (r *Repo) RotatorOwner(ctx context.Context, workspace uuid.UUID) (uuid.UUID, bool, error) {
+	var org uuid.UUID
+	err := r.pool.QueryRow(ctx, `SELECT org_id FROM mesh_rotator_bindings WHERE workspace_id = $1`, workspace).Scan(&org)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("meshext: lookup rotator binding: %w", err)
+	}
+	return org, true, nil
 }
 
 // BindPending consumes the live window p of workspace and records the
@@ -362,6 +494,58 @@ VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workspace_id) DO NOTHING`, workspace, p
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("meshext: bind: %w", err)
+	}
+	return nil
+}
+
+// ErrNotStore means the workspace has no store-mode installation of the
+// window's organisation to upgrade.
+var ErrNotStore = errors.New("meshext: no store installation to upgrade")
+
+// UpgradeStore consumes the live window p of workspace and turns the
+// store-mode installation the window's organisation already holds into an
+// extension installation, in one transaction, running seal after both
+// statements and before the commit (see BindPending). The window must name
+// the Mesh address the store installation already has: the token sealed at the
+// store install is never redirected to another host, and mesh_url is not
+// rewritten. seal writes on its own connection, so a commit that fails after it
+// leaves the new events secret on a store installation whose window is back;
+// Mesh's next handshake inside the window repairs that. A window that expired,
+// was replaced or belongs to another organisation is ErrNoWindow; an
+// installation that is absent, of another organisation, of another Mesh
+// address or already an
+// extension is ErrNotStore, and either way the window is left as it was.
+func (r *Repo) UpgradeStore(ctx context.Context, workspace uuid.UUID, p Pending, seal func(context.Context) error) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("meshext: upgrade: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	tag, err := tx.Exec(ctx, `
+DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE mesh_installations SET mode = $3, installed_by = $4, updated_at = now()
+ WHERE workspace_id = $1 AND org_id = $2 AND mode = $5 AND rtrim(mesh_url, '/') = rtrim($6::text, '/')`,
+		workspace, p.Org, string(ModeExtension), p.OpenedBy, string(ModeStore), p.MeshURL)
+	if err != nil {
+		return fmt.Errorf("meshext: upgrade installation: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotStore
+	}
+	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: upgrade: %w", err)
 	}
 	return nil
 }

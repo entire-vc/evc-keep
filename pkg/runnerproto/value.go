@@ -56,6 +56,20 @@ func VerifyKeyInfo(j Job) []byte {
 	return e.b.Bytes()
 }
 
+// DiscoverKeyInfo is the HPKE info string of the fingerprint key a discover
+// job receives: its own domain, never VerifyKeyInfo's, so a verify envelope
+// does not open as a discover key and the other way round. It binds the job,
+// runner, store, nonce and window.
+func DiscoverKeyInfo(j Job) []byte {
+	var e encoder
+	e.b.WriteString("keep/fingerprint-key/discover/v1\x00")
+	e.b.Write(Info(j)) // binds job, org, runner, store
+	e.field(tagNonce, j.Nonce)
+	e.i64(tagIssuedAt, j.IssuedAt.Unix())
+	e.i64(tagNotAfter, j.NotAfter.Unix())
+	return e.b.Bytes()
+}
+
 // Info is the HPKE info string for the value of job j. It binds the
 // ciphertext to this job, runner, secret (including scope and provider),
 // version and fingerprint: an envelope captured for one job does not open

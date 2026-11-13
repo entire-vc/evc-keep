@@ -105,9 +105,19 @@ def mr_pipeline(module, config):
     """The jobs a merge request pipeline of `config` creates, every one either
     green or waiting to be played, as the jobs API would list them."""
     names = sorted(module.pipeline_jobs(config, module.MR))
-    return [job(100 + i, name, "manual" if name.endswith("-mutations") else "success",
-                config[name].get("stage", "test"))
-            for i, name in enumerate(names) if "trigger" not in config[name]]
+    rows = []
+    for i, name in enumerate(names):
+        spec = config[name]
+        if "trigger" in spec:
+            continue
+        rules = [r for r in spec.get("rules", []) if isinstance(r, dict)]
+        # As the API reports them: a job with a manual rule waits to be played, and
+        # a rule's allow_failure is the job's.
+        manual = name.endswith("-mutations") or any(r.get("when") == "manual" for r in rules)
+        soft = spec.get("allow_failure") is True or any(r.get("allow_failure") is True for r in rules)
+        status = "manual" if manual else "created" if spec.get("stage") == ".post" else "success"
+        rows.append(dict(job(100 + i, name, status, spec.get("stage", "test")), allow_failure=soft))
+    return rows
 
 
 def run(jobs, notes, head=HEAD, pipe_sha=HEAD, bridges=None, later_mr=None, extra_env=None, fake=FAKE_GLAB):
@@ -146,10 +156,12 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(played), 2, played)
         self.assertNotIn(CANARY, out)
 
-    def test_plays_with_ac_pass_awaiting_mutations(self):
+    def test_refuses_ac_pass_awaiting_mutations_without_ship(self):
+        # The mutations now start only after SHIP; "AC PASS, awaiting mutations" is not a go.
         rc, out, played = run(green_jobs(), [note("Verify: Charles %s on %s" % (AWAITING, HEAD))])
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(len(played), 2)
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(played, [])
+        self.assertIn("not SHIP", out)
 
     def test_refuses_when_head_moved_after_verdict(self):
         rc, out, played = run(green_jobs(), [note("Verify: Charles SHIP %s" % OLD)])
@@ -200,7 +212,7 @@ class Gate(unittest.TestCase):
 
     def test_post_review_trigger_waits_for_the_start_job(self):
         ship = [note("Verify: Charles SHIP %s" % HEAD)]
-        waiting = {"name": "mutations", "stage": "post-review", "status": "created",
+        waiting = {"name": "mutations-mr", "stage": "post-review", "status": "created",
                    "pipeline": {"id": 7}, "downstream_pipeline": None}
         jobs = green_jobs()[:2] + [job(3, "build", "success", "build"),
                                    job(12, "start-mutations", "manual", "post-review")]
@@ -208,7 +220,7 @@ class Gate(unittest.TestCase):
         self.assertEqual((rc, played), (0, ["projects/p/jobs/12/play"]), out)
         # Controls: the same exception for another trigger, another stage, a
         # started trigger or one whose child exists refuses.
-        for change in ({"name": "full-tests"}, {"stage": "test"}, {"status": "running"},
+        for change in ({"name": "full-tests"}, {"name": "mutations"}, {"stage": "test"}, {"status": "running"},
                        {"status": "manual"}, {"downstream_pipeline": {"id": 9, "status": "running"}}):
             bridge = dict(waiting, **change)
             rc, out, played = run(jobs, ship, bridges=green_bridges() + [bridge])
@@ -358,17 +370,54 @@ class Gate(unittest.TestCase):
 
 
 class CurrentConfig(unittest.TestCase):
-    """Merge request pipelines carry no mutation job, so the script has nothing
-    to start on one, even with a SHIP verdict on HEAD and everything green."""
+    """A merge request pipeline carries no mutation job at all (owner decision of
+    13.11.2026): no start job, no bridge, no check, nothing for the script to play."""
 
-    def test_nothing_to_play_on_a_merge_request_pipeline(self):
+    def test_a_merge_request_pipeline_has_nothing_to_play(self):
         module, config = ci_config()
         jobs = mr_pipeline(module, config)
         self.assertGreater(len(jobs), 5, jobs)
+        names = {j["name"] for j in jobs}
+        self.assertFalse(names & {"start-mutations", "mutations-mr", "mutations-mr-check", "mutation-range-mr"}, names)
+        self.assertEqual([j["name"] for j in jobs if j["stage"] == "post-review"], [], jobs)
+        # The backtest is listed as it is on a live pipeline: manual, allowed to fail, not played.
+        self.assertIn(("mutation-backtest", "manual", True),
+                      [(j["name"], j["status"], j["allow_failure"]) for j in jobs])
         rc, out, played = run(jobs, [note("Verify: Charles SHIP %s" % HEAD)])
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(played, [])
-        self.assertIn("no manual mutation jobs", out)
+        self.assertEqual(played, [], out)
+
+    def test_an_unplayed_optional_manual_job_does_not_block(self):
+        ship = [note("Verify: Charles SHIP %s" % HEAD)]
+        base = green_jobs()[:2] + [job(3, "build", "success", "build"),
+                                   job(12, "start-mutations", "manual", "post-review")]
+        backtest = dict(job(4, "mutation-backtest", "manual"), allow_failure=True)
+        rc, out, played = run(base + [backtest], ship)
+        self.assertEqual((rc, played), (0, ["projects/p/jobs/12/play"]), out)
+        # Controls: a blocking manual job, and an optional job that was played and
+        # is running or red, are not "everything else is green".
+        for change in ({"allow_failure": False}, {"status": "running"}, {"status": "failed"},
+                       {"status": "canceled"}, {"status": "created"}):
+            rc, out, played = run(base + [dict(backtest, **change)], ship)
+            self.assertEqual((rc, played), (3, []), (change, out))
+            self.assertIn("job mutation-backtest is", out)
+
+    def test_a_job_of_the_last_stage_neither_blocks_the_gate_nor_keeps_the_script_waiting(self):
+        ship = [note("Verify: Charles SHIP %s" % HEAD)]
+        jobs = green_jobs()[:2] + [job(3, "build", "success", "build"),
+                                   job(12, "start-mutations", "manual", "post-review"),
+                                   job(13, "mutations-mr-check", "created", ".post")]
+        # The check job stays created for as long as the child runs: the script must
+        # start the run and return, not poll until the child has finished.
+        rc, out, played = run(jobs, ship, fake=FAKE_GLAB.replace('s/"created"/"success"/g; ', ""))
+        self.assertEqual((rc, played), (0, ["projects/p/jobs/12/play"]), out)
+        # Controls: a job of the last stage that already failed or was canceled is
+        # not a green pipeline, and an unknown stage is not treated as a late one.
+        for status in ("failed", "canceled"):
+            broken = jobs[:-1] + [job(13, "mutations-mr-check", status, ".post")]
+            rc, out, played = run(broken, ship)
+            self.assertEqual((rc, played), (3, []), (status, out))
+        rc, out, played = run(jobs[:-1] + [job(13, "mutations-mr-check", "created", "deploy")], ship)
+        self.assertEqual((rc, played), (3, []), out)
 
     def test_a_mutation_job_back_on_merge_requests_would_be_played(self):
         # Broken control: the same harness notices a mutation job that returns.
@@ -377,8 +426,8 @@ class CurrentConfig(unittest.TestCase):
         config["sealer-mutations"]["rules"] = [{"if": module.MR_IF, "when": "manual"}]
         jobs = mr_pipeline(module, config)
         rc, out, played = run(jobs, [note("Verify: Charles SHIP %s" % HEAD)])
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(len(played), 1, played)
+        by_id = {"projects/p/jobs/%d/play" % j["id"]: j["name"] for j in jobs}
+        self.assertEqual(sorted(by_id[p] for p in played), ["sealer-mutations"], (rc, out, played))
 
 
 if __name__ == "__main__":

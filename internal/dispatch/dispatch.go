@@ -152,7 +152,9 @@ func (s *Service) Material(ctx context.Context, p mtls.Principal, id string) (ru
 	if err != nil {
 		return runnerproto.ValueEnvelope{}, err
 	}
-	if snap.Job.JobID != id || (!snap.Job.NeedsValue() && !snap.Job.NeedsFingerprintKey()) {
+	// A discover job is refused here until the server issues them with their own
+	// delivery path: it must not reach the verify key envelope by accident.
+	if snap.Job.JobID != id || snap.Job.Action == runnerproto.ActionDiscover || (!snap.Job.NeedsValue() && !snap.Job.NeedsFingerprintKey()) {
 		return runnerproto.ValueEnvelope{}, ErrNotFound
 	}
 	if err := tx.Commit(ctx); err != nil {

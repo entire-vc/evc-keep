@@ -1,5 +1,5 @@
 #!/bin/sh
-# Proves the keep-server bootstrap-org tests can fail: in a scratch copy of the
+# Proves the keep-server bootstrap-org and issue-admin-token tests can fail: in a scratch copy of the
 # tree, switch off one property of cmd/keep-server/app/bootstrap.go (or of
 # tenancy.CreateOrganizationUniqueName, identity.WriteTokenFile or
 # catalog.EnsureDefaultBuiltinStore, which it uses, of bind-default-store, or
@@ -95,6 +95,34 @@ pkg=internal/identity
 mutate overwrite 'os.Link(tmp.Name(), dest)' 'os.Rename(tmp.Name(), dest)' TestWriteTokenFile
 pkg=cmd/keep-server/app
 
+# issue-admin-token: the token only in the 0600 file, the journal record before
+# the token with its id, the admin check (existing user of that org, admin role,
+# active), the bounds shared with bootstrap-org
+src=cmd/keep-server/app/issueadmintoken.go
+issueleak=TestIssueAdminToken_TokenOnlyInFile
+issuefull=TestIssueAdminToken_IssuesForTheAdminAndJournals
+issuerefuse=TestIssueAdminToken_Refusals
+mutate issue-token-in-stdout 'expiresAt.Format(time.RFC3339), dest)' 'expiresAt.Format(time.RFC3339), dest+identity.Reveal(issued.Token))' $issueleak
+mutate issue-audit-dropped 'if err := issueAppend(ctx, pool, logger, audit.Record{' 'if err := issueNoop(ctx, pool, logger, audit.Record{' $issuefull 'func issueAdminTokenFail(' 'func issueNoop(_ context.Context, _ *pgxpool.Pool, _ *slog.Logger, _ audit.Record) error { return nil }\n\nfunc issueAdminTokenFail('
+mutate issue-audit-error-ignored 'if err := issueAppend(ctx, pool, logger, audit.Record{' 'if err := issueAppendIgnored(ctx, pool, logger, audit.Record{' TestIssueAdminToken_JournalFailureIssuesNothing 'func issueAdminTokenFail(' 'func issueAppendIgnored(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r audit.Record) error { _ = issueAppend(ctx, pool, logger, r); return nil }\n\nfunc issueAdminTokenFail('
+mutate issue-token-scope-empty 'Scope: scope.String(), ExpiresAt' 'Scope: "", ExpiresAt' $issuefull
+mutate issue-actor-type 'Actor:  audit.Actor{Type: audit.ActorSystem, ID: "keep-server-issue-admin-token", Via: audit.ViaCLI},' 'Actor:  audit.Actor{Type: audit.ActorUser, ID: "keep-server-issue-admin-token", Via: audit.ViaCLI},' $issuefull
+mutate issue-dir-probe 'probe, err := os.CreateTemp(filepath.Dir(dest), ".keep-issue-*")' 'probe, err := os.CreateTemp(os.TempDir(), ".keep-issue-*")' TestIssueAdminToken_UnwritableDirectoryRefused
+mutate issue-audit-wrong-action 'Action: audit.ActionTokenIssue,' 'Action: audit.ActionTokenRevoke,' $issuefull
+mutate issue-token-id-not-journaled 'TokenID: tokenID,' '' $issuefull
+mutate issue-ttl-not-applied 'ExpiresAt: &expiresAt,' '' $issuefull
+mutate issue-unknown-user-unclassified 'errors.Is(err, tenancy.ErrNotFound)' 'errors.Is(err, io.EOF)' $issuerefuse
+mutate issue-role-unchecked 'role != identity.RoleAdmin' 'role == ""' $issuerefuse
+mutate issue-removed-user-accepted 'user.Status != "active" ||' 'user.Status == "" ||' $issuerefuse
+mutate issue-existing-file-precheck 'if _, err := os.Lstat(dest); err == nil {' 'if false {' TestIssueAdminToken_ExistingFileKeptAndNothingIssued
+mutate issue-relative-path 'if !filepath.IsAbs(*tokenFile) {' 'if false {' TestIssueAdminToken_RelativeTokenFileRefused
+mutate issue-ttl-missing-accepted 'ttl <= 0 || ' '' TestIssueAdminToken_TTLRequiredAndBounded
+mutate issue-ttl-over-limit-accepted 'ttl > bootstrapMaxTTL' 'ttl > 100*bootstrapMaxTTL' TestIssueAdminToken_TTLRequiredAndBounded
+mutate issue-ttl-malformed-accepted 'if err != nil || ttl <= 0' 'if ttl < 0' TestIssueAdminToken_TTLRequiredAndBounded
+mutate issue-undelivered-not-revoked 'if ids.Revoke(context.WithoutCancel(ctx), identity.Principal{OrgID: orgID}, issued.TokenID) != nil {' 'if false {' TestIssueAdminToken_UndeliveredTokenRevoked
+mutate issue-revoke-audit-error-ignored 'if err := issueAppend(context.WithoutCancel(ctx), pool, logger, audit.Record{' 'if err := issueAppendIgnored(context.WithoutCancel(ctx), pool, logger, audit.Record{' TestIssueAdminToken_UndeliveredRevocationJournalFailureReported 'func issueAdminTokenFail(' 'func issueAppendIgnored(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r audit.Record) error { _ = issueAppend(ctx, pool, logger, r); return nil }\n\nfunc issueAdminTokenFail('
+src=cmd/keep-server/app/bootstrap.go
+
 # the default store: bootstrap-org binds one, bind-default-store does the same
 # for an existing org, catalog.EnsureDefaultBuiltinStore does it atomically,
 # once, under the org row's lock
@@ -149,7 +177,7 @@ mutate policy-limit-unchecked 'if maxSet && (*maxPerHour < 1 || *maxPerHour > 10
 
 if mutation_apply_only; then
 	:
-elif (cd "$root" && go test -timeout 180s -count=1 -run 'TestBootstrapOrg|TestBindDefaultStore|TestWriteTokenFile|TestEnsureDefaultBuiltinStore|TestSetDeployPolicy|TestSetPolicy|TestDecodePolicy|TestPolicyChangeReason' ./cmd/keep-server/app/ ./internal/identity/ ./internal/catalog/ ./internal/deployment/ >/dev/null 2>&1); then
+elif (cd "$root" && go test -timeout 180s -count=1 -run 'TestBootstrapOrg|TestIssueAdminToken|TestBindDefaultStore|TestWriteTokenFile|TestEnsureDefaultBuiltinStore|TestSetDeployPolicy|TestSetPolicy|TestDecodePolicy|TestPolicyChangeReason' ./cmd/keep-server/app/ ./internal/identity/ ./internal/catalog/ ./internal/deployment/ >/dev/null 2>&1); then
 	echo "ok   baseline: tests green on the real code"
 else
 	echo "FAIL baseline: tests are red on the real code"

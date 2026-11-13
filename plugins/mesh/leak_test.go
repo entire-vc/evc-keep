@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entire-vc/evc-keep/internal/obs"
 	"github.com/entire-vc/evc-keep/internal/testutil/canary"
 	"github.com/entire-vc/evc-keep/pkg/rotation"
 	"github.com/entire-vc/evc-keep/plugins/mesh"
@@ -205,5 +206,47 @@ func TestRedirectDoesNotCarryToken(t *testing.T) {
 		if got != "" {
 			t.Fatalf("token reached the redirect target: %q", got)
 		}
+	}
+}
+
+// Through Keep's own logger (internal/obs, closed key set) the issue line must
+// keep op, outcome and agent_id, and the failure line its class (threat model
+// §4.4.1) — the plugin's attributes are not dropped.
+func TestJournalSurvivesObsLogger(t *testing.T) {
+	c := canary.New()
+	agent := uuid.NewString()
+	s := newStub(t, agent, c.Value(0))
+	var logs bytes.Buffer
+	p, err := mesh.New(mesh.Config{BaseURL: s.srv.URL, AgentID: s.agent, Token: stubToken, Log: obs.New(&logs)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Issue(context.Background(), rotation.IssueRequest{Subject: "sage", RunID: uuid.New()}); err != nil {
+		t.Fatal(err)
+	}
+	var issue map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line is not JSON: %s", line)
+		}
+		if m["msg"] == "mesh key issue" {
+			issue = m
+		}
+	}
+	if issue == nil {
+		t.Fatalf("no `mesh key issue` line in: %s", logs.String())
+	}
+	if issue["op"] != "issue" || issue["outcome"] != "ok" || issue["agent_id"] != agent {
+		t.Errorf("issue line lost attributes: %v", issue)
+	}
+	if issue["length"] != float64(len(c.Value(0))) {
+		t.Errorf("length missing: %v", issue)
+	}
+	if strings.Contains(logs.String(), "dropped disallowed log attribute") {
+		t.Errorf("plugin attribute still dropped: %s", logs.String())
+	}
+	if c.In(logs.String()) {
+		t.Errorf("canary in log: %s", logs.String())
 	}
 }

@@ -120,6 +120,15 @@ func encodeJob(j Job) []byte {
 	e.str(tagRunnerID, j.RunnerID)
 	e.str(tagStoreID, j.Secret.StoreID)
 	e.str(tagProvider, j.Secret.Provider)
+	if j.Action == ActionDiscover {
+		// A discover job names no secret and no target: those tags are
+		// absent, not empty, and DecodeJob re-encodes to enforce it.
+		e.str(tagAction, string(j.Action))
+		e.i64(tagIssuedAt, j.IssuedAt.Unix())
+		e.i64(tagNotAfter, j.NotAfter.Unix())
+		e.field(tagNonce, j.Nonce)
+		return e.b.Bytes()
+	}
 	e.str(tagSecretName, j.Secret.Name)
 	e.str(tagSecretScope, j.Secret.Scope)
 	e.str(tagExpectedVersion, j.ExpectedVersion)

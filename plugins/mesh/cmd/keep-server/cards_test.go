@@ -200,6 +200,9 @@ func TestPluginBinaryProvidesTheMeshCards(t *testing.T) {
 	if options().SelfRotate == nil {
 		t.Fatal("the plugin binary cannot rotate its own service token")
 	}
+	if options().Rotators == nil {
+		t.Fatal("the plugin binary cannot rotate Mesh agent keys")
+	}
 }
 
 // The grace the plugin asks for with the queue must cover the queue's longest

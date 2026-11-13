@@ -293,7 +293,7 @@ func unknownIf(method string, err error) error {
 
 // journal records ids, outcome class and lengths; nothing from a response.
 func (e *ExtSelf) journal(op, keyID string, err error, extra ...slog.Attr) {
-	attrs := []slog.Attr{slog.String("op", op), slog.String("account", e.account)}
+	attrs := []slog.Attr{slog.String("op", op), slog.String("account_id", e.account)}
 	if keyID != "" {
 		attrs = append(attrs, slog.String("key_id", keyID))
 	}

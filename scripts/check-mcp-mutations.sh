@@ -61,12 +61,39 @@ mutate isloopback-suffix   backend.go 'if host == "localhost" {' 'if strings.Has
 mutate isloopback-prefix   backend.go 'if host == "localhost" {' 'if strings.HasPrefix(host, "localhost") {'
 mutate input-status-open   tools.go 'if status != http.StatusCreated ||' 'if status == 0 ||'
 # the error row keeps its closed shape
-mutate class-forwarded     tools.go 'if string(k) == c {' 'if string(k) == c || true {'
+mutate class-forwarded     tools.go 'if string(k) == c {' 'if string(k) == c || true {' 2
 mutate message-forwarded   tools.go '"the server refused the request: " + class' 'ae.Message'
 mutate request-id-forwarded tools.go 'if !reqid.Valid(rid) {' 'if false {'
-mutate deploy-class-open   tools.go 'knownClass(r.ErrorClass) != r.ErrorClass' 'false'
+mutate deploy-class-open   tools.go '!deployClassKnown(r.ErrorClass)' 'false'
+mutate deploy-class-api-only tools.go 'if runnerproto.ErrorClass(c).Valid() {' 'if false {'
+mutate deploy-class-apperr-off tools.go 'if string(k) == c {' 'if string(k) == c && false {'
 mutate fingerprint-open    tools.go '!fingerprintShape.MatchString(r.Fingerprint)' 'false' 2
+mutate deploy-health-status-open tools.go 'r.Healthcheck != nil && !healthStatus[r.Healthcheck.Status]' 'false'
+mutate deploy-health-list-widened tools.go 'var healthStatus = map[string]bool{"ok": true, "failed": true, "skipped": true}' 'var healthStatus = map[string]bool{"ok": true, "failed": true, "skipped": true, "": true, "degraded": true}'
 mutate deploy-id-unchecked tools.go '!reqid.Valid(r.RequestID)' 'r.RequestID == ""' 2
+
+# Deploy and rotate share approval validation; each condition and caller must matter.
+mutate approval-id-open tools.go 'validUUID(a.ID) && approvalStatus' 'true && approvalStatus'
+mutate approval-status-open tools.go 'approvalStatus[a.Status] && a.URL' 'true && a.URL'
+mutate approval-url-empty tools.go 'a.URL != "" && len(a.URL)' 'true && len(a.URL)'
+mutate approval-url-unbounded tools.go 'len(a.URL) <= 512 &&' 'true &&'
+mutate approval-url-whitespace tools.go '!strings.ContainsAny(a.URL, " \\t\\r\\n")' 'true'
+mutate rotate-approval-unchecked tools.go 'if !validApproval(r.Approval) {' 'if false {'
+mutate deploy-approval-unchecked tools.go '|| !validApproval(r.Approval) {' '|| false {'
+mutate deploy-version-open tools.go '(r.Version != "" && !versionRe.MatchString(r.Version))' 'false' 2
+mutate deploy-status-open tools.go 'if status != http.StatusOK && status != http.StatusAccepted {' 'if false {' 2
+mutate deploy-version-before-ok tools.go '(!r.OK && (r.Version != "" || r.Fingerprint != "") && !laidDown)' '(false && laidDown)'
+mutate deploy-laid-down-any-class tools.go 'laidDown := r.ErrorClass == string(runnerproto.ErrClassHealthcheck) && ' 'laidDown := '
+mutate deploy-laid-down-never tools.go 'laidDown := r.ErrorClass' 'laidDown := false && r.ErrorClass'
+mutate deploy-laid-down-no-version tools.go 'ErrClassHealthcheck) && r.Version != "" &&' 'ErrClassHealthcheck) &&'
+mutate deploy-laid-down-no-fingerprint tools.go 'r.Version != "" && r.Fingerprint != ""' 'r.Version != ""' 
+mutate deploy-class-on-ok tools.go '(r.OK && r.ErrorClass != "")' 'false' 2
+mutate deploy-accepted-may-be-ok tools.go '(status == http.StatusAccepted && (r.OK || r.ErrorClass != ""))' 'false' 2
+mutate deploy-accepted-may-fail tools.go '(r.OK || r.ErrorClass != "")) ||' '(r.OK)) ||' 2
+mutate deploy-ok-needs-version tools.go '(r.Version == "" || r.Fingerprint == "")' 'r.Fingerprint == ""' 2
+mutate deploy-ok-needs-fingerprint tools.go '(r.Version == "" || r.Fingerprint == "")' 'r.Version == ""' 2
+mutate deploy-checked-at-zone tools.go 'CheckedAt.UTC().Truncate(time.Second)' 'CheckedAt.Truncate(time.Second)'
+mutate deploy-checked-at-fraction tools.go 'CheckedAt.UTC().Truncate(time.Second)' 'CheckedAt.UTC()'
 mutate userinfo-accepted   backend.go 'u.Host == "" || u.User != nil' 'u.Host == ""'
 # arguments are validated before they become a path or a query
 mutate scope-unchecked     tools.go '!scopeLevel[a.ScopeLevel] || !validUUID(a.ScopeID)' 'false'

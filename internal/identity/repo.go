@@ -62,6 +62,10 @@ type IssueParams struct {
 	PrincipalID uuid.UUID
 	Scope       string
 	ExpiresAt   *time.Time
+	// TokenID, when set, is the id the token is stored under; zero means a
+	// fresh one. A caller that must journal the id before the token exists
+	// (keep-server issue-admin-token) picks it first.
+	TokenID uuid.UUID
 }
 
 // IssueResult is [Repo.Issue]'s return value — Keep's own internal
@@ -231,9 +235,11 @@ func (r *Repo) Issue(ctx context.Context, p IssueParams) (IssueResult, error) {
 	if err != nil {
 		return IssueResult{}, err
 	}
-	id, err := newID()
-	if err != nil {
-		return IssueResult{}, fmt.Errorf("identity: issue token: %w", err)
+	id := p.TokenID
+	if id == uuid.Nil {
+		if id, err = newID(); err != nil {
+			return IssueResult{}, fmt.Errorf("identity: issue token: %w", err)
+		}
 	}
 	hash := HashToken(token)
 	last4 := Last4(token)

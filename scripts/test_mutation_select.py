@@ -114,7 +114,7 @@ class Uncertainty(unittest.TestCase):
     def test_shared_ci_paths_select_everything(self):
         for f in (".gitlab-ci.yml", ".gitlab/ci/x.yml", ".golangci.yml", "go.mod", "go.sum", "scripts/mutation-helpers.sh",
                   "scripts/mutation-select.py", "scripts/mutation-select.map", "scripts/generate-mutation-pipeline.py",
-                  "scripts/mutation-range.py", "internal/zonecheck/plaintext_api.txt"):
+                  "scripts/mutation-range.py", "scripts/check-mr-mutation-gate.py", "internal/zonecheck/plaintext_api.txt"):
             rep = run([f])[0]
             self.assertTrue(rep["all"] and rep["jobs"]["all"], f)
             self.assertEqual(jobs(rep), set(ms.post_review_jobs(ms.Layout((ROOT / ".gitlab-ci.yml").read_text()).config)), f)
@@ -512,7 +512,7 @@ class CIDefinitions(unittest.TestCase):
 
     def test_comments_and_other_jobs_select_nothing(self):
         self.assertEqual(self.changes(CI_TEXT), set())
-        self.assertEqual(self.changes(edit(CI_TEXT, "stages: [security, lint, test, build, post-review, release]", "# a comment")), set())
+        self.assertEqual(self.changes(edit(CI_TEXT, "stages: [security, lint, test, build, post-review, publish, release]", "# a comment")), set())
         self.assertEqual(self.changes(replace_in_job(CI_TEXT, "w3-stubs", "rules: *full-pipeline-only", "timeout: 25m\n  rules: *full-pipeline-only")), set())
         self.assertEqual(self.changes(replace_in_job(CI_TEXT, "mesh-plugin", "timeout: 15m", "timeout: 16m")), set())
 
@@ -543,11 +543,24 @@ class CIDefinitions(unittest.TestCase):
             self.changes(None)
         # The selection jobs left the pipeline, but the selector still treats a
         # change to one of them as reaching every post-review job.
-        for name in ("mutation-select", "start-mutations", "mutations"):
+        for name in ms.GATING_JOBS:
             with self.subTest(selection_job=name):
                 old = CI_TEXT + f"\n{name}:\n  stage: test\n  script: [\"true\"]\n"
                 with self.assertRaises(ms.Everything):
                     self.changes(old.replace('script: ["true"]', 'script: ["false"]'), old)
+
+    def test_merge_request_selection_jobs_select_everything(self):
+        """A change to the jobs that choose, run or check the merge request's mutation
+        child never narrows: they are gating jobs, and dropping one from the list is red."""
+        for name in ("mutation-range-mr", "mutations-mr", "mutations-mr-check"):
+            self.assertIn(name, ms.GATING_JOBS)
+            old = CI_TEXT + f"\n{name}:\n  stage: post-review\n  script: [\"true\"]\n"
+            with self.subTest(job=name):
+                with self.assertRaises(ms.Everything):
+                    self.changes(old.replace('script: ["true"]', 'script: ["false"]'), old)
+                # Red control: with the job off the list, the same change narrows to that job alone.
+                with patch.object(ms, "GATING_JOBS", tuple(g for g in ms.GATING_JOBS if g != name)):
+                    self.assertEqual(self.changes(old.replace('script: ["true"]', 'script: ["false"]'), old), {name})
 
     def test_ci_files_through_the_report(self):
         new = replace_in_job(CI_TEXT, "audit-mutations", "timeout: ", "timeout: 3")

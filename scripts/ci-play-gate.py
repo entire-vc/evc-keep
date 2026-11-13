@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Decide whether the mutation jobs of an MR pipeline may be started.
+"""Decide whether the mutation jobs of an MR pipeline may be started (not in use).
+
+Since the owner decision of 13.11.2026 a merge request pipeline holds no mutation
+job to start, so nothing calls this script; it stays until it is removed on purpose.
 
 Used by ci-play-mutation-jobs.sh. Inputs are four JSON files (the MR, its
 notes, the jobs of its head pipeline, its bridges: child pipelines). Exit 0 = go; exit 3 = refused, with the
@@ -19,13 +22,14 @@ import sys
 STAGES = ["security", "lint", "test", "build", "post-review"]
 VERDICT_AUTHOR = "charles"
 # The trigger that starts the merge request's child pipeline of post-review jobs.
-POST_REVIEW_TRIGGER = "mutations"
+POST_REVIEW_TRIGGER = "mutations-mr"
+# Stages that only run after every stage above (GitLab's built-in last stage):
+# their jobs cannot have started before the mutation jobs finished.
+AFTER_ALL = (".post",)
 # "SHIP" as a whole word, not the tail of "DO-NOT-SHIP" or part of "SHIPPED".
 SHIP = re.compile(r"(?<![A-Za-z0-9_-])SHIP(?![A-Za-z0-9_-])")
 # Anything that negates or withholds a verdict, anywhere in the verdict line.
 NEGATION = re.compile(r"\b(NOT|NO|NEVER|CANNOT|CAN'T|WON'T|BLOCKED|ROUTE|FAIL\w*)\b|DO-NOT-SHIP", re.I)
-# "AC PASS ... awaiting mutations" as the reviewer writes it (escaped: the repo stays ASCII).
-AC_PASS_AWAITING = re.compile("AC PASS[^\\n]*\u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u043c\u0443\u0442\u0430\u0446\u0438\u0438")
 SHA = re.compile(r"\b[0-9a-f]{40}\b")
 # A note without the marker that still withdraws or blocks a verdict.
 WITHDRAWS = re.compile(r"DO-NOT-SHIP|\b(BLOCKED|WITHDRAW\w*|REVOKE\w*|RETRACT\w*)\b", re.I)
@@ -45,6 +49,12 @@ def when(note):
 
 def is_mutation(job):
     return job["name"].split(" ")[0].endswith("-mutations")
+
+
+def is_optional_manual(job):
+    """An unplayed job that cannot fail the pipeline (manual and allowed to fail, such as
+    the backtest): it gates nothing, so it is not part of "everything else is green"."""
+    return job.get("status") == "manual" and job.get("allow_failure") is True
 
 
 def withdraws(body):
@@ -77,9 +87,9 @@ def reasons(mr, notes, jobs, bridges, mr_after=None):
     mut = [j for j in jobs if is_mutation(j)]
     mut_stage = STAGES.index(mut[0]["stage"]) if mut and mut[0]["stage"] in STAGES else len(STAGES)
     for j in jobs:
-        if is_mutation(j):
+        if is_mutation(j) or is_optional_manual(j):
             continue
-        st = STAGES.index(j["stage"]) if j["stage"] in STAGES else -1
+        st = len(STAGES) if j["stage"] in AFTER_ALL else STAGES.index(j["stage"]) if j["stage"] in STAGES else -1
         if st > mut_stage:
             # Later stage: it cannot have run yet (created, skipped), but a
             # job that already failed or was canceled is not a green CI.
@@ -95,7 +105,7 @@ def reasons(mr, notes, jobs, bridges, mr_after=None):
         # The trigger of the post-review child waits for start-mutations, the
         # job this gate is about to start: not started yet is its only valid
         # state here. Any other state of it, or of any other child, refuses.
-        if (b.get("stage") == STAGES[-1] and b.get("name") == POST_REVIEW_TRIGGER
+        if (b.get("stage") == "post-review" and b.get("name") == POST_REVIEW_TRIGGER
                 and not b.get("downstream_pipeline") and b.get("status") == "created"):
             continue
         if down.get("status") != "success":
@@ -116,8 +126,8 @@ def reasons(mr, notes, jobs, bridges, mr_after=None):
         shas = SHA.findall(line.lower())
         if shas != [head]:
             out.append("the latest verdict does not name exactly the current HEAD %s" % head[:8])
-        elif NEGATION.search(line) or not (SHIP.search(line) or AC_PASS_AWAITING.search(line)):
-            out.append("the latest verdict on this HEAD is not SHIP or AC PASS")
+        elif NEGATION.search(line) or not SHIP.search(line):
+            out.append("the latest verdict on this HEAD is not SHIP")
     return out
 
 

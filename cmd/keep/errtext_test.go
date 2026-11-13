@@ -121,18 +121,23 @@ func TestSanitizeControlHasPositiveControl(t *testing.T) {
 // TestSafeRequestIDRejectsEachBadShape: every guard in safeRequestID alone.
 func TestSafeRequestIDRejectsEachBadShape(t *testing.T) {
 	for name, id := range map[string]string{
-		"too long":  strings.Repeat("a", maxRequestIDLen+1),
-		"bare esc":  "\x1b",
-		"bare bell": "\x07",
-		"space":     "a b",
-		"newline":   "a\n",
-		"non-ascii": "é",
+		"too long":   strings.Repeat("a", 65),
+		"cap 37":     strings.Repeat("a", 37),
+		"cap 52":     strings.Repeat("a", 52),
+		"cap 64":     strings.Repeat("a", 64),
+		"underscore": "req_1",
+		"dot":        "req.1",
+		"bare esc":   "\x1b",
+		"bare bell":  "\x07",
+		"space":      "a b",
+		"newline":    "a\n",
+		"non-ascii":  "é",
 	} {
 		if got := safeRequestID(id); got != unexpectedValue {
 			t.Fatalf("%s: safeRequestID(%q) = %q", name, id, got)
 		}
 	}
-	for _, ok := range []string{"", "req-1_a.B", strings.Repeat("a", maxRequestIDLen)} {
+	for _, ok := range []string{"", "req-1", "Req-1-B", strings.Repeat("a", 36)} {
 		if got := safeRequestID(ok); got != ok {
 			t.Fatalf("safeRequestID(%q) = %q, want unchanged", ok, got)
 		}
@@ -166,10 +171,31 @@ func TestOutputWritersStripStoredControlChars(t *testing.T) {
 	}
 }
 
-// TestRedactedHeaderDumpStripsControlChars: --debug prints response headers.
+// TestRedactedHeaderDumpStripsControlChars: --debug prints response header
+// names; a server-chosen name must not carry terminal controls.
 func TestRedactedHeaderDumpStripsControlChars(t *testing.T) {
-	h := http.Header{"X-Evil": {"a\u009b2J\u202e"}}
+	h := http.Header{"X-Evil\u009b2J\u202e": {"a\u009b2J\u202e"}}
 	if out := redactedHeaderDump(h); hasTerminalControl(out) {
 		t.Fatalf("header dump carries a control character: %q", out)
+	}
+}
+
+// TestPrintAPIErrorNeverPrintsMessage: the server's message does not reach
+// stderr for any class; the class (closed set) and request id still do.
+func TestPrintAPIErrorNeverPrintsMessage(t *testing.T) {
+	c := canary.New()
+	for _, class := range []string{"internal", "totally_made_up", ""} {
+		raw, _ := json.Marshal(apiError{ErrorClass: class, Message: "m " + c.Value(0), RequestID: "r1"})
+		var stderr bytes.Buffer
+		printAPIError(&stderr, bytes.NewReader(raw))
+		if c.In(stderr.String()) || strings.Contains(stderr.String(), "m kc") || !strings.Contains(stderr.String(), "request_id=r1") {
+			t.Errorf("class %q: %q", class, stderr.String())
+		}
+	}
+	raw, _ := json.Marshal(apiError{ErrorClass: "internal", Message: "boom", RequestID: "r1"})
+	var stderr bytes.Buffer
+	printAPIError(&stderr, bytes.NewReader(raw))
+	if !strings.Contains(stderr.String(), "keep: internal (request_id=r1)") || strings.Contains(stderr.String(), "boom") {
+		t.Errorf("positive control: %q", stderr.String())
 	}
 }

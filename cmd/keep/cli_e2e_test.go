@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,23 +47,27 @@ func TestMain(m *testing.M) {
 }
 
 func runTestMain(m *testing.M) int {
-	dir, err := os.MkdirTemp("", "keep-cli-e2e-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mkdir temp dir:", err)
-		return 1
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	keepBinPath = filepath.Join(dir, "keep")
-	pkg := "."
-	if os.Getenv("KEEP_E2E_PROBE_BUILD_FAIL") == "1" {
-		pkg = "./no-such-package" // testmain_cleanup_test.go: exercise the build-failure exit
-	}
-	build := exec.Command("go", "build", "-o", keepBinPath, pkg) //nolint:gosec // G204: keepBinPath is our own mkdtemp path, not attacker input
-	build.Stdout = os.Stderr
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "build keep binary:", err)
-		return 1
+	// The child of TestResolveToken_RefusesNonRegular needs no built binary,
+	// and the parent's hard deadline must not include a build.
+	if os.Getenv(nonRegularHelperEnv) == "" {
+		dir, err := os.MkdirTemp("", "keep-cli-e2e-")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "mkdir temp dir:", err)
+			return 1
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		keepBinPath = filepath.Join(dir, "keep")
+		pkg := "."
+		if os.Getenv("KEEP_E2E_PROBE_BUILD_FAIL") == "1" {
+			pkg = "./no-such-package" // testmain_cleanup_test.go: exercise the build-failure exit
+		}
+		build := exec.Command("go", "build", "-o", keepBinPath, pkg) //nolint:gosec // G204: keepBinPath is our own mkdtemp path, not attacker input
+		build.Stdout = os.Stderr
+		build.Stderr = os.Stderr
+		if err := build.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "build keep binary:", err)
+			return 1
+		}
 	}
 	return m.Run()
 }
@@ -379,10 +384,20 @@ func TestCLI_CrossOrgAndGenuineMissAnswerIdenticalNotFound(t *testing.T) {
 			t.Fatalf("%s: could not extract an error class from stderr %q (the probe may not have reached the server)", label, r.stderr)
 		}
 	}
-	if existing.stderr != missing.stderr || existing.stderr != noOrg.stderr || existing.exitCode != missing.exitCode {
+	// request_id is minted per request, so it is the one part of the line
+	// that legitimately differs; everything else must match byte for byte.
+	e1, m1, n1 := stripRequestID(existing.stderr), stripRequestID(missing.stderr), stripRequestID(noOrg.stderr)
+	if e1 != m1 || e1 != n1 || existing.exitCode != missing.exitCode {
 		t.Fatalf("a foreign org answers differently depending on what it holds:\nexisting name: %q\nmissing name:  %q\nunknown org:   %q",
 			existing.stderr, missing.stderr, noOrg.stderr)
 	}
+}
+
+var requestIDSuffix = regexp.MustCompile(` \(request_id=[A-Za-z0-9-]{1,36}\)\n$`)
+
+// stripRequestID drops the trailing request_id of reportErr's line.
+func stripRequestID(stderr string) string {
+	return requestIDSuffix.ReplaceAllString(stderr, "\n")
 }
 
 // errorClassOf extracts the error_class token from reportErr's

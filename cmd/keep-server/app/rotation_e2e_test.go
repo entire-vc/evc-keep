@@ -62,6 +62,13 @@ type rotFixture struct {
 
 func newRotFixture(t *testing.T, nCarriers int) *rotFixture {
 	t.Helper()
+	return newRotFixtureWith(t, nCarriers, nil)
+}
+
+// newRotFixtureWith is newRotFixture with the key providers of the server's
+// RotatorSource wiring (nil: every secret is generated).
+func newRotFixtureWith(t *testing.T, nCarriers int, source RotatorSource) *rotFixture {
+	t.Helper()
 	ctx := context.Background()
 	pool := testPool(t)
 	mf := newMeshFixtureOn(t, pool, false)
@@ -139,7 +146,7 @@ func newRotFixture(t *testing.T, nCarriers int) *rotFixture {
 	ent := make([]byte, 32)
 	_, _ = rand.Read(ent)
 	r.generated = base64.RawURLEncoding.EncodeToString(ent)
-	r.svc = newRotationsWith(bytes.NewReader(ent), pool, local, deployment.NewRepo(pool, audit.NewJournal(pool).WithLogger(logger)), carriers.NewService(pool), logger)
+	r.svc = newRotationsFrom(bytes.NewReader(ent), source, pool, local, deployment.NewRepo(pool, audit.NewJournal(pool).WithLogger(logger)), carriers.NewService(pool), logger)
 	r.input, err = newInputService(pool, local, "http://127.0.0.1", logger)
 	must(t, err)
 	sweep := wireRotationInput(r.input, r.svc, pool, logger)

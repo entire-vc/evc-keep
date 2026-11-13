@@ -7,7 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
+	"regexp"
+	"strconv"
 	"time"
+
+	"github.com/entire-vc/evc-keep/internal/apperr"
+	"github.com/entire-vc/evc-keep/internal/reqid"
+	"github.com/entire-vc/evc-keep/pkg/runnerproto"
 )
 
 // deployResult mirrors internal/api.DeployResult field for field. It is
@@ -47,10 +54,90 @@ func decodeDeployResult(raw []byte) (deployResult, error) {
 	var r deployResult
 	d := json.NewDecoder(io.LimitReader(bytes.NewReader(raw), 8192))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&r); err != nil || r.RequestID == "" {
+	if err := d.Decode(&r); err != nil || r.RequestID == "" || !deployHealthValid(r.Healthcheck) {
 		return deployResult{}, errors.New("invalid deploy response")
 	}
 	return r, nil
+}
+
+// The fingerprint wire format is the one produced by pkg/fingerprint: an
+// 80-bit tag is sixteen lowercase base32 characters, not ten characters.
+var deployFingerprint = regexp.MustCompile(`^kfp1:[a-z0-9]{1,16}:[a-z2-7]{16}$`)
+
+// validDeployMetadata checks every metadata string before either POST or poll
+// answers reach an output writer. Refuse the entire answer on a bad field;
+// terminal escaping alone cannot prevent a value masquerading as metadata.
+func validDeployMetadata(r deployResult, serverURL string) bool {
+	if r.Fingerprint != "" && !deployFingerprint.MatchString(r.Fingerprint) {
+		return false
+	}
+	if r.Version != "" {
+		n, err := strconv.ParseInt(r.Version, 10, 64)
+		if err != nil || n <= 0 || strconv.FormatInt(n, 10) != r.Version {
+			return false
+		}
+	}
+	if a := r.Approval; a != nil {
+		if !reqid.Valid(a.ID) {
+			return false
+		}
+		switch a.Status {
+		case "requested", "approved", "rejected", "expired":
+		default:
+			return false
+		}
+		base, err := url.Parse(serverURL)
+		// An exact canonical link excludes userinfo, query, fragment, encoded
+		// path aliases and alternate ports without echoing a URL parse error.
+		if err != nil || base.Host == "" || a.URL != "https://"+base.Host+"/console/approvals/"+a.ID {
+			return false
+		}
+	}
+	return true
+}
+
+// deployHealthValid accepts an absent healthcheck or one whose status is
+// exactly one of runnerproto's closed list: the status is printed as is, so an
+// unknown or empty one is a broken server and the whole answer is refused.
+func deployHealthValid(h *deployHealth) bool {
+	if h == nil {
+		return true
+	}
+	switch runnerproto.HealthStatus(h.Status) {
+	case runnerproto.HealthOK, runnerproto.HealthFailed, runnerproto.HealthSkipped:
+		return true
+	}
+	return false
+}
+
+// normalizeDeployResult holds the two server-chosen strings of an answer to
+// their closed shapes before anything is printed or put in a URL: request_id
+// must match the id shape internal/reqid accepts, error_class must be empty or
+// one of apperr's classes or the runner's closed result classes. idOK reports whether the id may be used to poll.
+func normalizeDeployResult(r deployResult) (res deployResult, idOK bool) {
+	idOK = reqid.Valid(r.RequestID)
+	if !idOK {
+		r.RequestID = unexpectedValue
+	}
+	if r.ErrorClass != "" {
+		r.ErrorClass = deployClass(r.ErrorClass)
+	}
+	return r, idOK
+}
+
+// deployClass passes a class only on an exact match with the API classes or the
+// runner's closed result classes (a deploy answer carries either); no trimming,
+// case folding or prefix match.
+func deployClass(c string) string {
+	if runnerproto.ErrorClass(c).Valid() {
+		return c
+	}
+	for _, k := range apperr.Classes() {
+		if string(k) == c {
+			return c
+		}
+	}
+	return unexpectedValue
 }
 
 func runDeploy(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
@@ -95,20 +182,28 @@ func runDeploy(args []string, stdout, stderr io.Writer, getenv func(string) stri
 	if err != nil {
 		return reportErr(stderr, err)
 	}
-	if status == 202 && res.Approval == nil {
+	if !validDeployMetadata(res, c.baseURL) {
+		return reportErr(stderr, errors.New("invalid deploy response"))
+	}
+	res, idOK := normalizeDeployResult(res)
+	if status == 202 && res.Approval == nil && idOK {
 		// The id is the only handle for resuming a wait that ends early.
 		_, _ = fmt.Fprintf(stderr, "keep deploy: waiting for request %s\n", res.RequestID)
 	}
 	deadline := time.Now().Add(*wait)
-	for status == 202 && res.Approval == nil && time.Now().Before(deadline) {
+	for status == 202 && res.Approval == nil && idOK && time.Now().Before(deadline) {
 		time.Sleep(deployPollEvery)
-		status, raw, err = c.doEndpoint("GET", c.baseURL+"/v1/deployments/"+res.RequestID, nil)
+		status, raw, err = c.doEndpoint("GET", c.baseURL+"/v1/deployments/"+url.PathEscape(res.RequestID), nil)
 		if err != nil {
 			return reportErr(stderr, err)
 		}
 		if res, err = decodeDeployResult(raw); err != nil {
 			return reportErr(stderr, err)
 		}
+		if !validDeployMetadata(res, c.baseURL) {
+			return reportErr(stderr, errors.New("invalid deploy response"))
+		}
+		res, idOK = normalizeDeployResult(res)
 	}
 	if err := writeDeployResult(stdout, res, g.jsonOut); err != nil {
 		return reportErr(stderr, errors.New("cannot write deploy result"))

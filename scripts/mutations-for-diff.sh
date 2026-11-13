@@ -30,8 +30,10 @@ deploy: internal/runner/deploy
 deploy-api: internal/api internal/deployment cmd/keep/ cmd/keep-runner cmd/keep-server
 mcp: internal/mcp internal/api cmd/keep/
 bootstrap-org: cmd/keep-server internal/tenancy internal/identity internal/audit internal/builtin/orgpki internal/catalog internal/store/migrations
+listening: cmd/keep-server/app
 keylevel-reconcile: cmd/keep-server internal/builtin internal/reqid internal/audit internal/store/migrations
 mesh-hierarchy: cmd/keep-server internal/api internal/meshext internal/builtin internal/store/migrations
+mesh-metadata: cmd/keep-server internal/api internal/builtin internal/audit internal/store/migrations
 resolve-callers: scripts/check-resolve-callers.sh internal/api cmd/keep-server internal/builtin/mesh_vault.go
 mesh: cmd/keep-server internal/api internal/meshext internal/builtin pkg/fingerprint internal/store/migrations mesh-extension.json mesh-extension.keep-rotator.json
 mesh-ui: internal/api cmd/keep-server internal/meshext
@@ -41,7 +43,10 @@ loop: internal/runner/loop internal/builtin/delivery.go cmd/keep-runner pkg/runn
 execpolicy: pkg/execpolicy
 execrun: internal/runner/execrun pkg/execpolicy
 fingerprint: pkg/fingerprint
+transfer: internal/builtin internal/transfercarrier
+transfer-profile: internal/scopedtransfer internal/transferverify internal/store cmd/keep-server/app
 health: internal/runner/health
+console-exec-predicate: internal/api/console
 identity: internal/identity internal/obs internal/reqid internal/tokenshape
 identity-attack: internal/identity internal/obs internal/testutil/canary test/security
 intake-browser: internal/builtin

@@ -29,6 +29,13 @@ const (
 	MeshExtensionToken = "extension_token"
 	// MeshEventsSecret is the secret Mesh signs events to Keep with.
 	MeshEventsSecret = "events_secret"
+	// MeshExtensionSigningSecret is the secret the Mesh extension signs with
+	// after a store binding was upgraded: it sits beside the events secret,
+	// which the store keeps signing with.
+	MeshExtensionSigningSecret = "extension_signing_secret" // #nosec G101 -- vault slot name, not a value
+	// MeshRotatorSigningSecret is the secret the keep-rotator extension signs
+	// its install handshake with; it shares no slot with the keep secrets.
+	MeshRotatorSigningSecret = "rotator_signing_secret" // #nosec G101 -- vault slot name, not a value
 	// MeshKeepSecret is Keep's own secret, handed to Mesh once at install.
 	MeshKeepSecret = "keep_secret"
 )
@@ -78,7 +85,7 @@ func meshPath(workspace, kind string) (string, error) {
 		return "", errMeshRef
 	}
 	switch kind {
-	case MeshExtensionToken, MeshEventsSecret, MeshKeepSecret:
+	case MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshRotatorSigningSecret, MeshKeepSecret:
 		return "mesh/" + workspace + "/" + kind, nil
 	}
 	return "", errMeshRef
@@ -241,20 +248,28 @@ func (m *MeshVault) Generate(ctx context.Context, org, workspace, kind string) (
 }
 
 // VerifyEvent reports whether tag is the HMAC-SHA256 of msg under the events
-// secret sealed for workspace. Only that one kind can be verified against, and
+// secret sealed for workspace. Only these two kinds can be verified against, and
 // only a bool leaves: no caller outside the zone can obtain a MAC of a message
 // it chose, under any credential.
 func (m *MeshVault) VerifyEvent(ctx context.Context, org, workspace string, msg, tag []byte) (bool, error) {
-	path, err := meshPath(workspace, MeshEventsSecret)
-	if err != nil {
-		return false, err
+	okAny := false
+	for _, kind := range []string{MeshEventsSecret, MeshExtensionSigningSecret} {
+		path, err := meshPath(workspace, kind)
+		if err != nil {
+			return false, err
+		}
+		v, _, err := m.local.Provider(org, "", "", "").Resolve(ctx, provider.Ref{Path: path})
+		if errors.Is(err, provider.ErrNotFound) && kind == MeshExtensionSigningSecret {
+			continue
+		}
+		if err != nil {
+			return false, errMeshVault
+		}
+		ok := fingerprint.VerifyMAC(v, msg, tag)
+		v.Wipe()
+		okAny = okAny || ok
 	}
-	v, _, err := m.local.Provider(org, "", "", "").Resolve(ctx, provider.Ref{Path: path})
-	if err != nil {
-		return false, errMeshVault
-	}
-	defer v.Wipe()
-	return fingerprint.VerifyMAC(v, msg, tag), nil
+	return okAny, nil
 }
 
 // VerifyInstall reports whether tag is the HMAC-SHA256 of msg under
@@ -287,24 +302,54 @@ func (m *MeshVault) MatchInstallSecret(signingSecret string, want [32]byte) bool
 // secret sealed for workspace: a repeated install handshake is accepted only
 // with the secret that is already bound.
 func (m *MeshVault) SameEventsSecret(ctx context.Context, org, workspace, candidate string) (bool, error) {
-	path, err := meshPath(workspace, MeshEventsSecret)
+	c := []byte(candidate)
+	defer clear(c)
+	same := false
+	for _, kind := range []string{MeshEventsSecret, MeshExtensionSigningSecret} {
+		path, err := meshPath(workspace, kind)
+		if err != nil {
+			return false, err
+		}
+		v, _, err := m.local.Provider(org, "", "", "").Resolve(ctx, provider.Ref{Path: path})
+		if errors.Is(err, provider.ErrNotFound) && kind == MeshExtensionSigningSecret {
+			continue
+		}
+		if err != nil {
+			return false, errMeshVault
+		}
+		hit := false
+		secret.Expose(v, func(b []byte) { hit = subtle.ConstantTimeCompare(b, c) == 1 })
+		v.Wipe()
+		same = same || hit
+	}
+	return same, nil
+}
+
+// SameRotatorSecret reports, in constant time, whether candidate is the
+// keep-rotator signing secret sealed for workspace. A workspace whose rotator
+// was never bound has none, and nothing matches.
+func (m *MeshVault) SameRotatorSecret(ctx context.Context, org, workspace, candidate string) (bool, error) {
+	path, err := meshPath(workspace, MeshRotatorSigningSecret)
 	if err != nil {
 		return false, err
 	}
 	v, _, err := m.local.Provider(org, "", "", "").Resolve(ctx, provider.Ref{Path: path})
+	if errors.Is(err, provider.ErrNotFound) {
+		return false, nil
+	}
 	if err != nil {
 		return false, errMeshVault
 	}
-	defer v.Wipe()
 	c := []byte(candidate)
 	defer clear(c)
 	same := false
 	secret.Expose(v, func(b []byte) { same = subtle.ConstantTimeCompare(b, c) == 1 })
+	v.Wipe()
 	return same, nil
 }
 
 // EraseWorkspace crypto-erases, inside tx, every version stored under
-// mesh/<workspace>/ in the organisation's store: the three credentials of the
+// mesh/<workspace>/ in the organisation's store: the credentials of the
 // install and every secret the workspace wrote. It returns how many versions
 // it erased; a repeat finds none left and returns 0. Nothing is committed
 // here: the caller's transaction makes the erasure and its own changes one
@@ -342,7 +387,7 @@ type MeshCheckpoint struct {
 // A kind that was never stored is simply absent from the checkpoint.
 func (m *MeshVault) Checkpoint(ctx context.Context, org, workspace string) (*MeshCheckpoint, error) {
 	cp := &MeshCheckpoint{m: m, org: org, ws: workspace, prior: map[string]secret.Value{}}
-	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshKeepSecret} {
+	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshKeepSecret} {
 		path, err := meshPath(workspace, kind)
 		if err != nil {
 			cp.Wipe()

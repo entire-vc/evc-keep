@@ -39,6 +39,8 @@
 # ── security zone: always selected ───────────────────────────────────────
 script sealer          roots=internal/builtin/sealer always
 script fingerprint     roots=pkg/fingerprint always
+script transfer        roots=internal/builtin,internal/builtin/orgpki,internal/transfercarrier,cmd/keep-server/app
+script transfer-profile roots=internal/scopedtransfer,internal/transferverify,internal/store,cmd/keep-server/app
 script execpolicy      roots=pkg/execpolicy always
 script providertest    roots=pkg/provider/providertest always
 script bootstrap-org   roots=cmd/keep-server,internal/tenancy,internal/identity,internal/audit,internal/builtin/orgpki,internal/catalog,internal/store
@@ -61,6 +63,7 @@ script runner-enroll   roots=cmd/keep-runner,cmd/keep-server,cmd/keep,internal/a
 # ── selected by the dependency graph ─────────────────────────────────────
 script netns           roots=internal/runner/execrun
 script approvals       roots=internal/api,internal/deployment,internal/identity,internal/notify,cmd/keep-server
+script console-exec-predicate roots=internal/api
 script tenancy         roots=internal/tenancy,internal/catalog,internal/identity
 script carriers        roots=internal/carriers
 script rotation        roots=internal/rotation,test/security
@@ -69,14 +72,16 @@ script rotation-wiring roots=cmd/keep-server,internal/rotation/...,internal/inta
 script mesh-plugin     roots=cmd/keep-server/app,internal/config,pkg/provider,pkg/provider/svctoken,pkg/rotation,pkg/secret
 script mesh-rotation-e2e roots=internal/rotation,internal/store,internal/targets,pkg/rotation,pkg/secret,cmd/keep-server,cmd/keep-server/app
 script lanepoller      roots=internal/testutil/canary
-script carrier-verify  roots=internal/deployment,internal/dispatch,internal/api,internal/audit,internal/store,test/...
+script carrier-verify  roots=internal/targets,internal/deployment,internal/dispatch,internal/api,internal/audit,internal/store,test/...
 script deployment      roots=internal/deployment,internal/store
 script mesh            roots=cmd/keep-server,internal/api,internal/meshext,internal/testutil/meshfake,internal/identity,internal/builtin,pkg/fingerprint,internal/store
 script keylevel-reconcile roots=cmd/keep-server,internal/builtin,internal/reqid,internal/audit
+script listening roots=cmd/keep-server/app
 script mesh-ui         roots=cmd/keep-server,internal/api,internal/meshext,internal/testutil/meshfake,internal/identity,internal/store
 script mesh-ui-browser roots=cmd/keep-server,internal/api,internal/meshext,internal/testutil/meshfake,internal/identity,internal/store
 script meshgate        roots=internal/meshgate,pkg/gatecard,internal/deployment,internal/api,cmd/keep-server,internal/store
 script mesh-hierarchy  roots=cmd/keep-server,internal/api,internal/meshext,internal/builtin,internal/store
+script mesh-metadata   roots=cmd/keep-server,internal/api,internal/builtin,internal/audit,internal/store
 script deploy-api      roots=cmd/keep,cmd/keep-runner,cmd/keep-server,internal/api,internal/deployment,internal/apperr
 script dispatch        roots=internal/dispatch,internal/api,internal/builtin/...,internal/store,pkg/runnerproto,pkg/fingerprint,pkg/secret,cmd/keep-server
 script builtin         roots=internal/builtin,internal/builtin/...,pkg/...

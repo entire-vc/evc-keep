@@ -32,6 +32,15 @@
 #                    file wider than mode 0600.
 #   cred-nofollow — internal/runner.Load refuses a symlinked credential key
 #                    file.
+#   cred-fifo-open — internal/runner.Load refuses (and does not hang on) a
+#                    FIFO planted at a credential file: the open is
+#                    non-blocking, so the type check on the fd is reached.
+#   cred-fifo-type — the regular-file check on that same fd is what refuses
+#                    it (without it a non-blocking FIFO read fails some other
+#                    way, not as "not a regular file").
+#   cred-size-*   — internal/runner.Load refuses a credential file longer
+#                    than 1 MiB instead of truncating it (mutants: read only
+#                    the cap, refusal no-op, cap raised, refusal echoing file content).
 #   rk-mode       — builtin's readLocalRoot refuses a root key file
 #                    wider than mode 0600.
 #   rk-nofollow   — readLocalRoot refuses a symlinked root key file.
@@ -66,6 +75,17 @@
 #                    different (or downgraded-to-plain-http) origin.
 #   https-keep    — keep runner enroll-token/revoke refuse a non-https
 #                    -server before the admin bearer token is sent.
+#   body-keep     — keep runner enroll-token/revoke read at most 1 MiB of the
+#                    server's answer, on the success and the error path.
+#   body-runner   — keep-runner enroll reads at most 1 MiB of the server's
+#                    answer, on the success and the error path.
+#   single-doc-*  — the bounded decoders of keep runner and keep-runner enroll
+#                    accept exactly one JSON document (trailing whitespace only);
+#                    a second document or garbage is refused, call sites included.
+#   stdin-trunc   — keep-runner enroll reads one byte past the 4096-byte stdin
+#                    cap, and refuses longer input instead of truncating the
+#                    token (mutants: truncate back, refusal no-op, cap raised,
+#                    refusal echoing input as text or hex).
 #   redir-keep    — keep runner enroll-token does not follow a redirect to a
 #                    different (or downgraded-to-plain-http) origin.
 #
@@ -139,6 +159,7 @@ enrolltoken=internal/enrolltoken/repo.go
 runnersapi=internal/api/runners.go
 runnerenroll=cmd/keep-runner/enroll.go
 keeprunnercli=cmd/keep/runner.go
+keepbounded=cmd/keep/runner_bounded.go
 
 mutate restart-keystore internal/builtin/store.go ./internal/builtin/orgpki/... \
  'FROM keep_kek WHERE org_id = $1 AND id = $2' \
@@ -258,6 +279,36 @@ mutate cred-nofollow "$credential" ./internal/runner/... \
 	'os.O_RDONLY|syscall.O_NOFOLLOW' \
 	'os.O_RDONLY' \
 	'^TestLoadCredentialRefusesSymlinkedKey$'
+
+mutate cred-fifo-open "$credential" ./internal/runner/... \
+	'syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY' \
+	'syscall.O_NOFOLLOW' \
+	'^TestCredentialLoadFIFO$'
+
+mutate cred-fifo-type "$credential" ./internal/runner/... \
+	'case !fi.Mode().IsRegular():' \
+	'case false:' \
+	'^TestCredentialLoadFIFO$'
+
+mutate cred-size-trunc "$credential" ./internal/runner/... \
+	'io.LimitReader(f, maxCredentialFileBytes+1)' \
+	'io.LimitReader(f, maxCredentialFileBytes)' \
+	'^TestLoadCredentialRefusesOversizeFile$'
+
+mutate cred-size-noop "$credential" ./internal/runner/... \
+	'if len(data) > maxCredentialFileBytes {' \
+	'if false {' \
+	'^TestLoadCredentialRefusesOversizeFile$'
+
+mutate cred-size-raised "$credential" ./internal/runner/... \
+	'const maxCredentialFileBytes = 1 << 20' \
+	'const maxCredentialFileBytes = 1 << 24' \
+	'^TestLoadCredentialRefusesOversizeFile$'
+
+mutate cred-size-echo "$credential" ./internal/runner/... \
+	'		clear(data)' \
+	'		return nil, fmt.Errorf("exceeds %s", data[:200])' \
+	'^TestLoadCredentialRefusesOversizeFile$'
 
 mutate rk-mode "$rootkey" ./internal/builtin/ \
 	'st.Mode&0777 != 0600' \
@@ -485,6 +536,152 @@ mutate redir-keep "$keeprunnercli" ./cmd/keep/... \
 	'CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },' \
 	'CheckRedirect: nil,' \
 	'^TestRunnerEnrollTokenDoesNotFollowRedirectToPlainHTTP$'
+
+mutate body-keep "$keepbounded" ./cmd/keep/... \
+	'io.LimitReader(r, maxRunnerResponseBytes+1)' \
+	'r' \
+	'^TestRunnerResponseBodyLimit$'
+
+mutate body-runner "$runnerenroll" ./cmd/keep-runner/... \
+	'io.LimitReader(r, maxEnrollResponseBytes+1)' \
+	'r' \
+	'^TestEnrollResponseBodyLimit$'
+
+mutate body-keep-cap "$keepbounded" ./cmd/keep/... \
+	'if len(b) > maxRunnerResponseBytes {' \
+	'if false {' \
+	'^TestRunnerResponseBodyLimit$'
+
+mutate body-runner-cap "$runnerenroll" ./cmd/keep-runner/... \
+	'if len(b) > maxEnrollResponseBytes {' \
+	'if false {' \
+	'^TestEnrollResponseBodyLimit$'
+
+mutate single-doc-keep "$keepbounded" ./cmd/keep/... \
+	'if _, err := dec.Token(); err != io.EOF {' \
+	'if false {' \
+	'^TestRunnerSingleJSONDocument$'
+
+mutate single-doc-runner "$runnerenroll" ./cmd/keep-runner/... \
+	'if _, err := dec.Token(); err != io.EOF {' \
+	'if false {' \
+	'^TestEnrollSingleJSONDocument$'
+
+# Call sites: one caller goes back to a bare single Decode.
+mutate single-doc-keep-site-success "$keeprunnercli" ./cmd/keep/... \
+	'decodeBounded(resp.Body, &res)' \
+	'json.NewDecoder(resp.Body).Decode(&res)' \
+	'^TestRunnerSingleJSONDocument$'
+
+mutate single-doc-runner-site-error "$runnerenroll" ./cmd/keep-runner/... \
+	'decodeBounded(body, &e)' \
+	'json.NewDecoder(body).Decode(&e)' \
+	'^TestEnrollSingleJSONDocument$'
+
+# Call-site mutations: the shared helper stays intact, one caller goes back to
+# an unbounded decoder.
+mutate body-keep-site-success "$keeprunnercli" ./cmd/keep/... \
+	'decodeBounded(resp.Body, &res)' \
+	'json.NewDecoder(resp.Body).Decode(&res)' \
+	'^TestRunnerResponseBodyLimit$'
+
+mutate body-keep-site-error "$keeprunnercli" ./cmd/keep/... \
+	'decodeBounded(body, &e)' \
+	'json.NewDecoder(body).Decode(&e)' \
+	'^TestRunnerResponseBodyLimit$'
+
+mutate body-runner-site-success "$runnerenroll" ./cmd/keep-runner/... \
+	'decodeBounded(resp.Body, &res)' \
+	'json.NewDecoder(resp.Body).Decode(&res)' \
+	'^TestEnrollResponseBodyLimit$'
+
+mutate body-runner-site-error "$runnerenroll" ./cmd/keep-runner/... \
+	'decodeBounded(body, &e)' \
+	'json.NewDecoder(body).Decode(&e)' \
+	'^TestEnrollResponseBodyLimit$'
+
+# Stdin cap: oversized input is refused, never truncated into a shorter token.
+mutate stdin-trunc "$runnerenroll" ./cmd/keep-runner/... \
+	'io.LimitReader(os.Stdin, maxEnrollTokenBytes+1)' \
+	'io.LimitReader(os.Stdin, maxEnrollTokenBytes)' \
+	'^TestEnrollStdinBoundary$'
+
+mutate stdin-refusal-noop "$runnerenroll" ./cmd/keep-runner/... \
+	'if len(tokenBytes) > maxEnrollTokenBytes {' \
+	'if false {' \
+	'^TestEnrollStdinBoundary$'
+
+mutate stdin-cap-raised "$runnerenroll" ./cmd/keep-runner/... \
+	'const maxEnrollTokenBytes = 4096' \
+	'const maxEnrollTokenBytes = 1 << 20' \
+	'^TestEnrollStdinBoundary$'
+
+mutate stdin-refusal-echo "$runnerenroll" ./cmd/keep-runner/... \
+	'the token\\n", maxEnrollTokenBytes)' \
+	'the token\\n", maxEnrollTokenBytes); fmt.Fprintln(os.Stderr, string(tokenBytes[:8]))' \
+	'^TestEnrollStdinBoundary$'
+
+mutate stdin-refusal-echo-hex "$runnerenroll" ./cmd/keep-runner/... \
+	'the token\\n", maxEnrollTokenBytes)' \
+	'the token\\n", maxEnrollTokenBytes); fmt.Fprintf(os.Stderr, "%x\\n", tokenBytes[:12])' \
+	'^TestEnrollStdinBoundary$'
+
+# keep-runner enroll never prints server text: not the decoder's error, not
+# the error message, class and request id only inside their closed shapes.
+mutate enroll-leak-decoder "$runnerenroll" ./cmd/keep-runner/... \
+	'fmt.Fprintln(os.Stderr, "keep-runner enroll: decoding response: server answer is not valid")' \
+	'fmt.Fprintln(os.Stderr, "keep-runner enroll: decoding response:", err)' \
+	'^TestEnrollServerTextNeverReachesTerminal$'
+
+mutate enroll-leak-message "$runnerenroll" ./cmd/keep-runner/... \
+	'safeRequestID(e.RequestID))' \
+	'safeRequestID(e.RequestID)+e.Message)' \
+	'^TestEnrollServerTextNeverReachesTerminal$'
+
+mutate enroll-leak-class "$runnerenroll" ./cmd/keep-runner/... \
+	'safeClass(e.ErrorClass), safeRequestID' \
+	'e.ErrorClass, safeRequestID' \
+	'^TestEnrollServerTextNeverReachesTerminal$'
+
+mutate enroll-leak-request-id "$runnerenroll" ./cmd/keep-runner/... \
+	'safeRequestID(e.RequestID))' \
+	'e.RequestID)' \
+	'^TestEnrollServerTextNeverReachesTerminal$'
+
+# keep-runner enroll prints a static class for a transport failure, never the
+# *url.Error (URL with userinfo/path/query) or the dial error (host). One
+# mutant restores the raw error at the call site, one drops the classifier's
+# result for each class, and one turns the classifier into a no-op that
+# returns the raw text.
+mutate enroll-transport-raw "$runnerenroll" ./cmd/keep-runner/... \
+	'request failed: "+requestFailureKind(err))' \
+	'request failed: "+err.Error())' \
+	'^TestEnrollTransportErrorSafe$'
+
+mutate enroll-transport-kind-noop "$runnerenroll" ./cmd/keep-runner/... \
+	'func requestFailureKind(err error) string {' \
+	'func requestFailureKind(err error) string { return err.Error()' \
+	'^TestEnrollTransportErrorSafe$'
+
+mutate enroll-transport-refused "$runnerenroll" ./cmd/keep-runner/... \
+	'return "could not reach the server"' \
+	'return err.Error()' \
+	'^TestEnrollTransportErrorSafe$'
+
+mutate enroll-transport-timeout "$runnerenroll" ./cmd/keep-runner/... \
+	'return "timeout"' \
+	'return err.Error()' \
+	'^TestEnrollTransportErrorSafe$'
+
+mutate enroll-transport-tls "$runnerenroll" ./cmd/keep-runner/... \
+	'return "TLS certificate verification failed"' \
+	'return err.Error()' \
+	'^TestEnrollTransportErrorSafe$'
+
+mutate enroll-transport-alert "$runnerenroll" ./cmd/keep-runner/... \
+	'opErr.Op == "remote error"' \
+	'opErr.Op == "never"' \
+	'^TestEnrollTransportErrorSafe$'
 
 # keep-server logs "listening" only after both sockets are bound: the line is
 # the readiness signal tests and supervisors wait for. One mutant logs it

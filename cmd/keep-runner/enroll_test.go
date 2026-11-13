@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,11 +49,17 @@ func captureEnrollOutput(t *testing.T, stdin string, fn func() int) (rc int, std
 		_ = inW.Close()
 	}()
 
+	// Drain both pipes while fn runs: output larger than the pipe buffer
+	// must not block the writer (a reflecting mutant would hang, not fail).
+	var outBytes, errBytes []byte
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); outBytes, _ = io.ReadAll(outR) }()
+	go func() { defer wg.Done(); errBytes, _ = io.ReadAll(errR) }()
 	rc = fn()
 	_ = outW.Close()
 	_ = errW.Close()
-	outBytes, _ := io.ReadAll(outR)
-	errBytes, _ := io.ReadAll(errR)
+	wg.Wait()
 	os.Stdout, os.Stderr, os.Stdin = origOut, origErr, origIn
 	return rc, string(outBytes), string(errBytes)
 }
@@ -97,6 +104,34 @@ func unrelatedSelfSignedCert(t *testing.T) *x509.Certificate {
 		t.Fatalf("parse unrelated cert: %v", err)
 	}
 	return cert
+}
+
+// enrollFixtureRunnerID is a canonical runner id used by response fixtures.
+const enrollFixtureRunnerID = "11111111-1111-1111-1111-111111111111"
+
+// validEnrollResponse is a well-formed server answer: a real certificate whose
+// common name is runnerID, and a sign key id in the server's current format.
+func validEnrollResponse(t *testing.T, runnerID string) runnerEnrollResponse {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: runnerID, Organization: []string{"org1"}},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	if err != nil {
+		t.Fatalf("create runner cert: %v", err)
+	}
+	return runnerEnrollResponse{
+		RunnerID: runnerID, Certificate: der, CACertificate: []byte("fixture"),
+		SignKeyID: "orgsign_0123456789abcdef", SignPubKey: make([]byte, 32),
+		NotAfter: time.Now().Add(time.Hour),
+	}
 }
 
 func enrollPolicyFixture(t *testing.T) string {
@@ -176,14 +211,7 @@ func TestEnrollDoesNotFollowRedirectToPlainHTTP(t *testing.T) {
 func TestEnrollTrustsPinnedServerCA(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(runnerEnrollResponse{
-			RunnerID:      "11111111-1111-1111-1111-111111111111",
-			Certificate:   []byte("leaf-der-fixture"),
-			CACertificate: []byte("ca-der-fixture"),
-			SignKeyID:     "test-sign-key",
-			SignPubKey:    []byte("pub-fixture"),
-			NotAfter:      time.Now().Add(time.Hour),
-		})
+		_ = json.NewEncoder(w).Encode(validEnrollResponse(t, enrollFixtureRunnerID))
 	}))
 	defer srv.Close()
 
@@ -212,11 +240,7 @@ func TestEnrollRegistersLocalDeliveryPublicKey(t *testing.T) {
 			return
 		}
 		deliveredPublic = body.HPKEPublicKey
-		_ = json.NewEncoder(w).Encode(runnerEnrollResponse{
-			RunnerID: "11111111-1111-1111-1111-111111111111", Certificate: []byte("fixture"),
-			CACertificate: []byte("fixture"), SignKeyID: "fixture", SignPubKey: make([]byte, 32),
-			NotAfter: time.Now().Add(time.Hour),
-		})
+		_ = json.NewEncoder(w).Encode(validEnrollResponse(t, enrollFixtureRunnerID))
 	}))
 	defer srv.Close()
 	dir := t.TempDir()

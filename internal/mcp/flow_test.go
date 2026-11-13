@@ -62,12 +62,12 @@ func TestDeployPollsUntilTheRunnerAnswers(t *testing.T) {
 			_, _ = w.Write([]byte(`{"ok":false,"request_id":"` + testRequest + `"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"ok":true,"request_id":"` + testRequest + `","fingerprint":"kfp1:k:abcdefghijklmnop","version":"v2","healthcheck":{"status":"ok","checked_at":"1970-01-01T00:00:01Z"}}`))
+		_, _ = w.Write([]byte(`{"ok":true,"request_id":"` + testRequest + `","fingerprint":"kfp1:k:abcdefghijklmnop","version":"2","healthcheck":{"status":"ok","checked_at":"1970-01-01T00:00:01Z"}}`))
 	}))
 	defer srv.Close()
 	got := answers(t, session(t, newTestServer(t, srv.URL, "tok"), call(1, "deploy", deployArgs(nil))))
 	text := got[0].Result.Content[0].Text
-	if got[0].Result.IsError || !strings.Contains(text, `"ok":true`) || !strings.Contains(text, `"version":"v2"`) || polls.Load() != 3 {
+	if got[0].Result.IsError || !strings.Contains(text, `"ok":true`) || !strings.Contains(text, `"version":"2"`) || polls.Load() != 3 {
 		t.Fatalf("polls=%d answer=%s", polls.Load(), text)
 	}
 }
@@ -99,7 +99,7 @@ func TestDeployApprovalIsReturnedAtOnce(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(202)
-		_, _ = w.Write([]byte(`{"ok":false,"request_id":"` + testRequest + `","approval":{"id":"a1","status":"pending","url":"https://keep.example/console/a1"}}`))
+		_, _ = w.Write([]byte(`{"ok":false,"request_id":"` + testRequest + `","approval":{"id":"` + testSecretID + `","status":"requested","url":"https://keep.example/console/a1"}}`))
 	}))
 	defer srv.Close()
 	got := answers(t, session(t, newTestServer(t, srv.URL, "tok"), call(1, "deploy", deployArgs(nil))))

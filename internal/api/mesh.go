@@ -40,6 +40,9 @@ type MeshVault interface {
 	// only a verdict.
 	VerifyInstall(signingSecret string, msg, tag []byte) bool
 	SameEventsSecret(ctx context.Context, org, workspace, candidate string) (bool, error)
+	// SameRotatorSecret is the same comparison for the keep-rotator's own
+	// secret, which sits in a slot of its own.
+	SameRotatorSecret(ctx context.Context, org, workspace, candidate string) (bool, error)
 	// MatchInstallSecret compares the SHA-256 of the handshake's signing
 	// secret with the one the admin gave for the window, in the zone.
 	MatchInstallSecret(signingSecret string, want [32]byte) bool
@@ -86,7 +89,9 @@ type MeshCheckpoint interface {
 const (
 	meshKindToken      = "extension_token"
 	meshKindEvents     = "events_secret"
-	meshKindKeepSecret = "keep_secret" // #nosec G101 -- vault slot name, not a value
+	meshKindExtSigning = "extension_signing_secret" // #nosec G101 -- vault slot name, not a value
+	meshKindKeepSecret = "keep_secret"              // #nosec G101 -- vault slot name, not a value
+	meshKindRotator    = "rotator_signing_secret"   // #nosec G101 -- vault slot name, not a value
 )
 
 // MeshDeps wires the optional Mesh extension. A nil *MeshDeps in [Deps] means
@@ -213,6 +218,22 @@ type meshRoutes struct {
 // spends nothing; taking first keeps a parallel burst of bad calls from all
 // passing a check before the first one is charged.
 func (m *meshRoutes) preauthTake(w http.ResponseWriter, r *http.Request, requestID string) (refund func(), ok bool) {
+	return m.preauthTakeKind(w, r, requestID, "")
+}
+
+// meshRotatorBucket separates the rotator's budgets from keep's: Mesh checks
+// both extensions at the same address and the same workspace, and a rotator
+// that is not connected yet must not spend what the keep handshake needs.
+const meshRotatorBucket identity.Kind = "mesh-rotator"
+
+// preauthTakeKind is preauthTake in the bucket of kind ("" is the shared one).
+func (m *meshRoutes) preauthTakeKind(w http.ResponseWriter, r *http.Request, requestID string, kind identity.Kind) (refund func(), ok bool) {
+	return m.preauthTakeMsg(w, r, requestID, kind, "too many requests; retry later")
+}
+
+// preauthTakeMsg is preauthTakeKind with the text of the 429 the route
+// answers with.
+func (m *meshRoutes) preauthTakeMsg(w http.ResponseWriter, r *http.Request, requestID string, kind identity.Kind, limited string) (refund func(), ok bool) {
 	if len(m.deps.TrustedProxies) == 0 {
 		if p := peerAddr(r.RemoteAddr); p.IsLoopback() {
 			m.warnLoopOnce.Do(func() {
@@ -223,10 +244,11 @@ func (m *meshRoutes) preauthTake(w http.ResponseWriter, r *http.Request, request
 		}
 	}
 	k := addrKey(clientAddr(r, m.deps.TrustedProxies))
+	k.kind = kind
 	allowed, wait := m.preauth.take(k)
 	if !allowed {
 		w.Header().Set("Retry-After", strconv.Itoa(wait))
-		writeError(w, http.StatusTooManyRequests, apperr.ClassRateLimited, "too many requests; retry later", requestID)
+		writeError(w, http.StatusTooManyRequests, apperr.ClassRateLimited, limited, requestID)
 		return nil, false
 	}
 	return func() { m.preauth.refund(k) }, true
@@ -323,6 +345,11 @@ func (m *meshRoutes) handleInstall(w http.ResponseWriter, r *http.Request) {
 	err = m.deps.Vault.Put(r.Context(), org, wss, meshKindToken, string(req.ExtensionToken))
 	if err == nil {
 		err = m.deps.Vault.Put(r.Context(), org, wss, meshKindEvents, string(req.EventsEndpointSecret))
+	}
+	if err == nil {
+		// A reinstall rotates every signing key: the extension's secret from an
+		// earlier upgrade is replaced by one nobody holds.
+		_, err = m.deps.Vault.Generate(r.Context(), org, wss, meshKindExtSigning)
 	}
 	if err == nil {
 		generated, err = m.deps.Vault.Generate(r.Context(), org, wss, meshKindKeepSecret)
@@ -587,6 +614,18 @@ func meshNonceValid(n string) bool {
 // workspace to attribute it to, and an open write path would let anyone fill
 // the journal.
 func (m *meshRoutes) secretActor(w http.ResponseWriter, r *http.Request, requestID string, action audit.Action, body []byte) (ws, org uuid.UUID, ok bool) {
+	return m.secretActorMsgs(w, r, requestID, action, body, secretActorLegacy)
+}
+
+// actorMsgs are the texts a route answers with when the actor check cannot
+// complete; the statuses and classes are the same for every route.
+type actorMsgs struct{ db, journal, limited string }
+
+// secretActorLegacy is what PUT and resolve have always answered.
+var secretActorLegacy = actorMsgs{db: "database not reachable", journal: "secret storage not reachable", limited: "too many requests; retry later"}
+
+// secretActorMsgs is secretActor with the texts of one route.
+func (m *meshRoutes) secretActorMsgs(w http.ResponseWriter, r *http.Request, requestID string, action audit.Action, body []byte, msgs actorMsgs) (ws, org uuid.UUID, ok bool) {
 	deny := func() (uuid.UUID, uuid.UUID, bool) {
 		writeError(w, http.StatusUnauthorized, apperr.ClassUnauthenticated, "authentication failed", requestID)
 		return uuid.Nil, uuid.Nil, false
@@ -612,13 +651,13 @@ func (m *meshRoutes) secretActor(w http.ResponseWriter, r *http.Request, request
 	if !hasPrefix || derr != nil {
 		return deny()
 	}
-	refund, ok := m.preauthTake(w, r, requestID)
+	refund, ok := m.preauthTakeMsg(w, r, requestID, "", msgs.limited)
 	if !ok {
 		return uuid.Nil, uuid.Nil, false
 	}
 	owner, found, err := m.deps.Repo.Owner(r.Context(), ws)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "database not reachable", requestID)
+		writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, msgs.db, requestID)
 		return uuid.Nil, uuid.Nil, false
 	}
 	if !found {
@@ -639,12 +678,12 @@ func (m *meshRoutes) secretActor(w http.ResponseWriter, r *http.Request, request
 	fresh, err := m.deps.Repo.UseNonce(r.Context(), ws, nonce)
 	if err != nil {
 		_ = m.auditSecret(r, owner, ws, action, "", MeshSecretMeta{}, audit.StatusFailed, audit.ErrClassInternal)
-		writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "database not reachable", requestID)
+		writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, msgs.db, requestID)
 		return uuid.Nil, uuid.Nil, false
 	}
 	if !fresh {
 		if err := m.auditSecret(r, owner, ws, action, "", MeshSecretMeta{}, audit.StatusFailed, audit.ErrClassPermissionDenied); err != nil {
-			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "secret storage not reachable", requestID)
+			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, msgs.journal, requestID)
 			return uuid.Nil, uuid.Nil, false
 		}
 		return deny()
@@ -654,7 +693,7 @@ func (m *meshRoutes) secretActor(w http.ResponseWriter, r *http.Request, request
 	refund()
 	if pathOrg, perr := uuid.Parse(r.PathValue("org_id")); perr != nil || pathOrg != owner {
 		if err := m.auditSecret(r, owner, ws, action, "", MeshSecretMeta{}, audit.StatusFailed, audit.ErrClassPermissionDenied); err != nil {
-			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "secret storage not reachable", requestID)
+			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, msgs.journal, requestID)
 			return uuid.Nil, uuid.Nil, false
 		}
 		writeError(w, http.StatusForbidden, apperr.ClassPermissionDenied, "request refused", requestID)

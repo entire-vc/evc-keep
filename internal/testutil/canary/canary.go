@@ -3,10 +3,8 @@
 // across the encodings a value might accidentally survive through on its
 // way out (a header, a JSON string, a URL query, …).
 //
-// This is a temporary, standalone copy: pkg/provider/providertest (not yet
-// merged into main) carries the canonical version of this helper for
-// provider conformance tests. Once that lands, this package is meant to be
-// reconciled with it rather than living on in parallel.
+// This is the single detector: pkg/provider/providertest uses it too, so the
+// encodings and base64 alignments are fixed in one place.
 package canary
 
 import (

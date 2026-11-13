@@ -87,6 +87,13 @@ mutations = [
     ('migration-verify-unique-request', 'internal/store/migrations/00022_carrier_verify.sql', 'internal/deployment', 'TestVerifyTablesRejectInvalidRows', '    UNIQUE (org_id,request_id),\n', '    UNIQUE (org_id,id,request_id),\n'),
     ('migration-verify-state-check', 'internal/store/migrations/00022_carrier_verify.sql', 'internal/deployment', 'TestVerifyTablesRejectInvalidRows', "CHECK ((state = 'pending') = (completed_at IS NULL))", 'CHECK (true)'),
     ('migration-verify-fingerprint-shape', 'internal/store/migrations/00022_carrier_verify.sql', 'internal/deployment', 'TestVerifyTablesRejectInvalidRows', "expected_fingerprint TEXT NOT NULL CHECK (expected_fingerprint ~ '^kfp1:[a-z0-9]{1,16}:[a-z2-7]{16}$'),", 'expected_fingerprint TEXT NOT NULL,'),
+    ('credential-observe-refused', 'internal/targets/observe.go', 'internal/targets', 'TestObserveSystemdCredentialMatchesOnlyUnderItsName', 'h, ok := kindHandlers[t.Kind]', 'if t.Kind == runnerproto.TargetSystemdCredential {\n\t\treturn "", false, denied("target kind cannot be verified")\n\t}\n\th, ok := kindHandlers[t.Kind]'),
+    ('credential-observe-swallows-policy', 'internal/targets/observe.go', 'internal/targets', 'TestObserveSystemdCredentialUntrustedToolIsPolicy', 'if errors.Is(err, ErrPolicy) {\n\t\t\treturn "", false, err', 'if false {\n\t\t\treturn "", false, err'),
+    ('credential-verify-without-unit', 'internal/deployment/verify.go', 'internal/deployment', 'TestVerifyCredentialCarrierNamesTheUnitOfItsLastDeploy', 'c.target.Unit = last.Unit', '_ = last'),
+    ('credential-verify-unnamed-dispatched', 'internal/deployment/verify.go', 'internal/deployment', 'TestVerifyCredentialCarrierWithoutDeployFailsBeforeAnyJob', 'if c.target.Unit == "" {', 'if false {'),
+    ('credential-verify-any-destination', 'internal/deployment/verify.go', 'internal/deployment', 'TestVerifyCredentialCarrierWithoutDeployFailsBeforeAnyJob', "AND j.status='completed' AND dr.target @> $4::jsonb", "AND j.status='completed'"),
+    ('credential-verify-incomplete-deploy', 'internal/deployment/verify.go', 'internal/deployment', 'TestVerifyCredentialCarrierTakesTheNewestCompletedDeployOnly', "AND j.action='deploy' AND j.status='completed' AND", "AND j.action='deploy' AND"),
+    ('credential-verify-oldest-deploy', 'internal/deployment/verify.go', 'internal/deployment', 'TestVerifyCredentialCarrierTakesTheNewestCompletedDeployOnly', 'ORDER BY j.created_at DESC, j.id DESC LIMIT 1`, org, secretID', 'ORDER BY j.created_at ASC, j.id ASC LIMIT 1`, org, secretID'),
 ]
 env = os.environ.copy()
 apply_only = os.environ.get('MUTATION_APPLY_ONLY') == '1'
@@ -122,7 +129,7 @@ for name, filename, directory, test, before, after in mutations:
         target.write_text(source)
 if apply_only:
     sys.exit(0)
-run=subprocess.run(['go','test','-json','-race','-p','1','-count=1','-timeout=300s','-run=^(TestVerify|TestCarrierVerify|TestW5_CarrierVerify|TestResponseFieldsAreClosed|TestErrorClassValid|TestCarrierVerifyWrite|TestOrgCarrierVerify)', './internal/deployment','./internal/dispatch','./internal/api','./pkg/runnerproto','./test/security'],cwd=work/'tree',env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=420)
+run=subprocess.run(['go','test','-json','-race','-p','1','-count=1','-timeout=300s','-run=^(TestVerify|TestCarrierVerify|TestW5_CarrierVerify|TestResponseFieldsAreClosed|TestErrorClassValid|TestCarrierVerifyWrite|TestOrgCarrierVerify|TestObserve)', './internal/targets','./internal/deployment','./internal/dispatch','./internal/api','./pkg/runnerproto','./test/security'],cwd=work/'tree',env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=420)
 if run.returncode or any(e.get('Action')=='skip' for e in events(run.stdout)):
     raise SystemExit('FAIL baseline: carrier verify tests failed or skipped')
 print('ok   baseline: carrier verify race tests green, no skips',flush=True)

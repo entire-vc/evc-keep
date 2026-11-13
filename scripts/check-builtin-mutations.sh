@@ -327,6 +327,19 @@ mutate admin-error-raw admin.go \
 	'return res, err' \
 	TestAdminChangeLevel_DatabaseErrorCarriesSQLSTATEOnly
 
+mutate discover-key-uses-verify-info delivery.go \
+	'runnerproto.DiscoverKeyInfo(j), plain)' \
+	'runnerproto.VerifyKeyInfo(j), plain)' \
+	TestDiscoverKeyRoundTripCarriesKeyAndNoValue
+mutate discover-payload-shape delivery.go \
+	'if n == 0 || len(plain) != 1+n+fingerprint.KeySize {' \
+	'if false {' \
+	TestOpenDiscoverKeyRefusesTamperedAndMalformedPayloads
+mutate discover-seal-takes-verify delivery.go \
+	'if j.Validate() != nil || j.Action != runnerproto.ActionDiscover {' \
+	'if j.Validate() != nil || !j.NeedsFingerprintKey() {' \
+	TestDiscoverAndVerifyKeyEnvelopesAreDisjoint
+
 # The transactions that take the shared key-level lock must not inherit the
 # server's default isolation: under REPEATABLE READ their snapshot predates
 # the lock, and a Write that waited for a level change seals under the old

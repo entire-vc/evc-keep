@@ -2,6 +2,7 @@ package deployment
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
 	"strings"
@@ -489,5 +490,117 @@ func TestVerifyTablesRejectInvalidRows(t *testing.T) {
 	if _, err := f.pool.Exec(f.ctx, `INSERT INTO carrier_verification_items(verification_id,org_id,carrier_id,runner_id,job_id)
 	 SELECT verification_id,org_id,$1,runner_id,job_id FROM carrier_verification_items`, mustID(t)); err == nil {
 		t.Fatal("one job was attached to two verification lines")
+	}
+}
+
+func (f fixture) credCarrier(t *testing.T, path string) uuid.UUID {
+	t.Helper()
+	id := mustID(t)
+	if _, err := f.pool.Exec(f.ctx, `INSERT INTO carriers(id,org_id,secret_id,version,host,target_kind,target_path,last_fp,state)
+	 VALUES($1,$2,$3,'v1','test-host','systemd-credential',$4,'kfp1:k1:abcdefghijklmnop','registered')`, id, f.org, f.secret, path); err != nil {
+		t.Fatal("insert credential carrier")
+	}
+	return id
+}
+
+// deployCredential records a completed deploy of the secret to a credential
+// file under the unit name.
+func (f fixture) deployCredential(t *testing.T, path, unit string) {
+	f.deployCredentialAs(t, path, unit, "completed")
+}
+
+func (f fixture) deployCredentialAs(t *testing.T, path, unit, final string) {
+	t.Helper()
+	if _, err := f.pool.Exec(f.ctx, `INSERT INTO deployment_policies(org_id,rules,max_deploys_per_hour) VALUES($1,$2,10) ON CONFLICT (org_id) DO UPDATE SET rules=EXCLUDED.rules`, f.org,
+		`{"rules":[{"secret_id":"`+f.secret.String()+`","runner_id":"`+f.runner.String()+`","kind":"systemd-credential","path_prefix":"/etc/creds"}]}`); err != nil {
+		t.Fatal("insert policy")
+	}
+	in := f.request(t)
+	in.Target = runnerproto.Target{Kind: runnerproto.TargetSystemdCredential, Path: path, Unit: unit, Mode: 0o600}
+	out, err := f.repo.Submit(f.ctx, in)
+	if err != nil || out.Status != Queued {
+		t.Fatal("credential deploy was not queued")
+	}
+	if _, err := f.pool.Exec(f.ctx, `UPDATE deployment_jobs SET status='issued',issued_at=now() WHERE id=$1`, out.JobID); err != nil {
+		t.Fatal("issue")
+	}
+	if _, err := f.pool.Exec(f.ctx, `UPDATE deployment_jobs SET status=$2,result='{}' WHERE id=$1`, out.JobID, final); err != nil {
+		t.Fatal("finish")
+	}
+}
+
+func (f fixture) verifyTargetOf(t *testing.T, carrier uuid.UUID) runnerproto.Target {
+	t.Helper()
+	var raw []byte
+	if err := f.pool.QueryRow(f.ctx, `SELECT dr.target FROM carrier_verification_items i
+	 JOIN deployment_jobs j ON j.org_id=i.org_id AND j.id=i.job_id
+	 JOIN deployment_requests dr ON dr.org_id=j.org_id AND dr.id=j.deployment_request_id
+	 WHERE i.org_id=$1 AND i.carrier_id=$2 AND j.action='verify' ORDER BY j.created_at DESC LIMIT 1`, f.org, carrier).Scan(&raw); err != nil {
+		t.Fatal("carrier has no verify job target")
+	}
+	var tg runnerproto.Target
+	if err := json.Unmarshal(raw, &tg); err != nil {
+		t.Fatal("decode target")
+	}
+	return tg
+}
+
+func TestVerifyCredentialCarrierNamesTheUnitOfItsLastDeploy(t *testing.T) {
+	f := newFixture(t)
+	c := f.credCarrier(t, "/etc/creds/app")
+	f.deployCredential(t, "/etc/creds/app", "keep-app.service")
+	rep, err := f.repo.SubmitVerify(f.ctx, f.verifyRequest(t))
+	if err != nil || states(rep)[c] != VerifyPending {
+		t.Fatal("a credential carrier with a deploy must be dispatched")
+	}
+	if got := f.verifyTargetOf(t, c); got.Unit != "keep-app.service" || got.Kind != runnerproto.TargetSystemdCredential || got.Field != "" {
+		t.Fatal("the verify job must carry the unit of the last deploy and no field")
+	}
+}
+
+func TestVerifyCredentialCarrierWithoutDeployFailsBeforeAnyJob(t *testing.T) {
+	f := newFixture(t)
+	c := f.credCarrier(t, "/etc/creds/app")
+	f.deployCredential(t, "/etc/creds/other", "keep-other.service")
+	rep, err := f.repo.SubmitVerify(f.ctx, f.verifyRequest(t))
+	if err != nil || states(rep)[c] != VerifyFailed {
+		t.Fatal("a credential carrier with no deploy to its path must fail, not dispatch")
+	}
+	if got := rep.Items[0].ErrorClass; got != runnerproto.ErrClassInvalidJob {
+		t.Fatal("the failed item must carry the closed class job_invalid")
+	}
+	if n := f.count(t, `SELECT count(*) FROM deployment_jobs WHERE action='verify'`); n != 0 {
+		t.Fatal("a verify job was dispatched without a credential name")
+	}
+}
+
+// The name is the Unit of the newest COMPLETED deploy: a newer deploy that did
+// not complete, and a completed verify job on the same destination, name
+// nothing.
+func TestVerifyCredentialCarrierTakesTheNewestCompletedDeployOnly(t *testing.T) {
+	f := newFixture(t)
+	c := f.credCarrier(t, "/etc/creds/app")
+	f.deployCredential(t, "/etc/creds/app", "keep-old.service")
+	f.deployCredential(t, "/etc/creds/app", "keep-new.service")
+	f.deployCredentialAs(t, "/etc/creds/app", "keep-failed.service", "failed")
+	if _, err := f.repo.SubmitVerify(f.ctx, f.verifyRequest(t)); err != nil {
+		t.Fatal("first submit failed")
+	}
+	if got := f.verifyTargetOf(t, c); got.Unit != "keep-new.service" {
+		t.Fatal("the newest completed deploy must name the credential")
+	}
+	// Finish that verify job; a later verification must not read its target.
+	if _, err := f.pool.Exec(f.ctx, `UPDATE deployment_jobs SET status='issued',issued_at=now() WHERE action='verify'`); err != nil {
+		t.Fatal("issue verify job")
+	}
+	if _, err := f.pool.Exec(f.ctx, `UPDATE deployment_jobs SET status='completed',result='{}' WHERE action='verify'`); err != nil {
+		t.Fatal("complete verify job")
+	}
+	rep, err := f.repo.SubmitVerify(f.ctx, f.verifyRequest(t))
+	if err != nil || states(rep)[c] != VerifyPending {
+		t.Fatal("second submit failed")
+	}
+	if got := f.verifyTargetOf(t, c); got.Unit != "keep-new.service" {
+		t.Fatal("a completed verify job was taken for a deploy")
 	}
 }

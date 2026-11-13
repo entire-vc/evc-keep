@@ -108,6 +108,10 @@ mutate outbox-file-mode-unchecked $L/outbox.go $LP TestOutboxRefusesDamagedEntri
 	'fi.Mode().Perm() != 0o600 || !ownedByUs(fi) {' 'false {'
 mutate outbox-symlink-followed $L/outbox_unix.go $LP TestOutboxRefusesDamagedEntries \
 	'const noFollow = syscall.O_NOFOLLOW' 'const noFollow = 0'
+mutate outbox-open-blocking $L/outbox_unix.go $LP TestOutboxFIFO \
+	'const noFollow = syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_NOCTTY' 'const noFollow = syscall.O_NOFOLLOW'
+mutate outbox-refusal-names-path $L/outbox.go $LP TestOutboxRefusalLeaksNoCanary \
+	'bad := errors.New("loop: outbox entry is damaged")' 'bad := errors.New("loop: outbox entry is damaged: " + o.dir)'
 mutate outbox-unknown-fields-accepted $L/outbox.go $LP TestOutboxRefusesDamagedEntries \
 	'dec.DisallowUnknownFields()' ''
 mutate outbox-dir-mode-unchecked $L/outbox.go $LP TestOutboxDirectoryMustBePrivate \
@@ -228,7 +232,7 @@ mutate verify-key-opens-a-value $B/delivery.go $B TestOpenRunnerKeyRefusesAValue
 mutate verify-key-not-job-bound $B/delivery.go $B TestOpenRunnerKeyRefusesAValueAndOtherJobs \
 	'openRunnerBytes(recipient, runnerproto.VerifyKeyInfo(j), env.SealedFingerprintKey)' 'openRunnerBytes(recipient, runnerproto.Info(j), env.SealedFingerprintKey)'
 mutate verify-key-for-any-job $B/delivery.go $B TestVerifyKeyIsSealedOnlyForVerifyJobs \
-	'if j.Validate() != nil || !j.NeedsFingerprintKey() || j.NeedsValue() {' 'if j.Validate() != nil {'
+	'if j.Validate() != nil || j.Action != runnerproto.ActionVerify {' 'if j.Validate() != nil {'
 mutate verify-key-sealed-under-value-info $B/delivery.go $B TestVerifyKeyEnvelopeCarriesTheKeyAndNoValue \
 	'sealRunnerBytes(recipient, runnerproto.VerifyKeyInfo(j), raw)' 'sealRunnerBytes(recipient, runnerproto.Info(j), raw)'
 

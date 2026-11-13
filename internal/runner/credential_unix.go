@@ -105,9 +105,14 @@ func Load(dir string) (Credential, error) {
 }
 
 // readSecureFile requires a regular, non-symlinked file at path, mode 0600
-// or tighter, owned by the calling process's own uid.
+// or tighter, owned by the calling process's own uid. The open is
+// non-blocking (O_NONBLOCK) so a FIFO without a writer planted at the path
+// returns at once and is refused by the regular-file check on the same fd,
+// instead of hanging in open(2) before any type check. O_NONBLOCK has no
+// effect on reads of a regular file; O_NOCTTY keeps a tty from becoming
+// the controlling terminal.
 func readSecureFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) //nolint:gosec // G304: path is one of this package's own fixed credential filenames
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0) //nolint:gosec // G304: path is one of this package's own fixed credential filenames
 	if err != nil {
 		return nil, fmt.Errorf("runner: credential: %w", err)
 	}
@@ -125,5 +130,19 @@ func readSecureFile(path string) ([]byte, error) {
 	case !ok || int64(st.Uid) != int64(os.Getuid()):
 		return nil, fmt.Errorf("runner: credential: %s is not owned by this user", filepath.Base(path))
 	}
-	return io.ReadAll(io.LimitReader(f, 1<<20))
+	// Read one byte past the cap: a file longer than maxCredentialFileBytes is
+	// refused, never truncated to a valid-looking prefix. The size from stat
+	// is not trusted (the file may grow after it); the read itself decides.
+	data, err := io.ReadAll(io.LimitReader(f, maxCredentialFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("runner: credential: %w", err)
+	}
+	if len(data) > maxCredentialFileBytes {
+		clear(data)
+		return nil, fmt.Errorf("runner: credential: %s exceeds the size limit", filepath.Base(path))
+	}
+	return data, nil
 }
+
+// maxCredentialFileBytes is the largest credential file Load accepts.
+const maxCredentialFileBytes = 1 << 20

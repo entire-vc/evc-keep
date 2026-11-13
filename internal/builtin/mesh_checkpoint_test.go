@@ -42,7 +42,7 @@ func TestMeshCheckpointRestoresEveryKind(t *testing.T) {
 	}
 	m := local.MeshVault()
 	org, ws := uuid.NewString(), uuid.NewString()
-	old := map[string]string{MeshExtensionToken: "old-token-aaaa", MeshEventsSecret: "old-events-bbbb", MeshKeepSecret: "old-keep-cccc"}
+	old := map[string]string{MeshExtensionToken: "old-token-aaaa", MeshEventsSecret: "old-events-bbbb", MeshExtensionSigningSecret: "old-ext-dddd", MeshKeepSecret: "old-keep-cccc"} // #nosec G101 -- test fixtures
 	for k, v := range old {
 		if err := m.Put(ctx, org, ws, k, v); err != nil {
 			t.Fatalf("seed %s: %v", k, err)

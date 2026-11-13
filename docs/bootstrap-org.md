@@ -39,6 +39,36 @@ issuance too: there is no separate `identity.token_issue` record.
   two concurrent runs with the same name cannot both succeed.
 - Needs the schema at version 40 or later (`keep-server migrate up`).
 
+## A new admin token for an existing organization: `issue-admin-token`
+
+When the admin token of an organization has expired or was revoked, the token
+API cannot help (it needs an admin token). `issue-admin-token` issues a new one
+for an admin user that already exists, on the host:
+
+```
+KEEP_DATABASE_URL=... keep-server issue-admin-token --org-id <uuid> \
+  --admin-user-id <uuid> --ttl 24h --token-file /abs/path/admin.token
+```
+
+- It creates nothing: no organization, no user, no membership. The
+  organization must exist (`error_class=not_found` otherwise), the user must
+  belong to it (`not_found`) and be an active user holding the `admin` role at
+  the organization scope (`permission_denied`). A refusal changes nothing: no
+  token, no journal record, no file. Tokens of this and of other
+  organizations are not touched.
+- `--ttl` is required, positive and at most `720h`; `--token-file` is absolute
+  and an existing file is never overwritten (`already_exists`).
+- The journal record `identity.token_issue` (actor `keep-server-issue-admin-token`,
+  via `cli`; reason: admin user id, token id, expiry) is written before the
+  token exists. If it cannot be written, no token is issued.
+- The token is only in the file, mode `0600`. stdout is four lines: `org_id`,
+  `token_id`, `expires_at`, `token_file`. A token that was issued but could not
+  be written is revoked before the command exits.
+- It needs no root key; it needs the schema and `KEEP_DATABASE_URL`.
+
+To find the admin user id of an organization, query
+`SELECT user_id FROM memberships WHERE org_id = '<org_id>' AND scope = 'org:<org_id>' AND role = 'admin'`.
+
 ## The default store
 
 Creating a secret needs a store bound at its scope or at one of its ancestors;

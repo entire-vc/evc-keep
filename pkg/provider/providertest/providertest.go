@@ -16,17 +16,13 @@ package providertest
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/entire-vc/evc-keep/internal/testutil/canary"
 	"github.com/entire-vc/evc-keep/internal/testutil/fdredirect"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -290,7 +286,7 @@ type env struct {
 	ctx        context.Context
 	h          Harness
 	p          provider.Provider
-	canary     canary
+	canary     canaryValues
 	path       string
 	violations []string
 	skipped    string
@@ -580,92 +576,20 @@ func checkErrorLeak(e *env) {
 
 // --- canary ---
 
-type canary struct{ base string }
+// canaryValues generates the values the suite stores and detects them in
+// observed output. Detection (encodings, base64 alignments) lives only in
+// internal/testutil/canary.
+type canaryValues struct{ canary.Canary }
 
-func newCanary() canary {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return canary{base: "kc" + hex.EncodeToString(b)}
-}
+func newCanary() canaryValues { return canaryValues{canary.New()} }
 
 // value returns the i-th canary value; every value contains the base.
-func (c canary) value(i int) secret.Value {
-	return secret.New([]byte(fmt.Sprintf("%s-v%d-secret", c.base, i)))
+func (c canaryValues) value(i int) secret.Value {
+	return secret.New([]byte(c.Value(i)))
 }
 
 // in reports whether s contains the canary base in any common encoding.
-func (c canary) in(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, enc := range c.encodings() {
-		if strings.Contains(s, enc) || strings.Contains(strings.ToLower(s), strings.ToLower(enc)) {
-			return true
-		}
-	}
-	return false
-}
-
-func (c canary) encodings() []string {
-	raw := []byte(c.base)
-	out := []string{
-		c.base,
-		hex.EncodeToString(raw),
-		url.QueryEscape(c.base),
-		reverse(c.base),
-	}
-	out = append(out, canaryBase64Alignments(raw, base64.StdEncoding)...)
-	out = append(out, canaryBase64Alignments(raw, base64.RawURLEncoding)...)
-	return out
-}
-
-// canaryBase64Alignments returns the substrings of raw's base64 encoding
-// that are safe to search for regardless of where raw's first byte falls
-// within a larger encoded buffer.
-//
-// Base64 groups bytes three at a time. A real leak rarely encodes raw in
-// isolation, so raw's first byte can land at any of three positions (its
-// index mod 3) within its 3-byte group, and each position produces a
-// different run of characters for the bytes straddling raw's boundary,
-// because those characters also encode bits from the unknown neighboring
-// byte(s). Checking only the offset-0 alignment (the original bug here:
-// encoding raw on its own always starts a fresh group) is blind to the
-// other two — see internal/testutil/canary for the same fix and its test,
-// which is the canonical writeup; this package carries its own standalone
-// copy of the helper (see the package comment there) and needed the
-// identical fix applied separately.
-//
-// For each of the three possible offsets, this re-encodes raw prefixed
-// with `offset` placeholder bytes, then keeps only the run of characters
-// that comes from whole groups made entirely of raw's own bytes — never a
-// group straddling the placeholder/raw or raw/(whatever follows) boundary,
-// since that group's characters depend on bytes we don't and can't know.
-// The placeholder's actual value is therefore irrelevant; it's discarded,
-// never compared.
-func canaryBase64Alignments(raw []byte, enc *base64.Encoding) []string {
-	var out []string
-	for offset := 0; offset <= 2; offset++ {
-		padded := make([]byte, offset, offset+len(raw))
-		padded = append(padded, raw...)
-		encoded := enc.EncodeToString(padded)
-
-		firstPureGroup := (offset + 2) / 3   // ceil(offset/3)
-		groupsEnd := (offset + len(raw)) / 3 // floor((offset+len(raw))/3)
-		if groupsEnd <= firstPureGroup {
-			continue // raw too short at this offset to yield a whole clean group
-		}
-		out = append(out, encoded[4*firstPureGroup:4*groupsEnd])
-	}
-	return out
-}
-
-func reverse(s string) string {
-	r := []rune(s)
-	for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
-		r[i], r[j] = r[j], r[i]
-	}
-	return string(r)
-}
+func (c canaryValues) in(s string) bool { return c.In(s) }
 
 type lockedBuffer struct {
 	mu sync.Mutex

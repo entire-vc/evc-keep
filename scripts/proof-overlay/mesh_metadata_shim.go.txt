@@ -1,0 +1,21 @@
+package api
+
+import (
+	"net/http"
+
+	"github.com/google/uuid"
+
+	"github.com/entire-vc/evc-keep/internal/audit"
+)
+
+// Compile shim for the pinned-base proofs (ci-mesh-handshake-proof.py,
+// ci-mesh-rotator-proof.py). Those proofs build the tree with mesh.go from an
+// older commit; the metadata probe, which lives in its own files, names two
+// declarations that only the current mesh.go has. This file stands in for them
+// in that build. It is never part of the module: the proofs copy it into the
+// overlay, and nothing here runs, because the proofs run other tests.
+type actorMsgs struct{ db, journal, limited string }
+
+func (m *meshRoutes) secretActorMsgs(http.ResponseWriter, *http.Request, string, audit.Action, []byte, actorMsgs) (ws, org uuid.UUID, ok bool) {
+	panic("compile shim: the pinned base has no metadata actor")
+}

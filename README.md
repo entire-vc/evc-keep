@@ -29,6 +29,15 @@ policy, set by the operator with `keep-server set-deploy-policy`
 
 Expect breaking changes while the interfaces stabilize.
 
+## Quickstart
+
+[docs/quickstart.md](docs/quickstart.md) takes one Linux host from nothing to a
+secret delivered into a file: build from source, PostgreSQL 17, a server and an
+organization, a value typed by a person into a browser, `keep list` and `keep mcp`
+showing only metadata, a runner that writes the file and checks the service that
+reads it, and a verified audit journal. CI runs that page verbatim in a clean
+container (job `quickstart`), so it does not drift from the code.
+
 ## Goals
 
 - Store secret references and metadata (never plaintext values) once,
@@ -343,5 +352,8 @@ refused so the journal cannot be erased.
 The token travels in the URL path, so the front proxy must not log
 `/input/*` request lines (access logs would otherwise retain live tokens).
 
-The browser input page is a separate integration; this backend change does
-not register a `GET /input/{token}` page yet.
+`GET /input/{token}` serves the browser input page: it opens the link, takes
+the value in a form, encrypts it in the browser to the server's key and posts
+only the ciphertext to `POST /input/{token}`. The page then shows the stored
+version and fingerprint, never the value. The [quickstart](docs/quickstart.md)
+walks through it.

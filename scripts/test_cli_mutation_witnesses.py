@@ -14,9 +14,9 @@ class Controls(unittest.TestCase):
    prefix=(ROOT/'scripts/check-keep-cli-mutations.sh').read_text().split('# AC red run (1):')[0]
    calls='''mutate debug-leaks-authorization client.go 'if strings.EqualFold(k, "Authorization") {' 'if false {'
 metadata_mutate TestJSONValueEscapesControlsAndPreservesUnicode 'JSON writer emitted raw control' json-control-escape-noop output.go 'w.Write(escapeJSONControls(buf.Bytes()))' 'w.Write(buf.Bytes())'
-if (cd "$root" && go test -count=1 ./$pkg/... >/dev/null 2>&1); then :; else fail=1; fi
-exit $fail
 '''
+   tail='# The baseline output stays'+(ROOT/'scripts/check-keep-cli-mutations.sh').read_text().split('# The baseline output stays',1)[1]
+   calls+=tail
    if unknown:calls=calls.replace('debug-leaks-authorization','unmapped-new-mutant',1)
    (r/'scripts/check.sh').write_text(prefix+calls)
    subprocess.run(['git','init','-q'],cwd=r,check=True)
@@ -26,6 +26,7 @@ args=sys.argv[1:]
 with open(os.environ['RECORD'],'a')as f:f.write(json.dumps(args)+'\\n')
 if not os.getcwd().endswith('/tree'):
  if os.environ['MODE']=='control_skip' and '-run'in args:print('--- SKIP: TestPositiveControl')
+ if os.environ['MODE']=='baseline_skip' and '-run'not in args:print('--- SKIP: TestSomething');print(os.environ['CANARY'])
  sys.exit(1 if os.environ['MODE']=='baseline_failure' and '-run'not in args else 0)
 w=args[args.index('-run')+1][1:-1];mode=os.environ['MODE']
 print(os.environ['CANARY'])
@@ -44,9 +45,12 @@ sys.exit(1)
   x,record=self.exercise('red');self.assertEqual(x.returncode,0,x.stdout+x.stderr)
   self.assertIn(['test','-timeout','120s','-count=1','-v','-run','^TestCLI_TokenNeverLeaksToStdoutStderrOrDebug$','./cmd/keep/...'],record)
   self.assertIn(['test','-timeout','60s','-count=1','-v','-run','^TestJSONValueEscapesControlsAndPreservesUnicode$','./cmd/keep'],record)
-  self.assertEqual(record[-1],['test','-count=1','./cmd/keep/...'])
+  self.assertEqual(record[-1],['test','-count=1','-v','./cmd/keep/...'])
+  self.assertIn('ok   debug-leaks-authorization: TestCLI_TokenNeverLeaksToStdoutStderrOrDebug went red',x.stdout)
+  self.assertIn('ok   baseline: CLI tests green on the real code, none skipped',x.stdout)
+  self.assertNotRegex(x.stdout,r'failing\)')
  def test_faults_and_unrelated_red_never_kill(self):
-  for mode in ['green','unrelated','skip','build','setup','infra','timeout','missing_metadata_marker','control_skip']:
+  for mode in ['green','unrelated','skip','build','setup','infra','timeout','missing_metadata_marker','control_skip','baseline_skip']:
    with self.subTest(mode=mode):self.assertNotEqual(self.exercise(mode)[0].returncode,0)
  def test_unknown_mapping_fails(self):
   x,record=self.exercise('red',unknown=True);self.assertNotEqual(x.returncode,0)
@@ -54,12 +58,33 @@ sys.exit(1)
  def test_missing_database_fails_before_go(self):
   x,record=self.exercise('red',unset_database=True);self.assertNotEqual(x.returncode,0);self.assertEqual(record,[])
  def test_unchanged_baseline_failure_fails(self):self.assertNotEqual(self.exercise('baseline_failure')[0].returncode,0)
- def test_all_62_map_to_existing_tests_and_no_inventory_edits(self):
+ def test_all_106_map_to_existing_tests_and_no_inventory_edits(self):
   new=(ROOT/'scripts/check-keep-cli-mutations.sh').read_text()
   # Frozen 67-mutant inventory, metadata controls and full baseline from 52cb6cdc,
-  # plus the apply-only exit before the baseline (scripts/mutation-helpers.sh).
-  self.assertEqual(hashlib.sha256(new.split('# AC red run (1):')[1].encode()).hexdigest(),'cb9003cf12293d67372fb9a78b50213bff84baed857d0edc5b1eab86557add29')
-  names=re.findall(r'^mutate ([a-z0-9-]+) ',new,re.M);self.assertEqual(len(names),62)
+  # plus the apply-only exit before the baseline (scripts/mutation-helpers.sh),
+  # plus the two non-regular token file mutants added for --token-file FIFOs,
+  # and wide-permission-guard-removed no longer dropping the mode the regular-file check reads,
+  # plus the two runner decode-error mutants (enroll-token and revoke print a static line only),
+  # plus the header redaction mutants of the keep --debug dump,
+  # plus the harness printing the witness test name and a baseline that fails on any SKIP,
+  # plus the full header redaction removal witnessed by TestDebugHeadersLoopback,
+  # plus the eight keep deploy answer mutants (id/class normalisation, runner class set, poll ban).
+  # plus the five runner enroll-token/revoke fail-closed and closed-field-list mutants,
+  # plus the four request id contract mutants (the two old length/charset ones replaced),
+  # plus the three header-name allow-list mutants of the keep --debug dump,
+  # plus debug-header-dump-unfiltered mutating the name declaration so the mutant compiles,
+  # plus the input-link request_id mutant (the two auditRequestID guards now call reqid.Valid),
+  # plus the input-link guard's own length and charset weakenings,
+  # plus eight metadata mutants for fingerprint/version/approval guards at POST and poll,
+  # minus secret-name-echoed-in-not-found (unobservable once the CLI prints static class text),
+  # plus the static CLI error text mutants (the server message stays out of reportErr and apiError.Error; request_id only by the reqid contract).
+  # plus the two keep deploy healthcheck status mutants (guard no-op, closed list widened).
+  # runner-server-ca-path-echoed re-anchored from the removed os.ReadFile branch of runner.go to the open-error branch of server_ca_read.go (same witness, same count);
+  # plus the four shared-client response cap mutants (unbounded read, size check removed, off-by-one, missing extra byte);
+  # debug-traces-response-body is re-anchored on the capped read line,
+  # plus runner-policy-error-echoed now echoing the -policy path (readPolicyFile's error is already static).
+  self.assertEqual(hashlib.sha256(new.split('# AC red run (1):')[1].encode()).hexdigest(),'7e64c77e71bf43dd04d42f1e6fedd6d7f9389c3c4f0f71f41844c08e335089ee')
+  names=re.findall(r'^mutate ([a-z0-9-]+) ',new,re.M);self.assertEqual(len(names),106)
   tests=set()
   for f in (ROOT/'cmd/keep').glob('*test.go'):tests.update(re.findall(r'^func (Test[A-Za-z0-9_]+)\(',f.read_text(),re.M))
   for n in names:

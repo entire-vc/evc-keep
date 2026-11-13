@@ -52,30 +52,38 @@ func TestListeningLogMeansSocketsAreBound(t *testing.T) {
 	// logging goroutine blocks, which is what a starved runner looks like.
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 
+	// freeAddr closes its reservation before serveBoth binds, so on a busy
+	// runner another process can take the port in between and serveBoth
+	// returns 1 without ever logging (pipeline job 525369). That is a lost
+	// port race, not a premature "listening" line: retry it on fresh addresses,
+	// but only while serveBoth exits early; a run that logged is judged.
 	for i := 0; i < 20; i++ {
-		a, b := freeAddr(t), freeAddr(t)
-		w := &dialOnListeningWriter{addrs: []string{a, b}}
-		logger := slog.New(slog.NewTextHandler(w, nil))
-		srv := newHTTPServer(a, http.NotFoundHandler(), logger)
-		tlsSrv := newHTTPServer(b, http.NotFoundHandler(), logger)
-		done := make(chan int, 1)
-		go func() { done <- serveBoth(srv, tlsSrv, logger) }()
+		var (
+			w    *dialOnListeningWriter
+			srv  *http.Server
+			tls  *http.Server
+			done chan int
+		)
+		for try := 0; ; try++ {
+			a, b := freeAddr(t), freeAddr(t)
+			w = &dialOnListeningWriter{addrs: []string{a, b}}
+			logger := slog.New(slog.NewTextHandler(w, nil))
+			srv = newHTTPServer(a, http.NotFoundHandler(), logger)
+			tls = newHTTPServer(b, http.NotFoundHandler(), logger)
+			done = make(chan int, 1)
+			go func() { done <- serveBoth(srv, tls, logger) }()
 
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			w.mu.Lock()
-			seen := w.seen
-			w.mu.Unlock()
-			if seen {
+			if early, code := waitListening(w, done); !early {
 				break
+			} else if try == 4 {
+				t.Fatalf("run %d: serveBoth exited with %d before logging on 5 fresh address pairs", i, code)
 			}
-			time.Sleep(5 * time.Millisecond)
 		}
 		w.mu.Lock()
 		seen, errs := w.seen, w.errs
 		w.mu.Unlock()
 		_ = srv.Close()
-		_ = tlsSrv.Close()
+		_ = tls.Close()
 		<-done
 		if !seen {
 			t.Fatalf("run %d: the listening line was never logged", i)
@@ -84,6 +92,31 @@ func TestListeningLogMeansSocketsAreBound(t *testing.T) {
 			t.Fatalf("run %d: %d listener(s) refused a connection made while the listening line was being logged: %v", i, len(errs), errs[0])
 		}
 	}
+}
+
+// waitListening waits until the listening line was logged or serveBoth
+// returned. early reports a return before the line (a failed bind); the exit
+// code is also left in done.
+func waitListening(w *dialOnListeningWriter, done chan int) (early bool, code int) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		seen := w.seen
+		w.mu.Unlock()
+		if seen {
+			return false, 0
+		}
+		select {
+		case code = <-done:
+			w.mu.Lock()
+			seen = w.seen
+			w.mu.Unlock()
+			done <- code // leave the exit code for the caller's <-done
+			return !seen, code
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	return false, 0
 }
 
 // A bind failure ends the process with a fixed error_class and nothing from

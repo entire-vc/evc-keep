@@ -3,12 +3,15 @@
 package targets
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/entire-vc/evc-keep/internal/testutil/canary"
 	"github.com/entire-vc/evc-keep/pkg/fingerprint"
 	"github.com/entire-vc/evc-keep/pkg/runnerproto"
 	"github.com/entire-vc/evc-keep/pkg/secret"
@@ -50,7 +53,7 @@ func TestObserveReportsOnlyTheFingerprintOfWhatTheCarrierHolds(t *testing.T) {
 	}
 }
 
-func TestObserveRefusesAnAgentOwnedCarrierAndAnUnverifiableKind(t *testing.T) {
+func TestObserveRefusesAnAgentOwnedCarrier(t *testing.T) {
 	k := observeKey(t)
 	tg := observeTarget(t, "synthetic-carrier-body")
 	euid := int64(unix.Geteuid())
@@ -59,11 +62,6 @@ func TestObserveRefusesAnAgentOwnedCarrierAndAnUnverifiableKind(t *testing.T) {
 	}
 	if _, found, err := Observe(tg, euid, nil, nil, k); err != nil || !found {
 		t.Fatal("positive control: the same carrier is observed when its owner is not an agent")
-	}
-	sc := tg
-	sc.Kind = runnerproto.TargetSystemdCredential
-	if _, found, err := Observe(sc, euid, nil, nil, k); err == nil || found {
-		t.Fatal("a systemd credential was observed")
 	}
 }
 
@@ -118,5 +116,91 @@ func TestOwnerOfRefusesAHardLinkedCarrier(t *testing.T) {
 	}
 	if _, _, err := OwnerOf(tg, nil, nil); err == nil {
 		t.Fatal("a carrier with a second link was reported")
+	}
+}
+
+// namedCreds is a stand-in for systemd-creds that binds the credential to the
+// --name given at encrypt, as the real tool does: decrypt under another name
+// fails. The sealed form is the name line, then the value.
+func namedCreds(t *testing.T) {
+	t.Helper()
+	dir := realDir(t)
+	bin := filepath.Join(dir, "systemd-creds")
+	script := "#!/bin/sh\nn=${2#--name=}\ncase $1 in\nencrypt) printf 'sealed-for=%s\\n' \"$n\"; cat;;\ndecrypt) read -r l; [ \"$l\" = \"sealed-for=$n\" ] || exit 1; cat;;\n*) exit 2;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // G306: an executable test double
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bin, 0o755); err != nil { //nolint:gosec // G302: same reason
+		t.Fatal(err)
+	}
+	origPath, origUID := sealToolPath, sealToolTrustedUID
+	t.Cleanup(func() { sealToolPath, sealToolTrustedUID = origPath, origUID })
+	sealToolPath, sealToolTrustedUID = bin, selfUID()
+}
+
+func writtenCredential(t *testing.T, v string) (runnerproto.Target, fingerprint.Key, string) {
+	t.Helper()
+	k := observeKey(t)
+	dir := realDir(t)
+	tg := credTarget(filepath.Join(dir, "cred"))
+	uids, gids := noAgents()
+	fp, err := Write(tg, newValue(v), uids, gids, k)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	return tg, k, fp
+}
+
+// The value of a systemd credential never leaves Observe: not in its result,
+// not in an error, whether the credential decrypts or not.
+func TestObserveSystemdCredentialLeaksNothing(t *testing.T) {
+	namedCreds(t)
+	c := canary.New()
+	tg, k, _ := writtenCredential(t, c.Value(0))
+	owner := int64(unix.Geteuid())
+	fp, found, err := Observe(tg, owner, nil, nil, k)
+	if !found || err != nil || c.In(fp) {
+		t.Fatalf("Observe: found=%v err=%v", found, err)
+	}
+	wrong := tg
+	wrong.Unit = "other.service"
+	fp, found, err = Observe(wrong, owner, nil, nil, k)
+	if c.In(fp) || (err != nil && c.In(err.Error())) || found {
+		t.Fatal("the value or a hit came out of a failed decrypt")
+	}
+	if !strings.HasPrefix(string(mustReadFile(t, tg.Path)), "sealed-for=") {
+		t.Fatal("control: the stand-in sealed nothing")
+	}
+}
+
+func TestObserveSystemdCredentialMatchesOnlyUnderItsName(t *testing.T) {
+	namedCreds(t)
+	tg, k, want := writtenCredential(t, "synthetic-credential-value")
+	owner := int64(unix.Geteuid())
+	got, found, err := Observe(tg, owner, nil, nil, k)
+	if err != nil || !found || !SameFingerprint(got, want) {
+		t.Fatalf("a credential written under its unit must verify: %q %v %v", got, found, err)
+	}
+	wrong := tg
+	wrong.Unit = "other.service"
+	if got, found, err := Observe(wrong, owner, nil, nil, k); err != nil || found || got != "" {
+		t.Fatalf("a credential must not verify under another name: %q %v %v", got, found, err)
+	}
+	none := tg
+	none.Unit = ""
+	if _, found, _ := Observe(none, owner, nil, nil, k); found {
+		t.Fatal("a credential must not verify with no name")
+	}
+}
+
+func TestObserveSystemdCredentialUntrustedToolIsPolicy(t *testing.T) {
+	namedCreds(t)
+	tg, k, _ := writtenCredential(t, "synthetic-credential-value")
+	if err := os.Chmod(sealToolPath, 0o757); err != nil { //nolint:gosec // G302: the untrusted mode is the scenario
+		t.Fatal(err)
+	}
+	_, found, err := Observe(tg, int64(unix.Geteuid()), nil, nil, k)
+	if found || !errors.Is(err, ErrPolicy) {
+		t.Fatalf("an untrusted decrypt tool must be a policy refusal, not a mismatch: found=%v err=%v", found, err)
 	}
 }

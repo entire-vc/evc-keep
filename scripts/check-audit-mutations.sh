@@ -106,6 +106,7 @@ mutate() {
 }
 
 canon=internal/audit/canonicaljson.go
+verify_rows=internal/audit/verify_rows.go
 verify=internal/audit/verify.go
 migration=internal/store/migrations/00005_audit.sql
 # migration_action: the test setup drops and recreates the schema and runs
@@ -115,7 +116,7 @@ migration=internal/store/migrations/00005_audit.sql
 # any mutation made only to that earlier migration's copy. Point the action-
 # CHECK mutations at whichever migration is currently last to touch it; when
 # a future migration adds another action, this must move again.
-migration_action=internal/store/migrations/00047_mesh_uninstall_audit.sql
+migration_action=internal/store/migrations/00051_transfer_imported_audit.sql
 # The downgrade test goes down to version 37, so the Down CHECK it exercises
 # last is 00038's: a mutation of a later migration's Down is healed by it.
 migration_action_down=internal/store/migrations/00038_audit_key_level_requested.sql
@@ -215,10 +216,15 @@ mutate action-list-drift-go        "$record" 'ActionKEKPurge,' 'ActionKEKPurge, 
 mutate action-mesh-put-dropped-up   "$migration_action" "'secret.rotate','mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'secret.rotate','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
 mutate action-mesh-resolve-dropped-up "$migration_action" "'mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'mesh.secret.put','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
 mutate action-mesh-pending-dropped-up "$migration_action" "'org.bootstrap','mesh.install.pending'," "'org.bootstrap'," '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-store-bind-default-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall'));" "'deploy.policy_set','mesh.token','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-deploy-policy-set-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall'));" "'store.bind_default','mesh.token','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-mesh-token-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall'));" "'store.bind_default','deploy.policy_set','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-mesh-uninstall-dropped-up "$migration_action" "'mesh.token','mesh.uninstall'));" "'mesh.token'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-store-bind-default-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-deploy-policy-set-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'store.bind_default','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-mesh-token-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'store.bind_default','deploy.policy_set','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-mesh-uninstall-dropped-up "$migration_action" "'mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'mesh.token','mesh.secret.metadata','transfer.imported'));" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-transfer-imported-dropped-up "$migration_action" "'mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'mesh.uninstall','mesh.secret.metadata'));" '^TestActionRegistryMatchesMigrationCheck$'
+# The import must call the approval check: without the call a bundle holder can
+# fabricate the source's final approval. Only the end-to-end test reaches the
+# call site, so the mutation is run here, where a real database is present.
+mutate approval-call-noop cmd/keep-server/app/offline_transfer_import_cmd.go '}); reason != "" {' '}); false && reason != "" {' '^TestOfflineTransferEndToEnd$' ./cmd/keep-server/app/
 mutate action-mesh-put-dropped-down "$migration_action_down" "'mesh.secret.put','mesh.secret.resolve')) NOT VALID" "'mesh.secret.resolve')) NOT VALID" '^TestKeyLevelAuditMigration_DowngradeKeepsHistory$' ./internal/store/...
 mutate action-mesh-resolve-dropped-down "$migration_action_down" "'mesh.secret.resolve')) NOT VALID" "'mesh.secret.put')) NOT VALID" '^TestKeyLevelAuditMigration_DowngradeKeepsHistory$' ./internal/store/...
 
@@ -259,6 +265,13 @@ mutate log-drops-action          internal/audit/journal.go 'slog.String("action"
 # 6. Verify's own checks and the hashed format. Each check is switched off on
 # its own; the named test forges a chain that is consistent everywhere else
 # (see rechain in verify_hardening_test.go), so only that check can see it.
+mutate rows-sequence-check "$verify_rows" 'if s.Seq != walked {' 'if false && s.Seq != walked {' '^TestVerifyRows$'
+mutate rows-hash-check "$verify_rows" 'if recomputed != s.Hash {' 'if false && recomputed != s.Hash {' '^TestVerifyRows$'
+mutate rows-link-check "$verify_rows" 'if rec.PrevHash != expectedPrev {' 'if false && rec.PrevHash != expectedPrev {' '^TestVerifyRows$'
+mutate rows-org-check "$verify_rows" 'if rec.OrgID != orgID {' 'if false && rec.OrgID != orgID {' '^TestVerifyRows$'
+mutate rows-head-position "$verify_rows" 'if head.Position != walked || head.Hash != expectedPrev {' 'if false && head.Position != walked || head.Hash != expectedPrev {' '^TestVerifyRows$'
+mutate rows-head-hash "$verify_rows" 'if head.Position != walked || head.Hash != expectedPrev {' 'if head.Position != walked {' '^TestVerifyRows$'
+mutate rows-head-missing "$verify_rows" 'if walked > 0 {' 'if false && walked > 0 {' '^TestVerifyRows$'
 mutate verify-sequence-check   "$verify" 'if seq != walked {'                       'if false && seq != walked {' '^TestVerify_DetectsSequenceGap$'
 mutate verify-hash-check       "$verify" 'if recomputed != storedHash {'            'if false && recomputed != storedHash {' '^TestVerify_DetectsInPlaceTamper$'
 mutate verify-link-check       "$verify" 'if rec.PrevHash != expectedPrev {'        'if false && rec.PrevHash != expectedPrev {' '^TestVerify_DetectsForgedMiddleLink$'

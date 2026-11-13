@@ -305,6 +305,15 @@ mutate obs-withattrs-skips-allowlist internal/obs/obs.go \
 mutate obs-suffix-rule-widens internal/obs/obs.go \
 	'return strings.HasSuffix(k, "_id") || strings.HasSuffix(k, "_name")' \
 	'return strings.HasSuffix(k, "_id") || strings.HasSuffix(k, "_name") || strings.HasSuffix(k, "_value")'
+# the value-kind check of the suffix rule is removed: a group, a []byte or an
+# error under an "*_id" key goes out again.
+mutate obs-suffix-kind-check-removed internal/obs/obs.go \
+	'if !allowed[a.Key] && !suffixKindOK(a.Value.Resolve().Kind()) {' \
+	'if false {'
+# the kind check is widened to let groups and arbitrary values through.
+mutate obs-suffix-kind-widens internal/obs/obs.go \
+	'case slog.KindString, slog.KindInt64, slog.KindUint64:' \
+	'case slog.KindString, slog.KindInt64, slog.KindUint64, slog.KindGroup, slog.KindAny:'
 # a Token used as a map key is written out (encoding/json uses MarshalText
 # for keys, a path separate from MarshalJSON).
 mutate token-marshaltext-leaks token.go \

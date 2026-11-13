@@ -59,10 +59,18 @@ func resolveToken(getenv func(string) string, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("stat token file: %w", err)
 	}
+	// A FIFO, device or directory is no token file, and reading a FIFO can
+	// wait forever for a writer; refuse before any byte is read.
+	if !info.Mode().IsRegular() {
+		return "", errors.New("refusing to read token file: not a regular file")
+	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("refusing to read token file: permissions allow access beyond its owner — chmod 600 it or run `keep login` again")
 	}
-	b, err := io.ReadAll(f)
+	b, err := readTokenBounded(f)
+	if errors.Is(err, errTokenTooLarge) {
+		return "", errors.New("refusing to read token file: larger than 4096 bytes")
+	}
 	if err != nil {
 		return "", fmt.Errorf("read token file: %w", err)
 	}
@@ -104,7 +112,15 @@ func runLogin(path, token string) error {
 		_ = tmp.Close()
 		return fmt.Errorf("set temp token file permissions: %w", err)
 	}
-	if _, err := tmp.WriteString(token + "\n"); err != nil {
+	// The file obeys the same maxTokenInputBytes ceiling resolveToken enforces
+	// when reading it back. A token that already fills the ceiling is written
+	// without the trailing newline (resolveToken trims whitespace anyway), so
+	// whatever login accepts can always be read back.
+	content := token
+	if len(content) < maxTokenInputBytes {
+		content += "\n"
+	}
+	if _, err := tmp.WriteString(content); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write token file: %w", err)
 	}
@@ -128,4 +144,25 @@ func defaultTokenPath(getenv func(string) string) string {
 		return filepath.Join(home, ".config", "keep", "token")
 	}
 	return ""
+}
+
+// maxTokenInputBytes is the largest raw token input accepted from stdin or a
+// token file, whitespace included — the same ceiling as an enrollment token.
+// Input over it is rejected, never truncated: a cut credential would be
+// stored and silently fail later.
+const maxTokenInputBytes = 4096
+
+var errTokenTooLarge = errors.New("token input too large: limit is 4096 bytes")
+
+// readTokenBounded reads at most maxTokenInputBytes+1 bytes from r, so an
+// endless or huge source is never drained, and rejects anything over the limit.
+func readTokenBounded(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxTokenInputBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxTokenInputBytes {
+		return nil, errTokenTooLarge
+	}
+	return b, nil
 }

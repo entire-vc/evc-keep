@@ -460,12 +460,46 @@ func (r *Repo) load(ctx context.Context, orgID uuid.UUID) (Bundle, bool, error) 
 // anchors. Open verifies the AEAD tags using the entire public material in
 // the existing length-prefixed Ref context; its private result is wiped.
 func (r *Repo) authenticateBundle(ctx context.Context, orgID uuid.UUID, rec record) error {
-	v, err := r.sealer.Open(ctx, caRef(orgID, rec.caCertDER), rec.caEnv)
+	return authenticate(ctx, r.sealer, orgID, rec)
+}
+
+// ErrRowNotAuthentic is the only error [AuthenticateRow] returns. It carries
+// no key material, backend error or row content, so a scoped-transfer caller
+// can surface it without leaking anything.
+var ErrRowNotAuthentic = errors.New("orgpki: org CA row does not authenticate")
+
+// Row is one org_ca row as exported for a scoped transfer: public context
+// plus the two sealed private-key envelopes. Nothing in it is plaintext.
+type Row struct {
+	CACertDER  []byte
+	CAEnv      sealer.Envelope
+	SignKeyID  string
+	SignPubKey []byte
+	SignEnv    sealer.Envelope
+}
+
+// AuthenticateRow opens both v2 envelopes of row under orgID's PKI domain,
+// with the same Ref contexts the live paths use, and wipes the result at
+// once. Legacy, tampered, foreign-org, missing or domain-mismatched material
+// fails closed with [ErrRowNotAuthentic]. It generates and writes nothing.
+func AuthenticateRow(ctx context.Context, s *sealer.Sealer, orgID uuid.UUID, row Row) error {
+	if s == nil || len(row.CACertDER) == 0 || row.SignKeyID == "" || len(row.SignPubKey) == 0 {
+		return ErrRowNotAuthentic
+	}
+	rec := record{caCertDER: row.CACertDER, caEnv: row.CAEnv, signKeyID: row.SignKeyID, signPubKey: row.SignPubKey, signEnv: row.SignEnv}
+	if err := authenticate(ctx, s, orgID, rec); err != nil {
+		return ErrRowNotAuthentic
+	}
+	return nil
+}
+
+func authenticate(ctx context.Context, s *sealer.Sealer, orgID uuid.UUID, rec record) error {
+	v, err := s.Open(ctx, caRef(orgID, rec.caCertDER), rec.caEnv)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrCAKeyMismatch, err)
 	}
 	v.Wipe()
-	v, err = r.sealer.Open(ctx, signRef(orgID, rec.signKeyID, rec.signPubKey), rec.signEnv)
+	v, err = s.Open(ctx, signRef(orgID, rec.signKeyID, rec.signPubKey), rec.signEnv)
 	if err != nil {
 		return fmt.Errorf("orgpki: job-signing material does not authenticate: %w", err)
 	}
@@ -522,4 +556,26 @@ func wipe(b []byte) {
 func isForeignKeyViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == pgForeignKeyViolation
+}
+
+// ReadAuthenticatedRow reads orgID's org_ca row through q (a read-only
+// snapshot transaction for export) and authenticates both v2 envelopes
+// before returning it. A missing row is (Row{}, false, nil): the authorized
+// unit is 0 or 1 per organization, and nothing is generated or written here.
+// Any row that does not authenticate fails with [ErrRowNotAuthentic].
+func ReadAuthenticatedRow(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, s *sealer.Sealer, orgID uuid.UUID) (Row, bool, error) {
+	rec, ok, err := loadRecordFrom(ctx, q, orgID)
+	if err != nil {
+		return Row{}, false, ErrRowNotAuthentic
+	}
+	if !ok {
+		return Row{}, false, nil
+	}
+	row := Row{CACertDER: rec.caCertDER, CAEnv: rec.caEnv, SignKeyID: rec.signKeyID, SignPubKey: rec.signPubKey, SignEnv: rec.signEnv}
+	if err := AuthenticateRow(ctx, s, orgID, row); err != nil {
+		return Row{}, false, err
+	}
+	return row, true, nil
 }

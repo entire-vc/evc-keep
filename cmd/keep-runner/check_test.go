@@ -79,7 +79,7 @@ func (h prefixHost) policy(t *testing.T, name, prefix string) string {
 }
 
 // The built keep-runner check refuses a prefix through a symlink and names
-// the component; the same prefix by its real path passes.
+// its class and indexes (never the path; see check_leak_test.go); the same prefix by its real path passes.
 func TestCheckRefusesSymlinkPrefixEndToEnd(t *testing.T) {
 	bin := buildBinary(t, "github.com/entire-vc/evc-keep/cmd/keep-runner", "keep-runner")
 	h := newPrefixHost(t)
@@ -106,8 +106,8 @@ func TestCheckRefusesSymlinkPrefixEndToEnd(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("symlink prefix: exit 0, out=%q", out)
 	}
-	if !strings.Contains(out, `component "`+h.link+`" is a symlink`) {
-		t.Fatalf("symlink prefix: stderr does not name the component: %q", out)
+	if !strings.Contains(out, "policy rule 0 prefix 0 is refused (symlink)") || strings.Contains(out, h.link) {
+		t.Fatalf("symlink prefix: stderr lacks the class and indexes, or carries the path (%d bytes)", len(out))
 	}
 }
 

@@ -743,11 +743,29 @@ func TestMeshHandshakeGuards(t *testing.T) {
 		}
 	})
 
+	t.Run("foreign extension spends no preauth budget", func(t *testing.T) {
+		frozen := time.Now()
+		g := newMeshFixtureOn(t, f.pool, true, func(d *api.MeshDeps) {
+			d.PreauthLimit = api.CatalogLimit{PerMinute: 1, Burst: 1, Now: func() time.Time { return frozen }}
+		})
+		ws := uuid.New()
+		g.mustOpenWindow(ws, secret)
+		foreign := meshHandshakeBody(ws, "unknown-extension", secret)
+		for i := 0; i < 3; i++ {
+			if rec := g.handshakeSigned(foreign, secret, frozen); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("foreign handshake %d: status %d", i, rec.Code)
+			}
+		}
+		if rec := g.handshake(ws, secret); rec.Code != http.StatusOK || installs(ws) != 1 {
+			t.Fatalf("keep handshake after foreign ones: status %d, installs %d", rec.Code, installs(ws))
+		}
+	})
+
 	// keep-rotator points at the same install_path and Mesh repeats its
-	// handshake on every health check: refusing another extension_id must not
-	// spend the workspace's budget nor the caller's pre-authentication one,
-	// or the keep handshake from the same Mesh is locked out.
-	t.Run("foreign extension spends no budget", func(t *testing.T) {
+	// handshake on every health check: a rotator that is not connected yet
+	// spends only budgets of its own, never the workspace's or the caller's
+	// pre-authentication one that the keep handshake uses.
+	t.Run("rotator spends no budget of keep", func(t *testing.T) {
 		frozen := time.Now()
 		g := newMeshFixtureOn(t, f.pool, true, func(d *api.MeshDeps) {
 			d.ResolveLimit = api.CatalogLimit{PerMinute: 1, Burst: 1, Now: func() time.Time { return frozen }}
@@ -757,8 +775,12 @@ func TestMeshHandshakeGuards(t *testing.T) {
 		g.mustOpenWindow(ws, secret)
 		rot := meshHandshakeBody(ws, "keep-rotator", secret)
 		for i := 0; i < 3; i++ {
-			if rec := g.handshakeSigned(rot, secret, time.Now()); rec.Code != http.StatusUnauthorized {
-				t.Fatalf("keep-rotator handshake %d: status %d, want 401", i, rec.Code)
+			want := http.StatusUnauthorized
+			if i > 0 {
+				want = http.StatusTooManyRequests // its own bucket, burst 1
+			}
+			if rec := g.handshakeSigned(rot, secret, time.Now()); rec.Code != want {
+				t.Fatalf("keep-rotator handshake %d: status %d, want %d", i, rec.Code, want)
 			}
 		}
 		if rec := g.handshake(ws, secret); rec.Code != http.StatusOK || installs(ws) != 1 {
@@ -813,4 +835,254 @@ func TestMeshSyncLoopDropsExpiredWindows(t *testing.T) {
 		}
 	}
 	t.Fatal("the sync loop left an expired window in place")
+}
+
+// openRotatorWindow opens the keep-rotator window of ws as the org admin.
+func (f *meshFixture) openRotatorWindow(ws uuid.UUID, secret string) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(map[string]string{"workspace_id": ws.String(), "mesh_url": "https://mesh.example.test",
+		"signing_secret_sha256": meshSecretSHA256(secret), "extension_id": "keep-rotator"})
+	return f.post("/orgs/"+f.org.ID.String()+"/mesh/pending-installs", f.admin, b, nil)
+}
+
+// keep-rotator is a companion of the keep installation at the same keep_url:
+// Mesh posts its install handshake to /mesh/install with extension_id
+// keep-rotator. The first connect needs the rotator's own admin window, a
+// repeat only the secret bound by it; the keep window, the keep secrets and
+// the keep binding never stand in for either.
+func TestMeshRotatorHandshake(t *testing.T) {
+	f := newMeshFixture(t, true)
+	c := canary.New()
+	keepSecret, rotSecret, other := c.Value(1), c.Value(2), c.Value(3)
+	rotate := func(ws uuid.UUID, secret, signer string, ts time.Time) *httptest.ResponseRecorder {
+		return f.handshakeSigned(meshHandshakeBody(ws, "keep-rotator", secret), signer, ts)
+	}
+	uniform401 := func(name string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "authentication failed") {
+			t.Fatalf("%s: status %d, body %s", name, rec.Code, answerDiag(rec))
+		}
+	}
+	bindings := func(ws uuid.UUID) int {
+		return f.count(`SELECT count(*) FROM mesh_rotator_bindings WHERE workspace_id=$1`, ws)
+	}
+	windows := func(ws uuid.UUID) int {
+		return f.count(`SELECT count(*) FROM mesh_rotator_pending_installs WHERE workspace_id=$1`, ws)
+	}
+	// boundKeep is a workspace with the keep installation in place.
+	boundKeep := func(secret string) uuid.UUID {
+		ws := uuid.New()
+		f.mustOpenWindow(ws, secret)
+		if rec := f.handshake(ws, secret); rec.Code != http.StatusOK {
+			t.Fatalf("bind keep: status %d", rec.Code)
+		}
+		return ws
+	}
+
+	t.Run("window opens only on a keep installation", func(t *testing.T) {
+		if rec := f.openRotatorWindow(uuid.New(), rotSecret); rec.Code != http.StatusNotFound {
+			t.Fatalf("window without a keep installation: status %d", rec.Code)
+		}
+		ws := boundKeep(keepSecret)
+		b, _ := json.Marshal(map[string]string{"workspace_id": ws.String(), "mesh_url": "https://other.example.test",
+			"signing_secret_sha256": meshSecretSHA256(rotSecret), "extension_id": "keep-rotator"})
+		if rec := f.post("/orgs/"+f.org.ID.String()+"/mesh/pending-installs", f.admin, b, nil); rec.Code != http.StatusNotFound || windows(ws) != 0 {
+			t.Fatalf("window for another Mesh address: status %d, windows %d", rec.Code, windows(ws))
+		}
+		b, _ = json.Marshal(map[string]string{"workspace_id": ws.String(), "mesh_url": "https://mesh.example.test",
+			"signing_secret_sha256": meshSecretSHA256(rotSecret), "extension_id": "keep-other"})
+		if rec := f.post("/orgs/"+f.org.ID.String()+"/mesh/pending-installs", f.admin, b, nil); rec.Code != http.StatusBadRequest {
+			t.Fatalf("unknown extension in the window: status %d", rec.Code)
+		}
+		g := newMeshFixtureOn(t, f.pool, true)
+		b, _ = json.Marshal(map[string]string{"workspace_id": ws.String(), "mesh_url": "https://mesh.example.test",
+			"signing_secret_sha256": meshSecretSHA256(rotSecret), "extension_id": "keep-rotator"})
+		if rec := f.post("/orgs/"+g.org.ID.String()+"/mesh/pending-installs", g.admin, b, nil); rec.Code != http.StatusNotFound || windows(ws) != 0 {
+			t.Fatalf("admin of another org: status %d, windows %d", rec.Code, windows(ws))
+		}
+	})
+
+	t.Run("connect, repeat, and the secrets stay apart", func(t *testing.T) {
+		ws := boundKeep(keepSecret)
+		// Before any window: refused, nothing written.
+		uniform401("no rotator window", rotate(ws, rotSecret, rotSecret, time.Now()))
+		if bindings(ws) != 0 {
+			t.Fatal("a handshake without a window bound the rotator")
+		}
+		if rec := f.openRotatorWindow(ws, rotSecret); rec.Code != http.StatusCreated {
+			t.Fatalf("open rotator window: status %d", rec.Code)
+		}
+		// A keep handshake can neither spend nor use the rotator's window.
+		uniform401("keep with the rotator's secret", f.handshake(ws, rotSecret))
+		if windows(ws) != 1 || bindings(ws) != 0 {
+			t.Fatal("a keep handshake touched the rotator window")
+		}
+		rec := rotate(ws, rotSecret, rotSecret, time.Now())
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":true`) {
+			t.Fatalf("rotator connect: status %d, body %s", rec.Code, answerDiag(rec))
+		}
+		if strings.Contains(rec.Body.String(), rotSecret) || windows(ws) != 0 || bindings(ws) != 1 {
+			t.Fatal("connect leaked the secret, kept the window, or did not bind")
+		}
+		// Repeat with the bound secret needs no window; keep still repeats with its own.
+		if rec := rotate(ws, rotSecret, rotSecret, time.Now()); rec.Code != http.StatusOK {
+			t.Fatalf("rotator repeat: status %d", rec.Code)
+		}
+		if rec := f.handshake(ws, keepSecret); rec.Code != http.StatusOK {
+			t.Fatalf("keep repeat after the rotator bound: status %d", rec.Code)
+		}
+		uniform401("keep with the rotator's secret after binding", f.handshake(ws, rotSecret))
+		uniform401("rotator with keep's secret", rotate(ws, keepSecret, keepSecret, time.Now()))
+		uniform401("rotator with another secret", rotate(ws, other, other, time.Now()))
+		uniform401("bad HMAC", rotate(ws, rotSecret, other, time.Now()))
+		uniform401("stale", rotate(ws, rotSecret, rotSecret, time.Now().Add(-301*time.Second)))
+		uniform401("future", rotate(ws, rotSecret, rotSecret, time.Now().Add(301*time.Second)))
+		uniform401("unknown extension", f.handshakeSigned(meshHandshakeBody(ws, "keep-other", rotSecret), rotSecret, time.Now()))
+		uniform401("empty extension", f.handshakeSigned(meshHandshakeBody(ws, "", rotSecret), rotSecret, time.Now()))
+	})
+
+	t.Run("window refusals write nothing", func(t *testing.T) {
+		ws := boundKeep(keepSecret)
+		if rec := f.openRotatorWindow(ws, rotSecret); rec.Code != http.StatusCreated {
+			t.Fatalf("open: status %d", rec.Code)
+		}
+		uniform401("digest mismatch", rotate(ws, other, other, time.Now()))
+		if windows(ws) != 1 || bindings(ws) != 0 {
+			t.Fatal("digest mismatch spent the window or bound")
+		}
+		f.expireWindowRotator(ws)
+		uniform401("expired window", rotate(ws, rotSecret, rotSecret, time.Now()))
+		if windows(ws) != 0 || bindings(ws) != 0 {
+			t.Fatal("expired window bound the rotator or stayed")
+		}
+		// A keep window is no rotator proof.
+		f.mustOpenWindow(ws, rotSecret)
+		uniform401("keep window for the rotator", rotate(ws, rotSecret, rotSecret, time.Now()))
+		if bindings(ws) != 0 {
+			t.Fatal("a keep window bound the rotator")
+		}
+		// Unbound workspace: no keep installation, no rotator.
+		uniform401("unbound workspace", rotate(uuid.New(), rotSecret, rotSecret, time.Now()))
+	})
+
+	t.Run("reinstall unbinds and nothing leaks", func(t *testing.T) {
+		ws := boundKeep(keepSecret)
+		if rec := f.openRotatorWindow(ws, rotSecret); rec.Code != http.StatusCreated {
+			t.Fatalf("open: status %d", rec.Code)
+		}
+		var bodies []string
+		for _, rec := range []*httptest.ResponseRecorder{
+			rotate(ws, rotSecret, rotSecret, time.Now()),
+			rotate(ws, other, other, time.Now()),
+			rotate(ws, rotSecret, other, time.Now()),
+		} {
+			bodies = append(bodies, rec.Body.String()+rec.Header().Get("Cache-Control"))
+		}
+		if bindings(ws) != 1 {
+			t.Fatal("connect did not bind")
+		}
+		if err := f.repo.Upsert(context.Background(), f.org.ID, ws, uuid.New(), "https://mesh.example.test", meshext.ModeExtension); err != nil {
+			t.Fatal(err)
+		}
+		if bindings(ws) != 0 {
+			t.Fatal("reinstall left the rotator bound")
+		}
+		uniform401("old rotator secret after reinstall", rotate(ws, rotSecret, rotSecret, time.Now()))
+		for _, b := range bodies {
+			if strings.Contains(b, rotSecret) || strings.Contains(b, other) || c.In(b) {
+				t.Fatal("an answer carries a signing secret")
+			}
+		}
+		if n := f.count(`SELECT count(*) FROM audit_records a WHERE a.org_id=$1 AND a::text LIKE '%' || $2 || '%'`, f.org.ID.String(), rotSecret); n != 0 {
+			t.Fatalf("the journal carries the secret: %d rows", n)
+		}
+	})
+
+	t.Run("uninstall removes the binding", func(t *testing.T) {
+		ws := boundKeep(keepSecret)
+		if rec := f.openRotatorWindow(ws, rotSecret); rec.Code != http.StatusCreated {
+			t.Fatalf("open: status %d", rec.Code)
+		}
+		if rec := rotate(ws, rotSecret, rotSecret, time.Now()); rec.Code != http.StatusOK {
+			t.Fatalf("connect: status %d", rec.Code)
+		}
+		if _, err := f.pool.Exec(context.Background(), `DELETE FROM mesh_installations WHERE workspace_id=$1`, ws); err != nil {
+			t.Fatal(err)
+		}
+		if bindings(ws) != 0 || windows(ws) != 0 {
+			t.Fatal("the rotator binding outlived the installation")
+		}
+	})
+}
+
+func (f *meshFixture) expireWindowRotator(ws uuid.UUID) {
+	f.t.Helper()
+	if _, err := f.pool.Exec(context.Background(), `UPDATE mesh_rotator_pending_installs SET expires_at = now() - interval '1 minute' WHERE workspace_id=$1`, ws); err != nil {
+		f.t.Fatalf("expire rotator window: %v", err)
+	}
+}
+
+// A bound rotator repeats its handshake on every health check: it drains its
+// own per-workspace budget, never the one the keep handshake of the same
+// workspace uses.
+func TestMeshRotatorBudgetIsApartFromKeep(t *testing.T) {
+	base := newMeshFixture(t, true)
+	frozen := time.Now()
+	f := newMeshFixtureOn(t, base.pool, true, func(d *api.MeshDeps) {
+		d.ResolveLimit = api.CatalogLimit{PerMinute: 1, Burst: 2, Now: func() time.Time { return frozen }}
+	})
+	c := canary.New()
+	keepSecret, rotSecret := c.Value(1), c.Value(2)
+	ws := uuid.New()
+	f.mustOpenWindow(ws, keepSecret)
+	if rec := f.handshake(ws, keepSecret); rec.Code != http.StatusOK { // keep: 1 of 2
+		t.Fatalf("bind keep: status %d", rec.Code)
+	}
+	if rec := f.openRotatorWindow(ws, rotSecret); rec.Code != http.StatusCreated {
+		t.Fatalf("open rotator window: status %d", rec.Code)
+	}
+	rot := func() int {
+		return f.handshakeSigned(meshHandshakeBody(ws, "keep-rotator", rotSecret), rotSecret, time.Now()).Code
+	}
+	if got := []int{rot(), rot(), rot(), rot()}; got[0] != 200 || got[1] != 200 || got[2] != 429 || got[3] != 429 {
+		t.Fatalf("rotator answers %v, want 200 200 429 429", got)
+	}
+	if rec := f.handshake(ws, keepSecret); rec.Code != http.StatusOK { // keep: 2 of 2
+		t.Fatalf("keep repeat after the rotator drained its budget: status %d", rec.Code)
+	}
+}
+
+// The rotator's window and its binding are one outcome with the seal: a
+// refused write binds nothing and leaves the window open for the retry.
+func TestMeshRotatorBindIsAtomicWithSeal(t *testing.T) {
+	f := newMeshFixture(t, true)
+	ctx := context.Background()
+	c := canary.New()
+	keepSecret, rotSecret := c.Value(1), c.Value(2)
+	ws := uuid.New()
+	f.mustOpenWindow(ws, keepSecret)
+	if rec := f.handshake(ws, keepSecret); rec.Code != http.StatusOK {
+		t.Fatalf("bind keep: status %d", rec.Code)
+	}
+	if rec := f.openRotatorWindow(ws, rotSecret); rec.Code != http.StatusCreated {
+		t.Fatalf("open: status %d", rec.Code)
+	}
+	p, live, err := f.repo.LiveRotatorPending(ctx, ws)
+	if err != nil || !live {
+		t.Fatalf("window not live: %v", err)
+	}
+	if err := f.repo.BindRotator(ctx, ws, p, func(context.Context) error { return errors.New("seal refused") }); err == nil {
+		t.Fatal("a refused seal was reported as a bind")
+	}
+	if n := f.count(`SELECT count(*) FROM mesh_rotator_bindings WHERE workspace_id=$1`, ws); n != 0 {
+		t.Fatalf("refused seal left %d bindings", n)
+	}
+	if _, live, _ := f.repo.LiveRotatorPending(ctx, ws); !live {
+		t.Fatal("refused seal spent the window")
+	}
+	if err := f.repo.BindRotator(ctx, ws, p, func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if err := f.repo.BindRotator(ctx, ws, p, func(context.Context) error { return nil }); !errors.Is(err, meshext.ErrNoWindow) {
+		t.Fatalf("a spent window bound again: %v", err)
+	}
 }

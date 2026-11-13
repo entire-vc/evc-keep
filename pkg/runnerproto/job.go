@@ -20,6 +20,11 @@ const (
 	ActionExec Action = "exec"
 	// ActionVerify compares the target's fingerprint with the expected one.
 	ActionVerify Action = "verify"
+	// ActionDiscover asks the runner to inventory the carrier files its own
+	// host policy permits (a `discovery` section) and report path, name,
+	// fingerprint and length of each. It names no secret and no target: the
+	// runner is given the store's fingerprint key and nothing else.
+	ActionDiscover Action = "discover"
 )
 
 // TargetKind is a closed list of places a runner can write to. There is no
@@ -150,6 +155,9 @@ func invalid(format string, a ...any) error {
 // Validate checks the job's structure. It does not check the signature,
 // the clock, the runner identity or the host policy.
 func (j Job) Validate() error {
+	if j.Action == ActionDiscover {
+		return j.validateDiscover()
+	}
 	switch {
 	case !uuidV7Re.MatchString(j.JobID):
 		return invalid("job_id is not a UUIDv7")
@@ -204,6 +212,39 @@ func (j Job) Validate() error {
 	default:
 		return invalid("unknown action")
 	}
+}
+
+// validateDiscover is the discover job's own branch. It names a store and
+// nothing else: no secret, version, fingerprint, target or template, and only
+// the builtin provider (the key is delivered by the server). A discover job
+// whose deploy/verify/exec fields are filled is refused, so those fields can
+// never smuggle a path or a rule onto the runner.
+func (j Job) validateDiscover() error {
+	switch {
+	case !uuidV7Re.MatchString(j.JobID):
+		return invalid("job_id is not a UUIDv7")
+	case !idRe.MatchString(j.OrgID):
+		return invalid("org_id")
+	case !idRe.MatchString(j.RunnerID):
+		return invalid("runner_id")
+	case !idRe.MatchString(j.Secret.StoreID):
+		return invalid("store_id")
+	case j.Secret.Provider != ProviderBuiltin:
+		return invalid("a discover job is builtin only")
+	case j.Secret.Name != "" || j.Secret.Scope != "" || j.ExpectedVersion != "" || j.ExpectedFingerprint != "":
+		return invalid("a discover job names no secret")
+	case j.Target != (Target{}) || j.Exec != nil:
+		return invalid("a discover job has no target or exec")
+	case len(j.Nonce) != NonceSize:
+		return invalid("nonce must be %d bytes", NonceSize)
+	case j.IssuedAt.IsZero() || j.NotAfter.IsZero():
+		return invalid("issued_at and not_after are required")
+	case !j.NotAfter.After(j.IssuedAt):
+		return invalid("not_after must be after issued_at")
+	case j.NotAfter.Sub(j.IssuedAt) > MaxJobTTL:
+		return invalid("job lifetime exceeds %s", MaxJobTTL)
+	}
+	return nil
 }
 
 // Validate checks the target's own fields: kind, absolute clean path, the
@@ -293,7 +334,9 @@ func sortedKeys(m map[string]string) []string {
 func (j Job) NeedsValue() bool { return j.Action == ActionDeploy || j.Action == ActionExec }
 
 // NeedsFingerprintKey reports whether the runner is given the store's
-// fingerprint key, and no value, to do the job: only a verify job. The key
+// fingerprint key, and no value, to do the job: a verify or a discover job. The key
 // lets the runner compute the fingerprint of what a carrier holds; nothing
 // else about the secret reaches the host.
-func (j Job) NeedsFingerprintKey() bool { return j.Action == ActionVerify }
+func (j Job) NeedsFingerprintKey() bool {
+	return j.Action == ActionVerify || j.Action == ActionDiscover
+}

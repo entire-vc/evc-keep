@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/entire-vc/evc-keep/internal/testutil/canary"
 	"github.com/google/uuid"
 )
 
@@ -17,7 +20,7 @@ import (
 // reviewed edit of this file: a key added to allowed without being added
 // here (and so without a reviewer reading why) fails.
 func TestAllowListIsPinned(t *testing.T) {
-	want := []string{"action", "auth_reason", "body_len", "count", "duration_ms", "error_class", "kind", "method", "request_id", "route", "stack", "status"}
+	want := []string{"action", "auth_reason", "body_len", "count", "duration_ms", "error_class", "kind", "length", "method", "op", "outcome", "request_id", "route", "stack", "status"}
 	var got []string
 	for k := range allowed {
 		got = append(got, k)
@@ -254,3 +257,121 @@ func TestNumericKeysCarryOnlyIntegers(t *testing.T) {
 		}
 	}
 }
+
+// TestOpOutcomeLengthCarryNoValue is the leak test for threat model §4.4.1:
+// a secret-shaped value under "op", "outcome" or "length" is dropped (with a
+// warning naming only the key), while the legitimate shapes pass.
+func TestOpOutcomeLengthCarryNoValue(t *testing.T) {
+	c := canary.New()
+	for i := 0; i < 6; i++ {
+		v := c.Value(i)
+		for _, key := range []string{"op", "outcome", "length"} {
+			var buf bytes.Buffer
+			New(&buf).Info("m", key, v, "route", "/x")
+			out := buf.String()
+			if !strings.Contains(out, `"route":"/x"`) {
+				t.Fatalf("probe logged nothing useful: %s", out)
+			}
+			if c.In(out) {
+				t.Errorf("canary %d reached the log under key %q: %s", i, key, out)
+			}
+			if !strings.Contains(out, `"key":"`+key+`"`) {
+				t.Errorf("no warning naming dropped key %q: %s", key, out)
+			}
+			// same through WithAttrs
+			buf.Reset()
+			New(&buf).With(key, v).Info("m")
+			if c.In(buf.String()) {
+				t.Errorf("canary %d reached the log via With under %q: %s", i, key, buf.String())
+			}
+		}
+	}
+	// A typed non-integer length is dropped too.
+	var buf bytes.Buffer
+	New(&buf).Info("m", "length", "32")
+	if strings.Contains(buf.String(), `"length":"32"`) {
+		t.Errorf("string length passed: %s", buf.String())
+	}
+	// Positive control: the real shapes pass.
+	buf.Reset()
+	New(&buf).Info("m", "op", "issue", "outcome", "not_found", "length", 32)
+	for _, want := range []string{`"op":"issue"`, `"outcome":"not_found"`, `"length":32`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("legitimate attribute %s lost: %s", want, buf.String())
+		}
+	}
+	// Boundary shapes of the enum regexp.
+	for _, bad := range []string{"", "Issue", "1x", "a-b", "a b", strings.Repeat("a", 33)} {
+		buf.Reset()
+		New(&buf).Info("m", "op", bad)
+		if strings.Contains(buf.String(), `"op":"`+bad+`"`) && bad != "" {
+			t.Errorf("op %q passed", bad)
+		}
+		if bad == "" && strings.Contains(buf.String(), `"op":""`) {
+			t.Errorf("empty op passed")
+		}
+	}
+	buf.Reset()
+	New(&buf).Info("m", "op", strings.Repeat("a", 32))
+	if !strings.Contains(buf.String(), `"op":"`+strings.Repeat("a", 32)+`"`) {
+		t.Errorf("32-char op rejected: %s", buf.String())
+	}
+}
+
+// TestSuffixKeysCarryOnlyStringsAndIntegers is the leak test for the suffix
+// rule: a canary nested in a group under "agent_id", or typed as bytes, an
+// error, a Stringer or a named string under another id/name key, is dropped
+// with a warning naming only the key; a string or an integer still passes.
+func TestSuffixKeysCarryOnlyStringsAndIntegers(t *testing.T) {
+	c := canary.New()
+	for i := 0; i < 6; i++ {
+		v := c.Value(i)
+		raw := []byte(v)
+		for name, val := range map[string]any{
+			"group":   slog.GroupValue(slog.String("v", v)),
+			"bytes":   raw,
+			"error":   errors.New(v),
+			"named":   namedString(v),
+			"stringr": stringerOf(v),
+			"bool":    true,
+			"float":   1.5,
+			"time":    time.Unix(1, 0),
+			"dur":     time.Second,
+		} {
+			for _, key := range []string{"agent_id", "secret_id", "owner_name", "id", "name"} {
+				var buf bytes.Buffer
+				l := New(&buf)
+				l.Info("m", key, val)
+				l.With(key, val).Info("bound")
+				out := buf.String()
+				if c.In(out) {
+					t.Errorf("canary %d (%s) reached the log under %q: %s", i, name, key, out)
+				}
+				if name != "group" && strings.Contains(out, `"`+key+`":`) {
+					t.Errorf("%s value under %q passed: %s", name, key, out)
+				}
+				if !strings.Contains(out, `"key":"`+key+`"`) {
+					t.Errorf("no warning naming dropped key %q (%s): %s", key, name, out)
+				}
+			}
+		}
+	}
+	// Positive control: a uuid string, a name, an integer and an unsigned integer pass.
+	var buf bytes.Buffer
+	id := uuid.NewString()
+	New(&buf).Info("m", "secret_id", id, "job_id", 42, "owner_name", "ops", "id", uint64(7))
+	for _, want := range []string{`"secret_id":"` + id + `"`, `"job_id":42`, `"owner_name":"ops"`, `"id":7`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("legitimate attribute %s lost: %s", want, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), "dropped disallowed") {
+		t.Errorf("positive control produced a drop warning: %s", buf.String())
+	}
+}
+
+type namedString string
+
+type stringerOf string
+
+func (s stringerOf) String() string { return string(s) }

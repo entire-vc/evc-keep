@@ -38,6 +38,28 @@ delete it once the line is logged. `KEEP_MESH_SELF_ROTATE_HOOK` and
 `KEEP_MESH_SELF_ROTATE_INTERVAL` are refused in this mode. The core build
 refuses to start with these variables.
 
+### Rotating Mesh agent keys (mesh build)
+
+By default `POST /orgs/{org}/secrets/{id}/rotate` with `mode: generate`
+produces a random value. A secret that stands for a Mesh agent key is bound to
+its agent instead, and the same request then issues a new key for that agent
+through the Mesh agent-keys API, lays it out on the carriers, checks each
+carrier's fingerprint, and revokes the old key only after every carrier
+confirmed. A failed carrier keeps the old key and opens an incident.
+
+Three variables, all or none (a part set stops the start):
+
+| Variable | Meaning |
+|---|---|
+| `KEEP_MESH_ROTATE_URL` | base address of the Mesh whose agent keys are rotated (https, or http to loopback) |
+| `KEEP_MESH_ROTATE_TOKEN_FILE` | absolute path, regular file, mode `0600`, holding the service token with the `agent_key:rotate` right; read on every call |
+| `KEEP_MESH_ROTATE_BINDINGS` | regular file, JSON `{"<secret id>": "<agent id>"}`, canonical lowercase UUIDs only; read on every call |
+
+A secret that is not in the bindings file keeps the generated value and is
+never sent to Mesh. An unreadable bindings file fails the run closed. The core
+build does not import the Mesh plugin and refuses to start, before it opens the
+database, if any of the three variables is set.
+
 TLS for clients is terminated by an external reverse proxy (for example
 Caddy); `KEEP_PUBLIC_URL` is the https URL clients use through it. The
 server's own TLS listener (`8443`) uses the certificate named by
@@ -224,13 +246,125 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/readyz
 curl -fsS http://127.0.0.1:8080/version
 ```
 
+### The published Mesh image and its receipt
+
+A push to the default branch that passes the whole pipeline and whose commit is
+named by the protected variable `KEEP_MESH_IMAGE_WRITE_SHA` (see "Default is
+auth-only" below; an ordinary push only verifies authorization and writes
+nothing) publishes the Mesh variant (`SERVER_VARIANT=mesh`, linux/amd64) to the
+project's private container registry, from that exact commit:
+
+```
+<registry>/entire-vc/evc-keep/keep-server-mesh:<full 40-hex commit>
+```
+
+The commit is the only tag; there is no `latest`. The publish job refuses to push when that tag already exists (the check and the push are one serialized job), so a published reference is never moved. Merge requests, schedules,
+tags and manual pipelines never publish. The same pipeline pulls the image back
+by its digest, takes the `keep-server` binary out of it, starts that binary
+against a scratch database and compares `GET /version` with the commit. The job
+`image-receipt-mesh` keeps `mesh-image-receipt.json` for a year:
+
+```json
+{"schema": "keep-mesh-image-receipt/1", "source_sha": "<commit>", "variant": "mesh",
+ "platform": "linux/amd64", "pipeline_id": 0, "publish_job_id": 0, "pull_job_id": 0,
+ "receipt_job_id": 0, "build_time": "<RFC 3339>",
+ "image": {"repository": "...", "tag": "<commit>", "reference": "...:<commit>",
+           "digest": "sha256:...", "by_digest": "...@sha256:..."},
+ "elf": {"path": "usr/local/bin/keep-server", "sha256": "...",
+         "main_package": "github.com/entire-vc/evc-keep/plugins/mesh/cmd/keep-server", "machine": "x86_64"},
+ "runtime": {"commit": "<commit>", "build_time": "<RFC 3339>"}}
+```
+
+It holds names, ids and digests only; no configuration value reaches it.
+
+Verify it yourself, with a registry login that can read the project
+(`crane auth login`) and `crane` from go-containerregistry:
+
+```sh
+R=mesh-image-receipt.json
+python3 scripts/mesh_image_receipt.py verify "$R" --source-sha <commit>   # consistency
+ref=$(jq -r .image.by_digest "$R")
+crane digest "$(jq -r .image.reference "$R")"                             # tag still -> the digest
+crane manifest "$ref" | sha256sum                                         # equals the digest
+crane export "$ref" - | tar -xO usr/local/bin/keep-server | sha256sum     # equals .elf.sha256
+```
+
+Pull and run the image by digest, never by tag: `docker pull "$ref"`.
+
+Publish authorization. One probe, `scripts/registry_auth_probe.py`, runs in two
+places. `image-publish-mesh` runs it as `allow` before the opt-in and before any
+write; merge request pipelines run it as `deny` in `image-auth-deny-mesh`. It
+asks the CI server who the job is (`/api/v4/job`: job name, pipeline source,
+project, actor; the `CI_*` variables are only compared with it, never trusted)
+and asks the registry token service for the scopes `pull`, `pull,push`,
+`pull,delete` and `pull,*` on exactly the Mesh repository. Every token must keep
+`pull` (the credential is accepted) and must not carry the wildcard. `allow`:
+the server says this is `image-publish-mesh` of a push pipeline of this project
+and push is granted; delete is only reported (it follows the native rights).
+`deny`: the server says this is the merge request probe job and neither push nor
+delete is granted. A failed, redirected, unauthenticated, malformed or foreign
+answer is neither an allow nor a deny and fails the job. The probe writes
+nothing and prints only the server-side context, repository and decisions,
+never a token, header or raw answer. The publisher job runs on the pinned
+python image with `crane` taken from `image-crane-mesh`, which copies it out of
+the pinned crane image; the publisher checks its sha256 before use. This relies
+on the registry-side policy that grants push only to the trusted publisher job
+of the protected default-branch push pipeline.
+
+Default is auth-only. After the authorization check the publish job stops with
+success unless the protected project variable `KEEP_MESH_IMAGE_WRITE_SHA` equals
+the full commit being published. Absent, empty, malformed or another commit's
+value (a stale opt-in included) writes only `mesh-image-auth-only.json`: no
+image, no digest, no receipt; the pull and receipt jobs then do nothing. To
+publish a commit, set the variable to its full SHA and retry `image-publish-mesh`
+in that commit's push pipeline. An auth-only run is not an image receipt.
+
+Rollback: revert the commit that added the `image-publish-mesh`,
+`image-pull-mesh` and `image-receipt-mesh` jobs, which stops new references from
+being issued. An image that is already installed and its data are not touched.
+
 ## Upgrade
 
+Every fenced block below that follows an `exec:` marker is run, as written, by
+`scripts/check-upgrade-rollback.sh` in CI (0.6.5 to the current commit and
+back, against a real PostgreSQL). If you change a step here, that job tells
+you whether the new text still works.
+
+The blocks are plain `sh`, and every step that must not run after a failure is
+chained to the one before it with `&&`, so they stop at the first error whether
+or not your shell runs with `set -e` or `pipefail`. libpq takes the URL as a
+command-line argument, so the database password is visible in the process list
+for the length of a `pg_dump` or `psql`; run them on a host where only the
+service account can list processes, or use a role for backups that is not the
+application role.
+
 1. Back up the database (`pg_dump -Fc`) and note the current image tag or
-   binary version. The root key is not part of this backup.
-2. `keep-server migrate status` with the **new** binary.
+   binary version. The root key is not part of this backup. The blocks below
+   take the connection from the env file (`ENV_FILE`, default
+   `/etc/keep/keep-server.env`) and hand `KEEP_DATABASE_URL` to libpq as it is,
+   so a backup or a restore reaches the database the server uses and no other.
+2. `keep-server migrate status` with the **new** binary. It exits 1 while the
+   schema is behind the binary, which is what you expect before the upgrade.
 3. `migrate up` with the new binary.
 4. Replace the container or binary and restart; run the health checks.
+
+<!-- exec:upgrade -->
+```sh
+BACKUP_DIR=${BACKUP_DIR:-/var/backups/keep}
+ENV_FILE=${ENV_FILE:-/etc/keep/keep-server.env}
+set -a; . "$ENV_FILE"; set +a   # the same 0600 env file the server runs with
+# libpq reads KEEP_DATABASE_URL as it is (host, port, sslmode and every other
+# option in it), so the dump reaches the database the server uses and no other.
+# ${...:?} stops here if the URL is empty: without it libpq would fall back to
+# its defaults and dump whatever database that is.
+db=${KEEP_DATABASE_URL:?KEEP_DATABASE_URL is not set in the env file}
+# Each step runs only if the one before it succeeded, in any shell.
+pg_dump -Fc -d "$db" -f "$BACKUP_DIR/keep-pre-upgrade.dump" &&
+  curl -fsS "${KEEP_LOCAL_URL:-http://127.0.0.1:8080}/version" &&   # the commit being replaced
+  { keep-server migrate status || true; } &&   # new binary; exit 1 = behind, expected here
+  keep-server migrate up &&
+  systemctl restart keep-server        # or: replace the container and start it
+```
 
 Migrations are applied under a database lock, so running `migrate up` twice
 at once is safe.
@@ -249,27 +383,54 @@ path.
 **Binary and schema.** Roll the schema down to the version the older binary
 requires, then start the older binary. `keep-server` has no `migrate down`
 command; use the goose command-line tool against the migrations of the *newer*
-release, because they hold the `Down` steps:
+release, because they hold the `Down` steps. Run it from a checkout of the
+newer release tag (`git checkout <newer-release-tag>`), with the server
+stopped:
 
+<!-- exec:rollback -->
 ```sh
-git checkout <newer-release-tag>
-go install github.com/pressly/goose/v3/cmd/goose@v3.27.0   # once; put it on root's PATH
-sudo sh -c 'set -a; . /etc/keep/keep-server.env; \
-  GOOSE_DRIVER=postgres GOOSE_DBSTRING="$KEEP_DATABASE_URL" \
-  exec goose -dir internal/store/migrations down-to <version>'
+ENV_FILE=${ENV_FILE:-/etc/keep/keep-server.env}
+go install github.com/pressly/goose/v3/cmd/goose@v3.27.0 &&   # once; put it on root's PATH
+  systemctl stop keep-server &&
+  sudo sh -c 'set -a; . "$1"; \
+    GOOSE_DRIVER=postgres GOOSE_DBSTRING="$KEEP_DATABASE_URL" \
+    exec goose -dir internal/store/migrations down-to "$2"' sh "$ENV_FILE" "$OLDER_SCHEMA_VERSION" &&
+  # now install the older binary and start it
+  systemctl start keep-server
 ```
 
-The connection URL carries the database password, so it reaches goose through
-`GOOSE_DBSTRING` in its environment and never as a command-line argument, where
-any local user could read it in the process list.
+`OLDER_SCHEMA_VERSION` is the schema version the older binary required (its
+`migrate status` output). The connection URL carries the database password, so
+it reaches goose through `GOOSE_DBSTRING` in its environment and never as a
+command-line argument, where any local user could read it in the process list.
 
-`<version>` is the schema version the older binary required (its
-`migrate status` output). Rehearse the downgrade on a restored copy of the
-backup first: a downgrade that drops a column drops its data.
+Rehearse the downgrade on a restored copy of the backup first: a downgrade
+that drops a column drops its data.
 
 **Restore.** If the downgrade is unsafe or fails, stop the server, restore the
-`pg_dump` taken in step 1 of the upgrade into the database, and start the
-older binary or image. Anything written after that backup is lost.
+`pg_dump` taken in step 1 of the upgrade into an empty schema (restoring over
+the newer schema would leave the tables the newer release added), and start the
+older binary or image. The SQL it writes (`restore.sql`, mode 0600) holds the
+whole database: delete it when the restore is verified. Anything written after that backup is lost.
+
+<!-- exec:restore -->
+```sh
+BACKUP_DIR=${BACKUP_DIR:-/var/backups/keep}
+ENV_FILE=${ENV_FILE:-/etc/keep/keep-server.env}
+set -a; . "$ENV_FILE"; set +a   # the same 0600 env file the server runs with
+db=${KEEP_DATABASE_URL:?KEEP_DATABASE_URL is not set in the env file}   # see Upgrade
+umask 077
+# The archive is converted to SQL first: a damaged or unreadable dump stops the
+# sequence here, before the server is stopped or anything is dropped. Each later
+# step runs only if the one before it succeeded, in any shell.
+pg_restore --no-owner -f "$BACKUP_DIR/restore.sql" "$BACKUP_DIR/keep-pre-upgrade.dump" &&
+  systemctl stop keep-server &&
+  # an empty schema first: --clean would leave the tables the newer release added
+  psql -v ON_ERROR_STOP=1 -d "$db" -c 'DROP SCHEMA public CASCADE' -c 'CREATE SCHEMA public' &&
+  psql -v ON_ERROR_STOP=1 -q -d "$db" -f "$BACKUP_DIR/restore.sql" &&
+  # now install the older binary and start it
+  systemctl start keep-server
+```
 
 After any rollback run the health checks and `keep-server migrate status`.
 

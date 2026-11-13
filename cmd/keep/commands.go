@@ -1,14 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"time"
+
+	"github.com/entire-vc/evc-keep/internal/reqid"
 )
 
 // The wire types below mirror internal/api/types.go's Secret, StoreRef and
@@ -67,8 +67,8 @@ func listSecrets(c *client, scopeLevel, scopeID string) ([]secret, error) {
 		return nil, err
 	}
 	var secrets []secret
-	if err := json.Unmarshal(body, &secrets); err != nil {
-		return nil, fmt.Errorf("parse server response: %w", err)
+	if err := decodeBody(body, &secrets); err != nil {
+		return nil, err
 	}
 	return secrets, nil
 }
@@ -110,8 +110,8 @@ func cmdMeta(c *client, scopeLevel, scopeID, name string, jsonOut bool, w io.Wri
 		return err
 	}
 	var got secret
-	if err := json.Unmarshal(body, &got); err != nil {
-		return fmt.Errorf("parse server response: %w", err)
+	if err := decodeBody(body, &got); err != nil {
+		return err
 	}
 	if jsonOut {
 		return writeJSONValue(w, got)
@@ -129,8 +129,8 @@ func cmdVersion(c *client, scopeLevel, scopeID, name string, jsonOut bool, w io.
 		return err
 	}
 	var versions []secretVersion
-	if err := json.Unmarshal(body, &versions); err != nil {
-		return fmt.Errorf("parse server response: %w", err)
+	if err := decodeBody(body, &versions); err != nil {
+		return err
 	}
 	if jsonOut {
 		return writeJSONValue(w, versions)
@@ -184,8 +184,8 @@ func cmdCreateRef(c *client, in createRefInput, jsonOut bool, w io.Writer) error
 		return err
 	}
 	var created secret
-	if err := json.Unmarshal(body, &created); err != nil {
-		return fmt.Errorf("parse server response: %w", err)
+	if err := decodeBody(body, &created); err != nil {
+		return err
 	}
 	if jsonOut {
 		return writeJSONValue(w, created)
@@ -215,11 +215,11 @@ func cmdAuditVerify(c *client, jsonOut bool, w io.Writer) (bool, error) {
 		return false, err
 	}
 	var res auditVerifyResult
-	if err := json.Unmarshal(body, &res); err != nil {
-		return false, fmt.Errorf("parse server response: %w", err)
+	if err := decodeBody(body, &res); err != nil {
+		return false, err
 	}
 	res.BrokenID, res.BreakKind = sanitizeBreak(res.BrokenID, res.BreakKind)
-	if !auditRequestID.MatchString(res.RequestID) {
+	if !reqid.Valid(res.RequestID) {
 		res.RequestID = "(unexpected value)"
 	}
 	if jsonOut {
@@ -245,8 +245,5 @@ func sanitizeBreak(id, kind string) (string, string) {
 	}
 	return id, kind
 }
-
-// auditRequestID is the request id shape internal/reqid accepts.
-var auditRequestID = regexp.MustCompile(`^[A-Za-z0-9-]{1,36}$`)
 
 var auditULID = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{26}$`)

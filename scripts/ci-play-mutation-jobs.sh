@@ -1,10 +1,15 @@
 #!/bin/sh
-# Start the manual mutation jobs of an MR's latest pipeline, once, when the MR
-# is ready. Merge request pipelines carry no mutation job any more (mutation
-# suites run in the nightly schedule and on release tags, see .gitlab-ci.yml),
-# so on a current pipeline it finds nothing to start; it stays for pipelines
-# created before that change, which still have the manual, blocking
-# start-mutations job and the `mutations` trigger of the selected child.
+# NOT IN USE since the owner decision of 13.11.2026: a merge request pipeline
+# has no mutation job, no start-mutations job and no `mutations-mr` trigger, so
+# there is nothing to play. The script stays until it is removed on purpose; the
+# text below describes what it did.
+#
+# Start the mutation run of an MR's latest pipeline, once, when the MR is
+# ready. A merge request pipeline stopped at the manual, blocking
+# start-mutations job; playing it let the `mutations-mr` trigger start the
+# child pipeline of the suites the diff needed.
+# scripts/check-mr-mutation-gate.py is the check that the child exists, ran on
+# this HEAD and lacks no selected job.
 #
 # A manual job only appears when its stage is reached, and a manual job in an
 # early stage holds the later ones. The script therefore keeps polling and
@@ -13,9 +18,9 @@
 #
 # Gate: it refuses (exit 3, reasons printed) unless every non-mutation job of the
 # head pipeline is success (a failed or canceled job of a later stage refuses
-# too), every child pipeline (bridge) succeeded (the `mutations` trigger, not
+# too; an optional manual job nobody played, such as the backtest, is ignored), every child pipeline (bridge) succeeded (the `mutations-mr` trigger, not
 # started yet, aside), and the latest "Verify: Charles" note on the MR names
-# the current full HEAD SHA with SHIP (or "AC PASS ... awaiting mutations").
+# the current full HEAD SHA with SHIP (nothing weaker: the mutations start only after SHIP).
 # A later note by the reviewer that withdraws or blocks the verdict (DO-NOT-SHIP,
 # BLOCKED, withdrawn) also refuses. See scripts/ci-play-gate.py; the merge gate is unchanged. Helper only: to roll
 # it back, revert the commit that added the gate.
@@ -64,7 +69,10 @@ text = sys.stdin.read().replace("][", ",")
 jobs = json.loads(text or "[]")
 mut = [j for j in jobs if j["name"].split(" ")[0].endswith("-mutations")]
 manual = [j for j in mut if j["status"] == "manual"]
-pending = [j for j in jobs if j["status"] in ("created", "pending", "running", "waiting_for_resource", "preparing")]
+# A job of the last stage (.post) only starts when the child pipeline has finished,
+# hours later: it is not something this script is still waiting to start.
+pending = [j for j in jobs if j["status"] in ("created", "pending", "running", "waiting_for_resource", "preparing")
+           and j.get("stage") != ".post"]
 print(len(pending))
 print(len([j for j in mut if j["status"] in ("pending", "running", "waiting_for_resource", "preparing")]))
 for j in manual:
