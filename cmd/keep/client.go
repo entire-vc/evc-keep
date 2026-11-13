@@ -14,12 +14,17 @@ import (
 	"time"
 )
 
-// redactedValue replaces the Authorization header's own text everywhere the
-// CLI might print a request for --debug — the same reasoning
+// redactedValue replaces every HTTP header value everywhere the CLI might
+// print a request or response for --debug — the same reasoning
 // internal/identity.Token documents for why a token never renders as
 // itself: a debug trace is exactly as public as a log line once it lands in
 // a terminal someone screenshots or pastes.
 const redactedValue = "[REDACTED]"
+
+// maxResponseBytes caps what the shared client reads from one response —
+// the same limit as internal/mcp's maxResponseBytes, so no Keep Server
+// answer is read unbounded by either client.
+const maxResponseBytes = 1 << 20
 
 // apiError is Keep Server's error body (apperr.Body: error_class, message,
 // request_id — threat model §4.3's closed field list) plus the HTTP status
@@ -32,9 +37,12 @@ type apiError struct {
 	RequestID  string `json:"request_id"`
 }
 
-// Error is safe to print on a terminal: the fields come from the server.
+// Error is safe to print on a terminal: the class selects a static local
+// text and the server's message never reaches it, even under a known class.
+// request_id is the one echoed field, and only inside the server's
+// internal/reqid contract (threat model §4.3).
 func (e *apiError) Error() string {
-	class, msg := safeClass(e.ErrorClass), sanitizeText(e.Message, maxErrTextRunes)
+	class, msg := safeClass(e.ErrorClass), staticMessage(e.ErrorClass)
 	if e.RequestID == "" {
 		return fmt.Sprintf("%s: %s", class, msg)
 	}
@@ -120,18 +128,41 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// redactedHeaderDump renders h for a debug trace with every Authorization
-// value replaced — never conditionally, never based on what the value looks
-// like, so the guarantee holds even for a malformed or already-redacted
-// value.
+// debugHeaderNames is the closed set of header names a debug trace may print,
+// in canonical case. A name is untrusted server (or caller) data and can carry
+// a printable credential as well as a value can, so any name outside this set
+// is replaced by unlistedHeaderName — no prefix, suffix or length of it.
+var debugHeaderNames = map[string]struct{}{
+	"Accept": {}, "Authorization": {}, "Cache-Control": {}, "Connection": {},
+	"Content-Encoding": {}, "Content-Length": {}, "Content-Type": {},
+	"Cookie": {}, "Date": {}, "Etag": {}, "Location": {},
+	"Proxy-Authorization": {}, "Retry-After": {}, "Server": {},
+	"Set-Cookie": {}, "User-Agent": {}, "Vary": {}, "Www-Authenticate": {},
+	"X-Request-Id": {},
+}
+
+const unlistedHeaderName = "[unlisted header]"
+
+func debugHeaderName(k string) string {
+	if c := http.CanonicalHeaderKey(k); c != "" {
+		if _, ok := debugHeaderNames[c]; ok {
+			return c
+		}
+	}
+	return unlistedHeaderName
+}
+
+// redactedHeaderDump renders h for a debug trace with every header value
+// replaced — never conditionally, never by header name or by what the value
+// looks like, so Set-Cookie, Cookie, Proxy-Authorization and any header a
+// server invents are covered alike. Names are kept only from the closed
+// debugHeaderNames set; every other name collapses to one fixed label.
 func redactedHeaderDump(h http.Header) string {
 	var b strings.Builder
 	for k, vs := range h {
-		for _, v := range vs {
-			if strings.EqualFold(k, "Authorization") {
-				v = redactedValue
-			}
-			fmt.Fprintf(&b, "  %s: %s\n", sanitizeText(k, maxErrTextRunes), sanitizeText(v, maxErrTextRunes))
+		name := debugHeaderName(k)
+		for range vs {
+			fmt.Fprintf(&b, "  %s: %s\n", name, redactedValue)
 		}
 	}
 	return b.String()
@@ -189,9 +220,16 @@ func (c *client) doEndpoint(method, endpoint string, body any) (int, []byte, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// One byte past the limit is enough to tell "exactly maxResponseBytes"
+	// from "more"; the Content-Length header is never trusted, so a chunked
+	// or lying server is bounded the same way. Refused before any decoding,
+	// with a static error that carries no response bytes.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return 0, nil, errors.New("read response: failed")
+	}
+	if len(respBody) > maxResponseBytes {
+		return 0, nil, errors.New("read response: too large")
 	}
 	c.debugf("-> %d %s", resp.StatusCode, redactedHeaderDump(resp.Header))
 

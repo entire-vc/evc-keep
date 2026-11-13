@@ -92,6 +92,12 @@ type Options struct {
 	// actor that cannot be learnt is the plugin's to log, not to fail. Nil
 	// in a build with SelfRotate stops such a start: the check is not skipped.
 	SelfRotateActor func(ctx context.Context, gate config.MeshGate, tokens GateTokenSource, account string, logger *slog.Logger) error
+	// Rotators builds the source of key providers for secrets whose credential
+	// lives on another system (a Mesh agent key). The core calls it once at
+	// start and never imports the provider itself: a plugin binary supplies it.
+	// A nil source or ok=false for a secret keeps the generated value; an error
+	// stops the start. Nil means this build has no such provider.
+	Rotators func(logger *slog.Logger) (RotatorSource, error)
 	// SelfRotateEvery overrides config.MeshSelfRotate.Interval, for tests.
 	SelfRotateEvery time.Duration
 }
@@ -120,6 +126,14 @@ func Main(args []string, opts Options) int {
 
 	if len(args) > 1 && args[1] == "bootstrap-org" {
 		return runBootstrapOrg(ctx, args[2:])
+	}
+
+	if len(args) > 1 && args[1] == "issue-admin-token" {
+		return runIssueAdminToken(ctx, args[2:])
+	}
+
+	if len(args) > 1 && args[1] == "offline-transfer" {
+		return runOfflineTransfer(ctx, args[2:])
 	}
 
 	if len(args) > 1 && args[1] == "bind-default-store" {
@@ -260,6 +274,10 @@ func runServe(ctx context.Context, logger *slog.Logger, opts Options) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	if err := checkRotatorSettings(opts, os.LookupEnv); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	serverCert, err := serverTLSCert(cfg, logger)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "runner TLS listener certificate:", err)
@@ -351,7 +369,15 @@ func runServe(ctx context.Context, logger *slog.Logger, opts Options) int {
 	}
 	deployments := deployment.NewRepo(pool, audit.NewJournal(pool).WithLogger(logger))
 	carrierSvc := carriers.NewService(pool)
-	rotations := newRotations(pool, local, deployments, carrierSvc, logger)
+	var rotators RotatorSource
+	if opts.Rotators != nil {
+		if rotators, err = opts.Rotators(logger); err != nil {
+			// The plugin's own text is not printed: it is not Keep's to vouch for.
+			fmt.Fprintln(os.Stderr, "refusing to start: the rotation key provider configuration was refused by the plugin")
+			return 1
+		}
+	}
+	rotations := newRotations(rotators, pool, local, deployments, carrierSvc, logger)
 	go runPendingLayouts(expiryCtx, wireRotationInput(input, rotations, pool, logger))
 	go runPendingLayouts(expiryCtx, rotationResumeSweep(rotations, logger))
 	gates, err := wireMeshGate(expiryCtx, cfg, opts, pool, local.MeshVault(), deployments, rotations, logger)
@@ -543,6 +569,8 @@ func (g gateSource) Decide(ctx context.Context, in deployment.DecideInput) (depl
 // it, to return the api interface rather than the concrete zone type.
 type meshVault struct{ *builtin.MeshVault }
 
+var _ api.MeshMetadataReader = meshVault{}
+
 func (v meshVault) PutSecret(ctx context.Context, org, workspace, ref, value string) (api.MeshSecretMeta, error) {
 	m, err := v.MeshVault.PutSecret(ctx, org, workspace, ref, value)
 	return api.MeshSecretMeta(m), meshSecretErr(err)
@@ -556,6 +584,12 @@ func (v meshVault) PutToken(ctx context.Context, org, workspace, token string) (
 func (v meshVault) ResolveSecret(ctx context.Context, org, workspace, ref string) ([]byte, api.MeshSecretMeta, error) {
 	body, m, err := v.MeshVault.ResolveSecret(ctx, org, workspace, ref)
 	return body, api.MeshSecretMeta(m), meshSecretErr(err)
+}
+
+// MetadataSecret is the metadata probe's reader: version and length only.
+func (v meshVault) MetadataSecret(ctx context.Context, org, workspace, ref string) (api.MeshSecretMeta, error) {
+	m, err := v.MeshVault.MetadataSecret(ctx, org, workspace, ref)
+	return api.MeshSecretMeta(m), meshSecretErr(err)
 }
 
 // meshSecretErr maps the zone's two named refusals onto the api's; any other

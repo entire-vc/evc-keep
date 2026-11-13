@@ -214,9 +214,13 @@ func runLoginSubcommand(args []string, stdin io.Reader, stderr io.Writer, getenv
 		return 2
 	}
 	if fromStdin {
-		b, err := io.ReadAll(stdin)
+		b, err := readTokenBounded(stdin)
+		if errors.Is(err, errTokenTooLarge) {
+			_, _ = fmt.Fprintf(stderr, "keep login: %v\n", errTokenTooLarge)
+			return 2
+		}
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "keep login: read token from stdin: %v\n", err)
+			_, _ = fmt.Fprintln(stderr, "keep login: could not read token from stdin")
 			return 2
 		}
 		token = string(b)
@@ -388,7 +392,11 @@ func reportErr(stderr io.Writer, err error) int {
 	}
 	var ae *apiError
 	if errors.As(err, &ae) {
-		_, _ = fmt.Fprintf(stderr, "keep: %s: %s\n", safeClass(ae.ErrorClass), sanitizeText(ae.Message, maxErrTextRunes))
+		line := fmt.Sprintf("%s: %s", safeClass(ae.ErrorClass), staticMessage(ae.ErrorClass))
+		if ae.RequestID != "" {
+			line += " (request_id=" + safeRequestID(ae.RequestID) + ")"
+		}
+		_, _ = fmt.Fprintf(stderr, "keep: %s\n", line)
 		return 1
 	}
 	_, _ = fmt.Fprintf(stderr, "keep: %s\n", err)

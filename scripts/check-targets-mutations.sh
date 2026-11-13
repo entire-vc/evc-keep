@@ -1373,8 +1373,6 @@ mutate verify-error-without-ordinal verify.go TestVerifyCarrierErrorsNameKindAnd
 	'carrierKind(c), ordinal)' 'carrierKind(c), 0)'
 mutate verify-error-echoes-foreign-kind verify.go TestVerifyCarrierErrorsNameKindAndOrdinalOnly \
 	'if c.Member() {' 'if true {'
-mutate observe-systemd-credential observe.go TestObserveRefusesAnAgentOwnedCarrierAndAnUnverifiableKind \
-	'if t.Kind == runnerproto.TargetSystemdCredential {' 'if false {'
 mutate observe-owner-follows-symlink observe.go TestOwnerOfDoesNotFollowASymlinkAndSaysAbsentForAMissingFile \
 	'unix.O_RDONLY|unix.O_NOFOLLOW|' 'unix.O_RDONLY|'
 mutate observe-owner-regular-only observe.go TestOwnerOfRefusesANonRegularCarrier \

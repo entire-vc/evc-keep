@@ -187,9 +187,10 @@ func TestMeshUninstallErasesAndCascades(t *testing.T) {
 		}
 	}
 	before := f.liveEnvelopes(f.org.ID, ws)
-	// Three credentials of the install and three secret versions, one disabled.
-	if before != 6 {
-		t.Fatalf("live envelopes before removal = %d, want 6", before)
+	// Four credentials of the install (token, events secret, the extension's
+	// signing secret slot, Keep's secret) and three secret versions, one disabled.
+	if before != 7 {
+		t.Fatalf("live envelopes before removal = %d, want 7", before)
 	}
 	otherBefore, otherRows := f.liveEnvelopes(f.org.ID, other), f.meshRows(other)
 
@@ -236,7 +237,7 @@ func TestMeshUninstallErasesAndCascades(t *testing.T) {
 		f.org.ID.String()).Scan(&reason); err != nil {
 		t.Fatalf("no ok mesh.uninstall record: %v", err)
 	}
-	if want := "workspace=" + ws.String() + " erased=6"; reason != want {
+	if want := "workspace=" + ws.String() + " erased=7"; reason != want {
 		t.Errorf("audit reason = %q, want %q", reason, want)
 	}
 
@@ -293,7 +294,7 @@ func TestMeshUninstallAuthorization(t *testing.T) {
 	if f.meshRows(ws)["mesh_installations"] != 1 || f.meshRows(foreign)["mesh_installations"] != 1 {
 		t.Fatal("a refused removal deleted an installation")
 	}
-	if f.liveEnvelopes(f.org.ID, ws) != 3 || f.liveEnvelopes(otherOrg.ID, foreign) != 3 {
+	if f.liveEnvelopes(f.org.ID, ws) != 4 || f.liveEnvelopes(otherOrg.ID, foreign) != 4 {
 		t.Fatal("a refused removal erased credentials")
 	}
 	denied := f.count(`SELECT count(*) FROM audit_records WHERE org_id = $1 AND action = 'mesh.uninstall' AND result_status = 'failed' AND result_error_class = 'permission_denied'`, f.org.ID.String())
@@ -335,8 +336,8 @@ func TestMeshUninstallEraseFailureKeepsInstallation(t *testing.T) {
 	if n := f.meshRows(ws)["mesh_installations"]; n != 1 {
 		t.Fatal("a failed erasure deleted the installation")
 	}
-	if n := f.liveEnvelopes(f.org.ID, ws); n != 4 {
-		t.Fatalf("live versions after a failed removal = %d, want 4: the erasure was not rolled back", n)
+	if n := f.liveEnvelopes(f.org.ID, ws); n != 5 {
+		t.Fatalf("live versions after a failed removal = %d, want 5: the erasure was not rolled back", n)
 	}
 	wantStatus(t, f.resolveSecret(ws, "db-password"), http.StatusOK, "resolve after failed removal")
 	if n := f.count(`SELECT count(*) FROM audit_records WHERE org_id = $1 AND action = 'mesh.uninstall' AND result_status = 'failed' AND result_error_class = 'internal'`, f.org.ID.String()); n != 1 {
@@ -345,7 +346,7 @@ func TestMeshUninstallEraseFailureKeepsInstallation(t *testing.T) {
 
 	fail.Store(false)
 	got := decodeUninstall(t, f.uninstall(f.admin, ws))
-	if got.Erased != 4 || f.liveEnvelopes(f.org.ID, ws) != 0 || f.meshRows(ws)["mesh_installations"] != 0 {
+	if got.Erased != 5 || f.liveEnvelopes(f.org.ID, ws) != 0 || f.meshRows(ws)["mesh_installations"] != 0 {
 		t.Fatalf("repeat after a failed erasure: erased %d, live %d", got.Erased, f.liveEnvelopes(f.org.ID, ws))
 	}
 }

@@ -169,6 +169,16 @@ mutate token-mode-not-exact    internal/config/meshgate.go '	case fi.Mode().Perm
 mutate token-empty-accepted    internal/config/meshgate.go '	case fi.Size() == 0:' '	case false:' TestMeshGatePartialOrBadConfigFailsWithoutValues
 pkg=./cmd/keep-server/app
 mutate startup-partial-accepted internal/config/meshgate.go '		if v.val == "" {' '		if false {' TestServeMeshGateStartup
+# The core build refuses the rotation settings it cannot honour.
+mutate core-rotate-check-not-called cmd/keep-server/app/main.go 'if err := checkRotatorSettings(opts, os.LookupEnv); err != nil {' 'if err := error(nil); err != nil {' TestRunServe_RefusesRotateSettingsBeforeDatabase
+mutate core-rotate-setting-ignored cmd/keep-server/app/rotation.go '_, set := lookup(name); set' '_, set := lookup(name); set && false' TestCheckRotatorSettings_CoreRefusesAnyOfThree
+mutate core-rotate-plugin-build-refused cmd/keep-server/app/rotation.go '	if opts.Rotators != nil {
+		return nil
+	}
+	for _, name := range rotatorSettings' '	for _, name := range rotatorSettings' TestCheckRotatorSettings_NoneOrPluginBuildPasses
+mutate core-rotate-value-in-error cmd/keep-server/app/rotation.go 'errors.New("agent key rotation is configured (" + name + ")' 'errors.New("agent key rotation is configured (" + name + "=" + func() string { v, _ := lookup(name); return v }() + ")' TestCheckRotatorSettings_CoreRefusesAnyOfThree
+# A run issued by an external provider is not revoked through the generator.
+mutate generator-revoke-of-external-run internal/rotation/provider.go '	if _, isGen := r.d.Provider.(Generator); isGen {' '	if _, isGen := r.d.Provider.(Generator); isGen && false {' TestRotateE2E_BindingRemovedMidRunDoesNotReportSuccess
 # The plugin client (its own module).
 pkg=./...
 dir=plugins/mesh
@@ -201,6 +211,15 @@ mutate token-size-unbounded    plugins/mesh/cmd/keep-server/cards.go '|| len(raw
 mutate token-fifo-hangs        plugins/mesh/cmd/keep-server/cards.go 'os.O_RDONLY|syscall.O_NONBLOCK' 'os.O_RDONLY|syscall.O_NONBLOCK*0' TestTokenFileProblemsAreUnavailableAndNameNothing
 mutate plugin-binary-without-cards plugins/mesh/cmd/keep-server/main.go 'app.Options{Cards: newCards, SelfRotate: newSelfRotate,' 'app.Options{SelfRotate: newSelfRotate,' TestPluginBinaryProvidesTheMeshCards
 mutate plugin-binary-without-selfrotate plugins/mesh/cmd/keep-server/main.go 'app.Options{Cards: newCards, SelfRotate: newSelfRotate,' 'app.Options{Cards: newCards,' TestPluginBinaryProvidesTheMeshCards
+mutate plugin-binary-without-rotators plugins/mesh/cmd/keep-server/main.go ' Rotators: newRotators,' '' TestPluginBinaryProvidesTheMeshCards
+mutate bindings-size-check-off plugins/mesh/cmd/keep-server/rotators.go '	if err != nil || len(raw) > maxBindingsFile {' '	if err != nil {' TestRotators_BindingsOverTheLimitAreRefusedBySizeAlone
+mutate bindings-size-off-by-one plugins/mesh/cmd/keep-server/rotators.go 'io.LimitReader(f, maxBindingsFile+1)' 'io.LimitReader(f, maxBindingsFile)' TestRotators_BindingsOverTheLimitAreRefusedBySizeAlone
+mutate bindings-size-both-off plugins/mesh/cmd/keep-server/rotators.go 'io.LimitReader(f, maxBindingsFile+1))
+	if err != nil || len(raw) > maxBindingsFile {' 'f)
+	if err != nil {' TestRotators_BindingsOverTheLimitAreRefusedBySizeAlone
+mutate rotate-token-path-relative-ok plugins/mesh/cmd/keep-server/rotators.go '!filepath.IsAbs(tok) || !filepath.IsAbs(bind)' '!filepath.IsAbs(bind)' TestRotators_ExistingFilesByRelativePathAreRefused
+mutate rotate-bindings-path-relative-ok plugins/mesh/cmd/keep-server/rotators.go '!filepath.IsAbs(tok) || !filepath.IsAbs(bind)' '!filepath.IsAbs(tok)' TestRotators_ExistingFilesByRelativePathAreRefused
+mutate rotate-abs-check-off plugins/mesh/cmd/keep-server/rotators.go '!filepath.IsAbs(tok) || !filepath.IsAbs(bind)' '(!filepath.IsAbs(tok) || !filepath.IsAbs(bind)) && false' TestRotators_ExistingFilesByRelativePathAreRefused
 mutate cards-ignore-vault-source plugins/mesh/cmd/keep-server/cards.go '	if tokens != nil {' '	if false {' TestCardsAskTheVaultSourceOnEveryCall
 mutate cards-vault-token-cached plugins/mesh/cmd/keep-server/cards.go '	return func(ctx context.Context) (mesh.Token, error) {
 		tok, err := tokens.Token(ctx)' '	tok, err := tokens.Token(context.Background())

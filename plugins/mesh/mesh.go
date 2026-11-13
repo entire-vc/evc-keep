@@ -340,7 +340,7 @@ func (p *Provider) do(ctx context.Context, method, suffix string, ok ...int) ([]
 // journal records one operation: ids, run id, outcome class, lengths. The
 // attribute set is closed on purpose; nothing from a response is added.
 func (p *Provider) journal(op, keyID, runID string, err error, extra ...slog.Attr) {
-	attrs := []slog.Attr{slog.String("op", op), slog.String("agent", p.agent)}
+	attrs := []slog.Attr{slog.String("op", op), slog.String("agent_id", p.agent)}
 	if keyID != "" {
 		attrs = append(attrs, slog.String("key_id", keyID))
 	}

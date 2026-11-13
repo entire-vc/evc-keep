@@ -180,6 +180,9 @@ const (
 	// .../resolve under /orgs/{org}/mesh/secrets/{ref}).
 	ActionMeshSecretPut     Action = "mesh.secret.put"
 	ActionMeshSecretResolve Action = "mesh.secret.resolve" // #nosec G101 -- action name, not a value
+	// ActionMeshSecretMetadata is Mesh asking for the version and length of a
+	// stored secret (GET /orgs/{org}/mesh/secrets/{ref}/metadata): never the value.
+	ActionMeshSecretMetadata Action = "mesh.secret.metadata" // #nosec G101 -- action name, not a value
 	// ActionMeshToken is Mesh delivering the extension actor token of a
 	// connected workspace (POST /mesh/token).
 	ActionMeshToken Action = "mesh.token"
@@ -187,6 +190,10 @@ const (
 	// installation (DELETE /orgs/{org}/mesh/installations/{workspace}). The
 	// reason carries the workspace id and the number of erased versions.
 	ActionMeshUninstall Action = "mesh.uninstall"
+	// ActionTransferImported is keep-server offline-transfer import: one
+	// organization's scoped snapshot landed on this database. The reason
+	// carries the transfer id and the manifest digest, never a value.
+	ActionTransferImported Action = "transfer.imported"
 	// ActionOrgBootstrap is keep-server bootstrap-org: an organization, its
 	// CA and its first admin created by the operator on the host.
 	ActionOrgBootstrap Action = "org.bootstrap"
@@ -227,8 +234,10 @@ var registeredActions = []Action{
 	ActionMeshInstallPending,
 	ActionMeshSecretPut,
 	ActionMeshSecretResolve,
+	ActionMeshSecretMetadata,
 	ActionMeshToken,
 	ActionMeshUninstall,
+	ActionTransferImported,
 	ActionOrgBootstrap,
 	ActionStoreBindDefault,
 	ActionDeployPolicySet,

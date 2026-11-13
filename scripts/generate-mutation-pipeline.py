@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Generate the merge request's child pipeline of post-review jobs.
+"""Generate the child pipeline of post-review jobs for the mutation batch.
+
+A merge request no longer has such a child (owner decision of 13.11.2026); the
+batch, started by hand with KEEP_MUTATION_BATCH=true, is the only user. Where the
+text below says "merge request" or `mutations-mr`, it describes the retired path.
 
   scripts/generate-mutation-pipeline.py <mutation-select.json> <out.yml> <summary.txt>
 
 Reads the selector's answer (scripts/mutation-select.py --json) and copies the
 post-review jobs it selected out of .gitlab-ci.yml into a child pipeline, where
-they run as soon as the `mutations` trigger starts it (the manual, blocking
+they run as soon as the `mutations-mr` trigger starts it (the manual, blocking
 gate is `start-mutations` in the parent). Every job goes in, and the summary
 says why, when the answer cannot be trusted to narrow anything: it is missing
 or unreadable, it says "all", it is about another commit, or it names a job

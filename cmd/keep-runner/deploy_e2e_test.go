@@ -187,6 +187,8 @@ func newDeployWorld(t *testing.T) *deployWorld {
 	server.Env = append(os.Environ(),
 		"KEEP_ROOT_KEY_FILE="+rootFile, "KEEP_DATABASE_URL="+roleDSN,
 		"KEEP_HTTP_ADDR="+w.httpAddr, "KEEP_RUNNER_ADDR="+runnerAddr,
+		// Approval links must be absolute HTTPS URLs on the CLI server host.
+		"KEEP_PUBLIC_URL=https://"+w.httpAddr,
 		"KEEP_SERVER_TLS_CERT_FILE="+certPath, "KEEP_SERVER_TLS_KEY_FILE="+keyPath,
 		// These flows poll and submit far more often than one principal
 		// may by default; the limit has its own tests in internal/api.

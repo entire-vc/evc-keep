@@ -384,6 +384,12 @@ crypto_call circl-delivery-control "list 'intake-circl'" internal/builtin delive
 crypto_call kdf-delivery-denied intake-kdf: internal/builtin delivery.go github.com/cloudflare/circl/hpke '_ = hpke.KDF_HKDF_SHA256.Extract(b,nil)'
 crypto_call kdf-intake-control intake-kdf: internal/builtin intake.go github.com/cloudflare/circl/hpke '_ = hpke.KDF_HKDF_SHA256.Extract(b,nil)' allow
 crypto_call kdf-test-control intake-kdf: internal/builtin intake_probe_test.go github.com/cloudflare/circl/hpke '_ = hpke.KDF_HKDF_SHA256.Extract(b,nil)' allow
+crypto_call circl-transfer-control "list 'intake-circl'" internal/builtin transfer_transport.go github.com/cloudflare/circl/hpke '_ = hpke.KEM_X25519_HKDF_SHA256' allow
+crypto_call circl-transfer-lookalike "list 'intake-circl'" internal/builtin transfer_transport_extra.go github.com/cloudflare/circl/hpke '_ = hpke.KEM_X25519_HKDF_SHA256'
+crypto_call circl-transfer-subdir-lookalike "list 'intake-circl'" internal/builtin/orgpki transfer_transport.go github.com/cloudflare/circl/hpke '_ = hpke.KEM_X25519_HKDF_SHA256'
+crypto_call circl-transfer-nested-lookalike "list 'intake-circl'" internal/api/internal/builtin transfer_transport.go github.com/cloudflare/circl/hpke '_ = hpke.KEM_X25519_HKDF_SHA256'
+crypto_call kdf-transfer-extract intake-kdf: internal/builtin transfer_transport.go github.com/cloudflare/circl/hpke '_ = hpke.KDF_HKDF_SHA256.Extract(b,nil)'
+crypto_call kdf-transfer-expand intake-kdf: internal/builtin transfer_transport.go github.com/cloudflare/circl/hpke '_ = hpke.KDF_HKDF_SHA256.Expand(b,nil,32)'
 crypto_call sign-ed25519 descriptor-sign: internal/builtin zz_crypto_probe.go crypto/ed25519 '_ = ed25519.Sign(ed25519.PrivateKey(b),b)'
 crypto_call sign-ed25519-alias descriptor-sign: internal/builtin zz_crypto_probe.go crypto/ed25519 'f := ed25519.Sign; _ = f(ed25519.PrivateKey(b),b)'
 crypto_call sign-ecdsa descriptor-sign: internal/builtin zz_crypto_probe.go crypto/ecdsa '_,_,_ = ecdsa.Sign(nil,new(ecdsa.PrivateKey),b)'

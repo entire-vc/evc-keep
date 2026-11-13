@@ -12,7 +12,7 @@ import (
 // options is what makes this binary the plugin build: the server asks it for
 // the Mesh side of the gate.
 func options() app.Options {
-	return app.Options{Cards: newCards, SelfRotate: newSelfRotate, SelfRotateActor: checkSelfRotateActor}
+	return app.Options{Cards: newCards, SelfRotate: newSelfRotate, Rotators: newRotators, SelfRotateActor: checkSelfRotateActor}
 }
 
 func main() {

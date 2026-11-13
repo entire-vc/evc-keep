@@ -19,6 +19,7 @@ import (
 	"github.com/entire-vc/evc-keep/internal/rotation/rotwire"
 	"github.com/entire-vc/evc-keep/internal/tenancy"
 	"github.com/entire-vc/evc-keep/pkg/provider"
+	prot "github.com/entire-vc/evc-keep/pkg/rotation"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,6 +67,34 @@ type rotationParts struct {
 	ledger   *rotation.Ledger
 	incident rotation.Incident
 	entropy  io.Reader // nil: crypto/rand
+	// source names the key provider behind a secret that has a credential on
+	// another system; nil, or ok=false, is the generated value.
+	source RotatorSource
+}
+
+// RotatorSource finds the rotation provider of one secret. ok=false means the
+// secret has no credential elsewhere and keeps the generator. It is asked on
+// every call, so a changed binding is used by the next run. A provider must keep
+// the old key valid until it is revoked (Capabilities.DualKey): a forward-only
+// one cannot be rolled back by this wiring and is refused. Its error text is
+// not forwarded.
+type RotatorSource func(ctx context.Context, org, secretID uuid.UUID) (p prot.RotationProvider, ok bool, err error)
+
+// provider is the rotation provider of ref's secret.
+func (p *rotationParts) provider(ctx context.Context, ref rotation.Ref) (prot.RotationProvider, error) {
+	if p.source != nil {
+		rp, ok, err := p.source(ctx, ref.OrgID, ref.SecretID)
+		if err != nil {
+			return nil, errStoreUnavailable
+		}
+		if ok {
+			if rp == nil || !rp.Capabilities().DualKey {
+				return nil, errStoreUnavailable
+			}
+			return rp, nil
+		}
+	}
+	return rotation.Generator{Entropy: p.entropy}, nil
 }
 
 // target resolves the secret of ref to its provider and what the generator
@@ -88,14 +117,18 @@ func (p *rotationParts) target(ctx context.Context, ref rotation.Ref) (*builtin.
 	return prov, rotation.Target{Store: prov, Ref: provider.Ref{Path: providerRef}, Subject: ref.SecretID.String()}, nil
 }
 
-func (p *rotationParts) deps(prov *builtin.Provider, t rotation.Target) rotation.ProviderDeps {
+func (p *rotationParts) deps(ctx context.Context, ref rotation.Ref, prov *builtin.Provider, t rotation.Target) (rotation.ProviderDeps, error) {
+	rp, err := p.provider(ctx, ref)
+	if err != nil {
+		return rotation.ProviderDeps{}, err
+	}
 	return rotation.ProviderDeps{
-		Provider:       rotation.Generator{Entropy: p.entropy},
+		Provider:       rp,
 		Resolve:        func(context.Context, rotation.Ref) (rotation.Target, error) { return t, nil },
 		Ledger:         p.ledger,
 		Incident:       p.incident,
 		FingerprintKey: prov.FingerprintKey,
-	}
+	}, nil
 }
 
 // rotationVersions is rotation.Versions: the generator issues the value, the
@@ -111,7 +144,11 @@ func (v rotationVersions) Prepare(ctx context.Context, ref rotation.Ref, runID u
 	if err != nil {
 		return rotation.Version{}, rotation.ErrPrepare
 	}
-	ver, err := rotation.NewProviderVersions(v.deps(prov, t)).Prepare(ctx, ref, runID)
+	d, err := v.deps(ctx, ref, prov, t)
+	if err != nil {
+		return rotation.Version{}, rotation.ErrPrepare
+	}
+	ver, err := rotation.NewProviderVersions(d).Prepare(ctx, ref, runID)
 	if err != nil {
 		return rotation.Version{}, err
 	}
@@ -137,7 +174,11 @@ func (v rotationVersions) Adopt(ctx context.Context, ref rotation.Ref, runID uui
 	if err != nil {
 		return nil, rotation.ErrPrepare
 	}
-	return rotation.NewProviderVersions(v.deps(prov, t)).Adopt(ctx, ref, runID, ver)
+	d, err := v.deps(ctx, ref, prov, t)
+	if err != nil {
+		return nil, rotation.ErrPrepare
+	}
+	return rotation.NewProviderVersions(d).Adopt(ctx, ref, runID, ver)
 }
 
 // Supersede disables a version that was sealed but never laid out, in the
@@ -198,7 +239,11 @@ func (r rotationRevoker) Revoke(ctx context.Context, ref rotation.Ref, runID uui
 	if err != nil {
 		return rotation.ErrRevoke
 	}
-	if err := rotation.NewProviderRevoker(r.deps(prov, t)).Revoke(ctx, ref, runID, oldVersion); err != nil {
+	d, err := r.deps(ctx, ref, prov, t)
+	if err != nil {
+		return rotation.ErrRevoke
+	}
+	if err := rotation.NewProviderRevoker(d).Revoke(ctx, ref, runID, oldVersion); err != nil {
 		return err
 	}
 	if _, err := r.pool.Exec(ctx, `UPDATE secret_versions SET disabled=true WHERE org_id=$1 AND secret_id=$2 AND provider_version=$3`, ref.OrgID, ref.SecretID, oldVersion); err != nil {
@@ -265,17 +310,19 @@ const rotationLockRow = `SELECT 1 FROM secrets WHERE org_id=$1 AND id=$2 FOR UPD
 // the carriers of the catalog, and deployment and verification through the
 // signed runner jobs. Without the sealing store there is nothing to rotate and
 // the routes answer not_ready.
-func newRotations(pool *pgxpool.Pool, local *builtin.Local, deployments *deployment.Repo, car *carriers.Service, logger *slog.Logger) api.RotationService {
-	return newRotationsWith(nil, pool, local, deployments, car, logger)
+func newRotations(source RotatorSource, pool *pgxpool.Pool, local *builtin.Local, deployments *deployment.Repo, car *carriers.Service, logger *slog.Logger) api.RotationService {
+	return newRotationsFrom(nil, source, pool, local, deployments, car, logger)
 }
 
-// newRotationsWith is newRotations with the generator's entropy source set, so
-// a test knows the generated value without reading it back out of the store.
-func newRotationsWith(entropy io.Reader, pool *pgxpool.Pool, local *builtin.Local, deployments *deployment.Repo, car *carriers.Service, logger *slog.Logger) api.RotationService {
+// newRotationsFrom wires the rotation service with the generator's entropy
+// source set, so a test knows the generated value without reading it back out of
+// the store, and with the key providers of secrets that have a credential on
+// another system (nil: every secret is generated).
+func newRotationsFrom(entropy io.Reader, source RotatorSource, pool *pgxpool.Pool, local *builtin.Local, deployments *deployment.Repo, car *carriers.Service, logger *slog.Logger) api.RotationService {
 	if pool == nil || local == nil || deployments == nil || car == nil {
 		return nil
 	}
-	parts := &rotationParts{pool: pool, local: local, cat: catalog.New(pool), ledger: rotation.NewLedger(pool), incident: rotwire.Incident{Log: logger}, entropy: entropy}
+	parts := &rotationParts{pool: pool, local: local, cat: catalog.New(pool), ledger: rotation.NewLedger(pool), incident: rotwire.Incident{Log: logger}, entropy: entropy, source: source}
 	runner := &rotwire.Deployer{Pool: pool, Carriers: car, Deployments: deployments}
 	svc := rotation.NewService(rotation.New(pool, rotation.Deps{
 		Versions: rotationVersions{parts},
@@ -571,4 +618,23 @@ func (ri *rotationInputs) layout(ctx context.Context, p pendingLayout) {
 	default:
 		fail("rotation_unavailable", rotationRetryBackoff)
 	}
+}
+
+// rotatorSettings are the variables that ask for Mesh agent key rotation. Only
+// the plugin build reads them; the core must not ignore them.
+var rotatorSettings = [...]string{"KEEP_MESH_ROTATE_URL", "KEEP_MESH_ROTATE_TOKEN_FILE", "KEEP_MESH_ROTATE_BINDINGS"}
+
+// checkRotatorSettings stops a build without the rotation plugin when any of
+// its settings is present: a secret meant for the Mesh provider would
+// otherwise be rotated by the generator. Names only, never values or paths.
+func checkRotatorSettings(opts Options, lookup func(string) (string, bool)) error {
+	if opts.Rotators != nil {
+		return nil
+	}
+	for _, name := range rotatorSettings {
+		if _, set := lookup(name); set {
+			return errors.New("agent key rotation is configured (" + name + ") but this build has no Mesh plugin")
+		}
+	}
+	return nil
 }

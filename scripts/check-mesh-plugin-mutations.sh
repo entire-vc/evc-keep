@@ -52,7 +52,35 @@ open(p, "w").write(t)'; then
 }
 
 # The unmutated module must be green, or every red below proves nothing.
-mutation_apply_only || (cd "$root/plugins/mesh" && go test -timeout 120s -count=1 ./... >"$work/base" 2>&1) || { echo "FAIL baseline is red"; exit 1; }
+# What a red baseline may print: failing test names, package lines and a panic
+# count. Test output can carry token canaries, so it never reaches the CI log.
+baseline_names() {
+	# Only a captured name survives: the tail of a line is never printed.
+	sed -nE \
+		-e 's/^--- FAIL: (Test[A-Za-z0-9_]*(\/[A-Za-z0-9_.-]+)*)([[:space:]].*)?$/--- FAIL: \1/p' \
+		-e 's/^(FAIL|ok)[[:space:]]+(github\.com\/entire-vc\/evc-keep[A-Za-z0-9_.\/-]*)([[:space:]].*)?$/\1 \2/p' "$1" | cut -c1-160
+	grep -c '^panic:' "$1" | sed 's/^/panics: /'
+}
+
+# The filter must keep the failing test name and package, and drop every other
+# byte of a line: indented output, a panic, and raw lines that merely start
+# with FAIL/ok or look like a test or package line with a canary after it.
+{
+	printf -- '--- FAIL: TestX (0.00s)\n    x_test.go:1: leaked CANARY-7\n'
+	printf -- 'FAIL\tgithub.com/entire-vc/evc-keep/plugins/mesh\t0.1s\n'
+	printf -- 'panic: CANARY-7\n'
+	printf -- 'FAIL TOKEN_CANARY-8\nok TOKEN_CANARY-9\nFAIL\n'
+	printf -- 'FAIL github.com/entire-vc/evc-keep/x CANARY-10\n'
+	printf -- '--- FAIL: TOKEN_CANARY-11\n--- FAIL: TestY CANARY-12\n'
+} >"$work/fixture"
+baseline_names "$work/fixture" >"$work/fixture.out"
+if grep -q CANARY "$work/fixture.out" || ! grep -q -- '^--- FAIL: TestX$' "$work/fixture.out" ||
+	! grep -q -- '^FAIL github.com/entire-vc/evc-keep/plugins/mesh$' "$work/fixture.out"; then
+	echo "FAIL baseline diagnostic filter leaks test output or drops test names"
+	exit 1
+fi
+
+mutation_apply_only || (cd "$root/plugins/mesh" && go test -timeout 120s -count=1 ./... >"$work/base" 2>&1) || { echo "FAIL baseline is red"; baseline_names "$work/base"; exit 1; }
 
 mutate log-response-body 't=s.replace('\''	var a issueAnswer'\'', '\''	p.log.Debug("resp", "body", string(body))\n	var a issueAnswer'\'',1)'
 mutate forward-error-body 't=s.replace('\''	clear(body)\n	switch resp.StatusCode {'\'', '\''	return nil, errors.New(string(body))\n	switch resp.StatusCode {'\'',1)'

@@ -63,12 +63,9 @@ func OwnerOf(t runnerproto.Target, agentUIDs, agentGIDs []int64) (uid int64, exi
 // (or by the runner), so a swap after OwnerOf is refused. A target owned by an
 // agent is refused whatever owner says: an agent that can write the file could
 // use verify as an oracle for its own guesses. Nothing is written. found is
-// false when the file or the field is not there; the value never leaves this
+// false when the file or the field is not there, or a systemd credential does not decrypt under the name Unit gives; the value never leaves this
 // function, only its fingerprint.
 func Observe(t runnerproto.Target, owner int64, agentUIDs, agentGIDs []int64, fpKey fingerprint.Key) (fp string, found bool, err error) {
-	if t.Kind == runnerproto.TargetSystemdCredential {
-		return "", false, denied("target kind cannot be verified")
-	}
 	h, ok := kindHandlers[t.Kind]
 	if !ok {
 		return "", false, denied("unknown target kind")
@@ -92,6 +89,12 @@ func Observe(t runnerproto.Target, owner int64, agentUIDs, agentGIDs []int64, fp
 	defer wipe(content)
 	v, err := h.readBack(content, t)
 	if err != nil {
+		// An untrusted decrypt tool is a policy refusal, not a mismatch. Any
+		// other failure (wrong credential name, swapped file) holds nothing
+		// readable: not found, which the caller reports as a mismatch.
+		if errors.Is(err, ErrPolicy) {
+			return "", false, err
+		}
 		return "", false, nil
 	}
 	defer v.Wipe()

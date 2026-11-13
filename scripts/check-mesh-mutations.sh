@@ -99,14 +99,15 @@ mutate workspace-path-shared internal/builtin/mesh_vault.go 'return "mesh/" + wo
 mutate keep-secret-fixed   internal/builtin/mesh_vault.go '	out := hex.EncodeToString(raw)' '	out := "abababababababababababababababababababababababababababababababab"; _ = hex.EncodeToString(raw)' TestMeshKeepSecretIsFreshRandom
 mutate keep-secret-zero    internal/builtin/mesh_vault.go '	if _, err := rand.Read(raw); err != nil {' '	if _, err := rand.Read(raw[:0]); err != nil {' TestMeshKeepSecretIsFreshRandom
 pkg=./internal/builtin
-mutate checkpoint-events-only internal/builtin/mesh_vault.go '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshKeepSecret} {' '	for _, kind := range []string{MeshEventsSecret} {' TestMeshCheckpointRestoresEveryKind
-mutate checkpoint-no-keep-secret internal/builtin/mesh_vault.go '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshKeepSecret} {' '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret} {' TestMeshCheckpointRestoresEveryKind
+mutate checkpoint-events-only internal/builtin/mesh_vault.go '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshKeepSecret} {' '	for _, kind := range []string{MeshEventsSecret} {' TestMeshCheckpointRestoresEveryKind
+mutate checkpoint-no-keep-secret internal/builtin/mesh_vault.go '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshKeepSecret} {' '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret} {' TestMeshCheckpointRestoresEveryKind
+mutate checkpoint-no-ext-signing internal/builtin/mesh_vault.go '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshKeepSecret} {' '	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshKeepSecret} {' TestMeshCheckpointRestoresEveryKind
 mutate checkpoint-unreadable-fatal internal/builtin/mesh_vault.go ' || errors.Is(err, provider.ErrDisabled) || errors.Is(err, provider.ErrUnavailable) {' ' {' TestMeshCheckpointSkipsUnreadableKinds
 mutate restore-skips-token internal/builtin/mesh_vault.go '		path, err := meshPath(c.ws, kind)' '		if kind == MeshExtensionToken {
 			continue
 		}
 		path, err := meshPath(c.ws, kind)' TestMeshCheckpointRestoresEveryKind
-mutate meshpath-kind-open  internal/builtin/mesh_vault.go 'case MeshExtensionToken, MeshEventsSecret, MeshKeepSecret:' 'default:' TestMeshPathIsClosed
+mutate meshpath-kind-open  internal/builtin/mesh_vault.go 'case MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshRotatorSigningSecret, MeshKeepSecret:' 'default:' TestMeshPathIsClosed
 mutate meshpath-ws-open    internal/builtin/mesh_vault.go 'if !meshWorkspaceRe.MatchString(workspace) {' 'if false {' TestMeshPathIsClosed
 pkg=./pkg/fingerprint
 mutate verify-mac-unkeyed  pkg/fingerprint/mac.go 'm := hmac.New(sha256.New, key)' 'm := hmac.New(sha256.New, []byte("k")); _ = key' TestVerifyMAC
@@ -161,7 +162,7 @@ mutate vault-put-skips     internal/builtin/mesh_vault.go '	b := []byte(value)' 
 		return nil
 	}
 	b := []byte(value)' TestMeshInstallAuthorizationAndOwnership
-mutate wrong-secret-kind   internal/builtin/mesh_vault.go 'meshPath(workspace, MeshEventsSecret)' 'meshPath(workspace, MeshKeepSecret)' TestMeshEventReplayDoesNotDuplicateEffect
+mutate wrong-secret-kind   internal/builtin/mesh_vault.go 'for _, kind := range []string{MeshEventsSecret, MeshExtensionSigningSecret} {' 'for _, kind := range []string{MeshKeepSecret} {' TestMeshEventReplayDoesNotDuplicateEffect
 # Leaks: each plants a leak on a different surface; the canary test must see it.
 mutate leak-token-header   $A '	w.Header().Set("Cache-Control", "no-store")' '	w.Header().Set("X-Debug", string(req.ExtensionToken))' TestMeshCredentialsNeverLeak
 mutate leak-secret-error   $A 'writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid mesh install fields", requestID)' 'writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid mesh install fields "+string(req.EventsEndpointSecret), requestID)' TestMeshCredentialsNeverLeak
@@ -310,7 +311,7 @@ mutate secret-ratelimit-shared $A 'm.resolve.take(bucketKey{org: org, id: ws})' 
 mutate secret-nonce-failure-unaudited $A '		_ = m.auditSecret(r, owner, ws, action, "", MeshSecretMeta{}, audit.StatusFailed, audit.ErrClassInternal)' '		_ = r' TestMeshSecretNonceStoreFailureFailsClosed
 mutate secret-replay-unaudited $A '	if !fresh {
 		if err := m.auditSecret(r, owner, ws, action, "", MeshSecretMeta{}, audit.StatusFailed, audit.ErrClassPermissionDenied); err != nil {
-			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "secret storage not reachable", requestID)
+			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, msgs.journal, requestID)
 			return uuid.Nil, uuid.Nil, false
 		}
 		return deny()
@@ -402,7 +403,7 @@ mutate hs-verify-unkeyed    internal/builtin/mesh_vault.go '	return fingerprint.
 mutate hs-body-unbound      $HS 'VerifyInstall(signingSecret, append([]byte(tsRaw+"."), body...), got)' 'VerifyInstall(signingSecret, []byte(tsRaw+"."), got)' $H
 # A foreign extension_id (keep-rotator shares install_path) is refused before
 # the per-workspace budget: checking it after install.take locks keep out.
-mutate hs-extension-after-budget $HS 'if err != nil || req.ExtensionID != meshext.ExtensionID ||' 'if err != nil ||' TestMeshHandshakeGuards $HS '	signingSecret := string(req.SigningSecret)' '	if req.ExtensionID != meshext.ExtensionID {
+mutate hs-extension-after-budget $HS 'if err != nil || (req.ExtensionID != meshext.ExtensionID && !rotator) ||' 'if err != nil ||' TestMeshHandshakeGuards $HS '	signingSecret := string(req.SigningSecret)' '	if req.ExtensionID != meshext.ExtensionID && !rotator {
 		deny()
 		return
 	}
@@ -415,7 +416,10 @@ mutate hs-digest-prefix     pkg/fingerprint/digest.go 'return subtle.ConstantTim
 mutate hs-digest-prefix16   pkg/fingerprint/digest.go 'return subtle.ConstantTimeCompare(sum[:], want[:]) == 1' 'return subtle.ConstantTimeCompare(sum[:16], want[:16]) == 1' $H
 mutate hs-repeat-any-secret $HS '		if err != nil || !same {' '		if err != nil || (!same && false) {' $H
 mutate hs-repeat-noop       $HS '		same, err := m.deps.Vault.SameEventsSecret(r.Context(), org.String(), ws.String(), signingSecret)' '		same, err := true, error(nil); _ = org' $H
-mutate hs-same-secret-len   internal/builtin/mesh_vault.go 'same = subtle.ConstantTimeCompare(b, c) == 1' 'same = subtle.ConstantTimeEq(int32(len(b)), int32(len(c))) == 1' $H
+mutate hs-same-secret-len   internal/builtin/mesh_vault.go 'hit = subtle.ConstantTimeCompare(b, c) == 1' 'hit = subtle.ConstantTimeEq(int32(len(b)), int32(len(c))) == 1' $H
+mutate hs-upgrade-overwrites-store $HS 'meshKindExtSigning, signingSecret)' 'meshKindEvents, signingSecret)' TestMeshHandshakeUpgradesStoreBinding
+mutate hs-reinstall-keeps-ext-secret internal/api/mesh.go '_, err = m.deps.Vault.Generate(r.Context(), org, wss, meshKindExtSigning)' 'err = nil' TestMeshHandshakeUpgradesStoreBinding
+mutate hs-verify-last-slot-wins internal/builtin/mesh_vault.go 'okAny = okAny || ok' 'okAny = ok' TestMeshHandshakeUpgradesStoreBinding
 mutate hs-skew-off          $HS '	if d := m.now().Sub(time.Unix(secs, 0)); d > meshMaxSkew || d < -meshMaxSkew {
 		deny()
 		return
@@ -425,7 +429,7 @@ mutate hs-skew-off          $HS '	if d := m.now().Sub(time.Unix(secs, 0)); d > m
 		return
 	}
 	got, err := hex.DecodeString' $H
-mutate hs-extension-open    $HS 'if err != nil || req.ExtensionID != meshext.ExtensionID ||' 'if err != nil ||' $H
+mutate hs-extension-open    $HS 'if err != nil || (req.ExtensionID != meshext.ExtensionID && !rotator) ||' 'if err != nil ||' $H
 mutate hs-short-secret      $HS 'len(req.SigningSecret) < meshMinSigningSecret ||' 'len(req.SigningSecret) < 1 ||' $H
 mutate hs-window-expiry-off $R '`DELETE FROM mesh_pending_installs WHERE expires_at <= now()`' '`DELETE FROM mesh_pending_installs WHERE false`' $H "$R" ' AND secret_sha256 = $4 AND expires_at > now()`' ' AND secret_sha256 = $4`'
 # An expired window and its digest are deleted: on lookup, on opening any
@@ -442,8 +446,152 @@ mutate drop-expired-wire-off cmd/keep-server/app/mesh_sync.go '		meshSyncRound(c
 mutate hs-window-reusable   $R 'DELETE FROM mesh_pending_installs
  WHERE workspace_id = $1 AND org_id' 'UPDATE mesh_pending_installs SET opened_at = opened_at
  WHERE workspace_id = $1 AND org_id' $H
-mutate hs-bind-no-events    $HS '		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)' '		return nil' $H
-mutate hs-bind-no-audit     $HS '	m.audit(r, installer, requestID, audit.StatusOK, audit.ErrClassNone)' '	_ = installer' $H
+mutate hs-bind-no-events    $HS 'meshext.ModeExtension, func(ctx context.Context) error {
+		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)' 'meshext.ModeExtension, func(ctx context.Context) error {
+		return nil' $H
+mutate hs-bind-no-audit     $HS '	}
+	m.audit(r, installer, requestID, audit.StatusOK, audit.ErrClassNone)' '	}
+	_ = installer' $H
+mutate hs-upgrade-no-events $HS '		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)' '		return nil' TestMeshHandshakeUpgradesStoreBinding
+# UpgradeStore (repo layer): each clause of the two statements and the seal
+# step, one at a time; the repo test names the refusal that must go red.
+pkg=./internal/meshext
+U=internal/meshext/repo.go
+# The window DELETE of UpgradeStore is anchored through the text that follows
+# it: BindPending carries the same clause above it.
+mutate up-window-reusable $U 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' 'UPDATE mesh_pending_installs SET opened_at = opened_at
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' TestUpgradeStoreRefusals
+mutate up-expiry-off $U 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' TestUpgradeStoreRefusals
+mutate up-digest-off $U 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND $4 <> '' AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' TestUpgradeStoreRefusals
+mutate up-opener-off $U 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND $3::uuid IS NOT NULL AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' TestUpgradeStoreRefusals
+mutate up-window-org-off $U 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND $2::uuid IS NOT NULL AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`,
+		workspace, p.Org, p.OpenedBy, p.SecretSHA256)
+	if err != nil {
+		return fmt.Errorf("meshext: consume install window: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNoWindow
+	}
+	tag, err = tx.Exec(ctx, `
+UPDATE' TestUpgradeStoreRefusals
+mutate up-install-org-off $U 'WHERE workspace_id = $1 AND org_id = $2 AND mode = $5 AND rtrim' 'WHERE workspace_id = $1 AND $2::uuid IS NOT NULL AND mode = $5 AND rtrim' TestUpgradeStoreRefusals
+mutate up-mode-off        $U 'AND org_id = $2 AND mode = $5 AND rtrim' 'AND org_id = $2 AND $5::text IS NOT NULL AND rtrim' TestUpgradeStoreRefusals
+mutate up-meshurl-off     $U "AND mode = \$5 AND rtrim(mesh_url, '/') = rtrim(\$6::text, '/')" 'AND mode = $5 AND $6::text IS NOT NULL' TestUpgradeStoreRefusals
+mutate up-seal-noop       $U '	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: upgrade: %w", err)' '	if err := error(nil); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: upgrade: %w", err)' TestUpgradeStoreRefusals
+mutate up-seal-ignored    $U '	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: upgrade: %w", err)' '	_ = seal(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: upgrade: %w", err)' TestUpgradeStoreRefusals
+pkg=./cmd/keep-server/app
+mutate hs-upgrade-no-spend  $HS '			refund()
+			if !m.takeInstall(w, ws, requestID) {
+				return
+			}
+			spent = true' '			refund()
+			spent = true' TestMeshHandshakeUpgradesStoreBinding
+# The handler's org and digest tests repeat the repo's DELETE clauses: those are
+# killed one by one at the repo layer (up-window-org-off, up-digest-off).
 mutate hs-dispatch-always   $HS 'if _, ok := r.Header[http.CanonicalHeaderKey("Authorization")]; ok {' 'if false {' $H
 mutate hs-repeat-echo       $HS '		writeJSON(w, http.StatusOK, okResult{OK: true, RequestID: requestID})
 		return
@@ -468,7 +616,17 @@ DELETE FROM mesh_pending_installs' $B "$R" '	if err := seal(ctx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {' '	if err := tx.Commit(ctx); err != nil {'
-mutate hs-seal-error-ignored  $R '	if err := seal(ctx); err != nil {' '	if err := seal(ctx); err != nil && false {' $B
+# Include the bind-specific commit error so the earlier BindRotator callback
+# cannot capture this mutation.
+mutate hs-seal-error-ignored  $R '	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: bind: %w", err)' '	if err := seal(ctx); err != nil && false {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: bind: %w", err)' $B
 mutate hs-seal-outside-tx     $HS '	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(ctx context.Context) error {
 		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)
 	}); err != nil {' '	if err := m.deps.Vault.Put(r.Context(), pend.Org.String(), ws.String(), meshKindEvents, signingSecret); err != nil {
@@ -477,14 +635,16 @@ mutate hs-seal-outside-tx     $HS '	if err := m.deps.Repo.BindPending(r.Context(
 	}
 	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(context.Context) error { return nil }); err != nil {' $B
 # BindPending refuses a window that expired after the lookup on its own.
-mutate hs-bind-expiry-off     $R ' AND secret_sha256 = $4 AND expires_at > now()`' ' AND secret_sha256 = $4`' $B
+mutate hs-bind-expiry-off     $R 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`' 'DELETE FROM mesh_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4`' $B
 # The route and handler guards: TLS, limiter, lock, no-store, org match,
 # journal of a refused window.
 G=TestMeshHandshakeGuards
 RT=internal/api/router.go
 mutate hs-tls-off             $RT 'requireTLS(http.HandlerFunc(mr.handleHandshake))' 'http.HandlerFunc(mr.handleHandshake)' $G
-mutate hs-limiter-off         $HS 'if allowed, wait := m.install.take(bucketKey{id: ws}); !allowed {' 'if allowed, wait := m.install.take(bucketKey{id: ws}); !allowed && false {' $G
-mutate hs-limiter-noop        $HS 'if allowed, wait := m.install.take(bucketKey{id: ws}); !allowed {' 'if allowed, wait := true, 0; !allowed {' $G
+mutate hs-limiter-off         $HS 'if allowed, wait := m.install.take(bucketKey{id: ws, kind: kind}); !allowed {' 'if allowed, wait := m.install.take(bucketKey{id: ws, kind: kind}); !allowed && false {' $G
+mutate hs-limiter-noop        $HS 'if allowed, wait := m.install.take(bucketKey{id: ws, kind: kind}); !allowed {' 'if allowed, wait := true, 0; !allowed {' $G
 mutate hs-lock-noop           $HS 'unlock, err := m.deps.Repo.LockWorkspace(r.Context(), ws)' 'unlock, err := func() {}, error(nil)' $G
 mutate hs-no-store-off        $HS '	m.audit(r, installer, requestID, audit.StatusOK, audit.ErrClassNone)
 	w.Header().Set("Cache-Control", "no-store")' '	m.audit(r, installer, requestID, audit.StatusOK, audit.ErrClassNone)' $G
@@ -628,14 +788,15 @@ mutate preauth-events-noop    $A '	refund, ok := m.preauthTake(w, r, requestID)
 		return
 	}
 	org, found, err' $P
-mutate preauth-secrets-noop   $A '	refund, ok := m.preauthTake(w, r, requestID)
+mutate preauth-secrets-noop   $A '	refund, ok := m.preauthTakeMsg(w, r, requestID, "", msgs.limited)
 	if !ok {
 		return uuid.Nil, uuid.Nil, false
 	}' '	refund, ok := func() {}, true
 	if !ok {
 		return uuid.Nil, uuid.Nil, false
 	}' $P
-mutate preauth-handshake-noop $HS '	refund, ok := m.preauthTake(w, r, requestID)' '	refund, ok := func() {}, true' $P
+mutate preauth-handshake-noop $HS '	refund, ok := m.preauthTakeKind(w, r, requestID, kind)' '	refund, ok := func() {}, true
+	_ = kind' $P
 mutate preauth-token-noop     $T '	refund, ok := m.preauthTake(w, r, requestID)' '	refund, ok := func() {}, true' $P
 mutate preauth-key-per-request $A '	k := addrKey(clientAddr(r, m.deps.TrustedProxies))' '	k := bucketKey{id: [16]byte(uuid.New())}' $P
 mutate xff-from-any-peer      $CA '	if !peer.IsValid() || !inPrefixes(peer, trusted) {' '	if !peer.IsValid() {' TestMeshPreauthIgnoresForwardedForFromUntrustedPeer
@@ -655,10 +816,10 @@ mutate proxies-error-ignored  internal/config/config.go '		if err != nil {
 			return nil, errors.New("KEEP_TRUSTED_PROXIES' '		if err != nil && false {
 			return nil, errors.New("KEEP_TRUSTED_PROXIES' TestTrustedProxiesFromEnv
 pkg=./cmd/keep-server/app
-mutate hs-budget-before-verify $HS '	refund, ok := m.preauthTake(w, r, requestID)' '	if !m.takeInstall(w, ws, requestID) {
+mutate hs-budget-before-verify $HS '	refund, ok := m.preauthTakeKind(w, r, requestID, kind)' '	if !m.takeInstall(w, ws, requestID) {
 		return
 	}
-	refund, ok := m.preauthTake(w, r, requestID)' TestMeshPreauthBadHandshakesDoNotLockOutWorkspace
+	refund, ok := m.preauthTakeKind(w, r, requestID, kind)' TestMeshPreauthBadHandshakesDoNotLockOutWorkspace
 mutate events-no-refund       $A '	refund()
 
 	ev, err := meshext.ParseEvent(' '	_ = refund
@@ -675,9 +836,9 @@ mutate secrets-refund-before-nonce $A '	// Only a fresh nonce gets the token bac
 	}
 	refund()
 	// The nonce is spent'
-mutate hs-refund-bound-off    $HS '		refund()
-		if !m.takeInstall(w, ws, requestID) {' '		_ = refund
-		if !m.takeInstall(w, ws, requestID) {' TestMeshPreauthHandshakeRefundsOnAuthentication
+mutate hs-refund-bound-off    $HS '		if !spent {
+			refund()' '		if !spent {
+			_ = refund' TestMeshPreauthHandshakeRefundsOnAuthentication
 mutate hs-refund-window-off   $HS '	refund()
 	if !m.takeInstall(w, ws, requestID) {' '	_ = refund
 	if !m.takeInstall(w, ws, requestID) {' TestMeshPreauthHandshakeRefundsOnAuthentication
@@ -746,6 +907,57 @@ mutate secret-put-lock-off    $R '	conn, unlock, err := r.lock(ctx, workspaceLoc
 mutate secret-put-unguarded   $A 'err = m.deps.Repo.WhileInstalled(r.Context(), ws, org, func(ctx context.Context) error {' 'err = func(fn func(context.Context) error) error { return fn(r.Context()) }(func(ctx context.Context) error {' TestMeshUninstallSerializesWithSecretWrites
 
 # The unmutated tree is green with nothing skipped.
+
+# keep-rotator handshake: its window, its own secret slot, its binding (R, HS above).
+T=TestMeshRotatorHandshake
+mutate rot-window-off       $HS '	if live && pend.Org == org && m.meshSecretMatch(pend.SecretSHA256, signingSecret) {
+		installer' '	if live && pend.Org == org && true {
+		installer' $T
+mutate rot-repeat-unchecked $HS '	if err != nil || !same {
+		deny()
+		return
+	}
+	if !spent {' '	if err != nil || (!same && false) {
+		deny()
+		return
+	}
+	if !spent {' $T
+mutate rot-secret-slot-keep $HS 'm.deps.Vault.SameRotatorSecret(' 'm.deps.Vault.SameEventsSecret(' $T
+mutate rot-keep-window      $R 'SELECT org_id, opened_by, secret_sha256 FROM mesh_rotator_pending_installs' 'SELECT org_id, opened_by, secret_sha256 FROM mesh_pending_installs' $T
+mutate rot-reinstall-keeps-binding $R 'DELETE FROM mesh_rotator_bindings WHERE workspace_id = $1`, workspace)' 'DELETE FROM mesh_rotator_bindings WHERE workspace_id = $1 AND false`, workspace)' $T
+mutate rot-budget-shared-connect $HS 'if !m.takeInstallKind(w, ws, requestID, meshRotatorBucket) {
+			return
+		}
+		spent = true' 'if !m.takeInstall(w, ws, requestID) {
+			return
+		}
+		spent = true' TestMeshRotatorBudgetIsApartFromKeep
+mutate rot-budget-shared-repeat $HS '		refund()
+		if !m.takeInstallKind(w, ws, requestID, meshRotatorBucket) {
+			return
+		}
+	}
+	writeJSON' '		refund()
+		if !m.takeInstall(w, ws, requestID) {
+			return
+		}
+	}
+	writeJSON' TestMeshRotatorBudgetIsApartFromKeep
+mutate rot-preauth-shared $HS '		kind = meshRotatorBucket
+	}
+	refund, ok' '		kind = ""
+	}
+	refund, ok' TestMeshHandshakeGuards
+mutate rot-seal-error-ignored $R '	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: bind rotator: %w", err)' '	_ = seal(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("meshext: bind rotator: %w", err)' TestMeshRotatorBindIsAtomicWithSeal
+mutate rot-window-single-use $R 'DELETE FROM mesh_rotator_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()' 'DELETE FROM mesh_rotator_pending_installs
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now() AND false' $T
 if mutation_apply_only; then
 	:
 elif (cd "$root" && go test -count=1 -p 1 -json -run 'TestMesh' ./cmd/keep-server/app ./internal/meshext >"$work/base" 2>&1) && ! grep -q -- '--- SKIP' "$work/base" && [ "$(grep -c -- '--- PASS' "$work/base")" -ge 35 ]; then

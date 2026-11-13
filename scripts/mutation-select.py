@@ -4,11 +4,12 @@
 Reads the files a diff changed, the Go import graph, scripts/mutation-select.map,
 the scripts that call each other and the post-review job definitions in
 .gitlab-ci.yml, and answers which scripts/check-*-mutations.sh a diff needs and
-which post-review jobs run them. On a merge request, and in the mutation
-batch (scripts/mutation-range.py: the commits since the last green batch),
+which post-review jobs run them. In the mutation batch (started by hand;
+scripts/mutation-range.py: the commits since the last green batch),
 scripts/generate-mutation-pipeline.py turns the "jobs" part of the answer into
-the child pipeline of post-review jobs; the nightly schedule and release tags
-do not use it and run every job.
+the child pipeline of post-review jobs; a merge request pipeline runs no mutation
+job (owner decision of 13.11.2026), and the nightly schedule and release tags
+do not use the selector and run every job.
 
   scripts/mutation-select.py [--base origin/main] [--head HEAD] [--json out.json]
   scripts/mutation-select.py --files a.go b/c.sql        (explicit file list)
@@ -37,7 +38,7 @@ ALL_PATTERNS = [
     r"^go\.mod$", r"^go\.sum$", r"^\.golangci\.yml$",
     # The selector, its map and the pipeline generator never narrow their own change.
     r"^scripts/mutation-select\.(py|map)$", r"^scripts/mutation-range\.py$",
-    r"^scripts/generate-mutation-pipeline\.py$",
+    r"^scripts/generate-mutation-pipeline\.py$", r"^scripts/check-mr-mutation-gate\.py$",
     r"^internal/testutil/", r"^internal/zonecheck/",
 ]
 CI_CONFIG = ".gitlab-ci.yml"
@@ -48,7 +49,8 @@ POST_REVIEW = "post-review"
 # The selection machinery itself: a change to one of these jobs changes how
 # every post-review job is chosen, so it selects all of them.
 GATING_JOBS = ("mutation-select", "start-mutations", "mutations",
-               "mutation-range", "mutations-batch", "mutation-green")
+               "mutation-range", "mutations-batch", "mutation-green",
+               "mutation-range-mr", "mutations-mr", "mutations-mr-check")
 # Top-level keys whose change reaches every job.
 GLOBAL_CI_KEYS = frozenset({"workflow", "variables", "default", "stages", "include",
                             "image", "services", "cache", "before_script", "after_script"})

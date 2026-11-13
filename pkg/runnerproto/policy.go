@@ -550,6 +550,11 @@ func Check(j Job, p HostPolicy) error {
 	if p.UIDShared && j.Secret.Scope == ProdScope && j.NeedsValue() {
 		return denied("prod secrets are not deployed to a uid_shared host")
 	}
+	if j.Action == ActionDiscover {
+		// Deny by default: only a host policy with a discovery section may
+		// run it; until the policy grows that section no host does.
+		return denied("discovery is not enabled in the host policy")
+	}
 	if j.Action == ActionExec {
 		if !p.AllowExec {
 			return denied("exec is not allowed on this host")

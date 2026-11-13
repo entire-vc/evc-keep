@@ -245,6 +245,8 @@ func NewRouter(logger *slog.Logger, pool *pgxpool.Pool, deps Deps) http.Handler 
 		// TLS only, the value is in the body.
 		mux.Handle("PUT /orgs/{org_id}/mesh/secrets/{ref}", logged("/orgs/{org_id}/mesh/secrets/{ref}", logger, requireTLS(http.HandlerFunc(mr.handlePutSecret)).ServeHTTP))
 		mux.Handle("POST /orgs/{org_id}/mesh/secrets/{ref}/resolve", logged("/orgs/{org_id}/mesh/secrets/{ref}/resolve", logger, requireTLS(http.HandlerFunc(mr.handleResolveSecret)).ServeHTTP))
+		// Same authentication as the two routes above; TLS only, no body.
+		mux.Handle("GET /orgs/{org_id}/mesh/secrets/{ref}/metadata", withServerRequestID(logged("/orgs/{org_id}/mesh/secrets/{ref}/metadata", logger, requireTLS(http.HandlerFunc((&metadataRoutes{meshRoutes: mr, limit: newLimiter(CatalogLimit{PerMinute: meshMetadataPerMinute, Burst: meshMetadataBurst})}).handleMetadataSecret)).ServeHTTP)))
 		if deps.Mesh.Federation != nil {
 			// No bearer: the Mesh-signed context token is the authentication.
 			mux.Handle("POST /mesh/session", logged("/mesh/session", logger, requireTLS(http.HandlerFunc(mr.handleSession)).ServeHTTP))

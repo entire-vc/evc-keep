@@ -1,7 +1,8 @@
 version: "2"
 
 run:
-  timeout: 5m
+  timeout: 10m
+  build-tags: [quickstart]
 
 linters:
   default: none
@@ -140,9 +141,10 @@ linters:
             - "!$test"
             - "!${base-path}/internal/builtin/intake*.go"
             - "!${base-path}/internal/builtin/delivery.go"
+            - "!${base-path}/internal/builtin/transfer_transport.go"
           deny:
             - pkg: github.com/cloudflare/circl
-              desc: "HPKE primitives belong only in intake and runner delivery"
+              desc: "HPKE primitives belong only in intake, runner delivery and the offline-transfer transport"
         # Zone internals are reachable only from the zone and from the binary
         # that wires them, so an export from them cannot reach server code.
         zone-internals:

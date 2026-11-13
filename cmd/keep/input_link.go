@@ -11,7 +11,23 @@ import (
 	"time"
 
 	"github.com/entire-vc/evc-keep/internal/intake"
+	"github.com/entire-vc/evc-keep/internal/reqid"
 )
+
+// inputLinkMaxBody is the largest accepted 201 body.
+const inputLinkMaxBody = 8192
+
+// decodeSingleJSON decodes one document and fails on any non-space trailing data.
+func decodeSingleJSON(raw []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("trailing data")
+	}
+	return nil
+}
 
 func runInputLink(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	name, rest, err := splitPositional(args)
@@ -55,9 +71,17 @@ func runInputLink(args []string, stdout, stderr io.Writer, getenv func(string) s
 	if response.StatusCode != http.StatusCreated {
 		return reportErr(stderr, errors.New("input-link request rejected"))
 	}
+	// Exactly one JSON document of at most inputLinkMaxBody bytes: read one byte
+	// past the limit to detect overflow, then require EOF after the document.
+	raw, err := io.ReadAll(io.LimitReader(response.Body, inputLinkMaxBody+1))
 	var link intake.Issued
-	if json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&link) != nil || link.URL == "" || link.RequestID == "" || link.ExpiresAt.IsZero() {
+	if err != nil || len(raw) > inputLinkMaxBody || decodeSingleJSON(raw, &link) != nil || link.URL == "" || link.ExpiresAt.IsZero() {
 		return reportErr(stderr, errors.New("invalid input-link response"))
+	}
+	// The url is the one-time capability and stays; a server-chosen request_id
+	// outside internal/reqid's shape is replaced, never echoed.
+	if !reqid.Valid(link.RequestID) {
+		link.RequestID = unexpectedValue
 	}
 	if writeJSONValue(stdout, link) != nil {
 		return reportErr(stderr, errors.New("cannot write input-link result"))

@@ -6,6 +6,7 @@ internal/builtin.Admin.ChangeLevel: func(ctx context.Context, to sealer.Level, a
 internal/builtin.Admin.ChangeLevelByName: func(ctx context.Context, to string, actor string, confirmWeakening bool, onLocked func(context.Context) error) (builtin.KeyLevelResult, error)
 internal/builtin.Admin.Purge: func(ctx context.Context, actor string) (int, error)
 internal/builtin.Admin: struct{org string; seal *sealer.Sealer; db *builtin.store; log *slog.Logger}
+internal/builtin.BuildTransferBundle: func(recipientPub []byte, tc builtin.TransferContext, m scopedtransfer.Manifest, rows *store.TransferRows, source builtin.TransferRoot) ([]byte, error)
 internal/builtin.CanonicalKeyLevel: func(name string) (string, bool)
 internal/builtin.ErrDeliveryMaterial: error
 internal/builtin.ErrLevelInvalid: error
@@ -13,6 +14,10 @@ internal/builtin.ErrLevelRequest: error
 internal/builtin.ErrLevelWeakening: error
 internal/builtin.ErrMeshSecretInvalid: error
 internal/builtin.ErrMeshSecretNotFound: error
+internal/builtin.ErrTransferAuth: error
+internal/builtin.ErrTransferBundle: error
+internal/builtin.ErrTransferRewrap: error
+internal/builtin.ErrTransferTransport: error
 internal/builtin.KeyEvent: struct{Action string; Org string; Actor string; SecretID string; Version string; From string; To string; Reason string; RequestID string; Rewrapped int; Unchanged int; Retired int; Purged int}
 internal/builtin.KeyLevelResult: struct{Level string; Rewrapped int; Unchanged int; Retired int}
 internal/builtin.Local.MeshVault: func() *builtin.MeshVault
@@ -35,11 +40,13 @@ internal/builtin.MeshVault.ExtensionToken: func(ctx context.Context, org string,
 internal/builtin.MeshVault.FetchHierarchy: func(ctx context.Context, org string, workspace string, meshURL string, etag string) (builtin.MeshFetched, error)
 internal/builtin.MeshVault.Generate: func(ctx context.Context, org string, workspace string, kind string) (string, error)
 internal/builtin.MeshVault.MatchInstallSecret: func(signingSecret string, want [32]byte) bool
+internal/builtin.MeshVault.MetadataSecret: func(ctx context.Context, org string, workspace string, ref string) (builtin.MeshSecretMeta, error)
 internal/builtin.MeshVault.Put: func(ctx context.Context, org string, workspace string, kind string, value string) error
 internal/builtin.MeshVault.PutSecret: func(ctx context.Context, org string, workspace string, ref string, value string) (builtin.MeshSecretMeta, error)
 internal/builtin.MeshVault.PutToken: func(ctx context.Context, org string, workspace string, token string) (builtin.MeshSecretMeta, error)
 internal/builtin.MeshVault.ResolveSecret: func(ctx context.Context, org string, workspace string, ref string) ([]byte, builtin.MeshSecretMeta, error)
 internal/builtin.MeshVault.SameEventsSecret: func(ctx context.Context, org string, workspace string, candidate string) (bool, error)
+internal/builtin.MeshVault.SameRotatorSecret: func(ctx context.Context, org string, workspace string, candidate string) (bool, error)
 internal/builtin.MeshVault.VerifyEvent: func(ctx context.Context, org string, workspace string, msg []byte, tag []byte) (bool, error)
 internal/builtin.MeshVault.VerifyInstall: func(signingSecret string, msg []byte, tag []byte) bool
 internal/builtin.MeshVault: struct{local *builtin.Local}
@@ -48,10 +55,14 @@ internal/builtin.NewAdmin: func(pool *pgxpool.Pool, seal *sealer.Sealer, org str
 internal/builtin.NewKeyStore: func(pool *pgxpool.Pool) sealer.Store
 internal/builtin.NewLocal: func(pool *pgxpool.Pool, keyID string, raw []byte, log *slog.Logger, onEvent func(builtin.KeyEvent)) (*builtin.Local, error)
 internal/builtin.NewTransactionKeyStore: func(tx pgx.Tx) sealer.Store
+internal/builtin.NewTransferRecipient: func() (pub []byte, priv []byte, err error)
+internal/builtin.NewTransferSealer: func(rows []store.KEKRow, target builtin.TransferRoot) (*sealer.Sealer, error)
+internal/builtin.OpenDiscoverKey: func(j runnerproto.Job, recipient *ecdh.PrivateKey, env runnerproto.ValueEnvelope) (fingerprint.Key, error)
 internal/builtin.OpenLocal: func(pool *pgxpool.Pool, path string, log *slog.Logger, onEvent func(builtin.KeyEvent)) (*builtin.Local, error)
 internal/builtin.OpenLocalFile: func(pool *pgxpool.Pool, path string, keyID string, log *slog.Logger, onEvent func(builtin.KeyEvent)) (*builtin.Local, error)
 internal/builtin.OpenRunnerKey: func(j runnerproto.Job, recipient *ecdh.PrivateKey, env runnerproto.ValueEnvelope) (fingerprint.Key, error)
 internal/builtin.OpenRunnerMaterial: func(j runnerproto.Job, recipient *ecdh.PrivateKey, env runnerproto.ValueEnvelope) (secret.Value, fingerprint.Key, error)
+internal/builtin.OpenTransferRoot: func(path string, keyID string) (builtin.TransferRoot, error)
 internal/builtin.Provider.AcceptIntake: func(ctx context.Context, tx pgx.Tx, requestID string, path string, enc []byte, ciphertext []byte) (version string, fp string, length int, err error)
 internal/builtin.Provider.Capabilities: func() provider.Capabilities
 internal/builtin.Provider.Disable: func(ctx context.Context, ref provider.Ref) error
@@ -62,12 +73,19 @@ internal/builtin.Provider.Resolve: func(ctx context.Context, ref provider.Ref) (
 internal/builtin.Provider.Version: func(ctx context.Context, ref provider.Ref) (provider.Meta, error)
 internal/builtin.Provider.Write: func(ctx context.Context, ref provider.Ref, v secret.Value) (provider.Meta, error)
 internal/builtin.Provider: struct{scope sealer.Scope; seal *sealer.Sealer; db *builtin.store; log *slog.Logger; unavailable atomic.Bool}
+internal/builtin.ReadTransferBundle: func(recipientPriv []byte, tc builtin.TransferContext, sealed []byte, target builtin.TransferRoot) (scopedtransfer.Manifest, *store.TransferRows, error)
+internal/builtin.SealDiscoverKey: func(j runnerproto.Job, recipient []byte, key fingerprint.Key) (runnerproto.ValueEnvelope, error)
 internal/builtin.SealRunnerKey: func(j runnerproto.Job, recipient []byte, key fingerprint.Key) (runnerproto.ValueEnvelope, error)
 internal/builtin.SealRunnerMaterial: func(j runnerproto.Job, recipient []byte, value secret.Value, key fingerprint.Key) (runnerproto.ValueEnvelope, error)
+internal/builtin.TransferContext: struct{Protocol string; Transfer string; Source string; Target string; Snapshot string; Org string; Workspace string; Schema uint64; RecipientPub []byte}
+internal/builtin.TransferRoot.GoString: func() string
+internal/builtin.TransferRoot.String: func() string
+internal/builtin.TransferRoot: struct{k sealer.RootKey}
 internal/builtin.TryLockKeyLevel: func(ctx context.Context, pool *pgxpool.Pool, org string) (lctx context.Context, release func(context.Context), ok bool, err error)
 internal/builtin.TxBeginner: interface{Begin(ctx context.Context) (pgx.Tx, error)}
 internal/builtin.ValidKeyLevel: func(name string) bool
 internal/builtin.eventSink.Record: func(e sealer.Event)
+internal/builtin.silentAuditor.Record: func(sealer.Event)
 internal/builtin.store.ActiveFor: func(ctx context.Context, org string, domainKey string) (sealer.KEKRecord, error)
 internal/builtin.store.ActiveList: func(ctx context.Context, org string) ([]sealer.KEKRecord, error)
 internal/builtin.store.BindToLock: func(locked sealer.Store) sealer.EnvelopeStore
@@ -82,14 +100,28 @@ internal/builtin.store.RetiredList: func(ctx context.Context, org string) ([]sea
 internal/builtin.store.Rewrap: func(ctx context.Context, org string, fn func(sealer.Ref, sealer.Envelope) (sealer.Envelope, error)) error
 internal/builtin.store.SetLevel: func(ctx context.Context, org string, level sealer.Level, actor string) error
 internal/builtin.store.WithLockConn: func(ctx context.Context) context.Context
+internal/builtin.transferKEKs.ActiveFor: func(context.Context, string, string) (sealer.KEKRecord, error)
+internal/builtin.transferKEKs.ActiveList: func(context.Context, string) ([]sealer.KEKRecord, error)
+internal/builtin.transferKEKs.Create: func(context.Context, string, sealer.KEKRecord) (sealer.KEKRecord, error)
+internal/builtin.transferKEKs.Get: func(_ context.Context, org string, id string) (sealer.KEKRecord, error)
+internal/builtin.transferKEKs.Level: func(context.Context, string) (sealer.Level, error)
+internal/builtin.transferKEKs.Lock: func(context.Context, string, bool) (sealer.Store, func(context.Context) error, error)
+internal/builtin.transferKEKs.Purge: func(context.Context, string, []string) error
+internal/builtin.transferKEKs.Retire: func(context.Context, string, []string) error
+internal/builtin.transferKEKs.RetiredList: func(context.Context, string) ([]sealer.KEKRecord, error)
+internal/builtin.transferKEKs.SetLevel: func(context.Context, string, sealer.Level, string) error
+internal/builtin/orgpki.AuthenticateRow: func(ctx context.Context, s *sealer.Sealer, orgID uuid.UUID, row orgpki.Row) error
+internal/builtin/orgpki.AuthenticateTransferCA: func(ctx context.Context, org uuid.UUID, rows *store.TransferRows, target builtin.TransferRoot) error
 internal/builtin/orgpki.Bundle: struct{CACertDER []byte; SignKeyID string; SignPubKey ed25519.PublicKey}
 internal/builtin/orgpki.ErrCAKeyMismatch: error
 internal/builtin/orgpki.ErrInvalidCSR: error
 internal/builtin/orgpki.ErrJobSigning: error
 internal/builtin/orgpki.ErrOrgNotFound: error
+internal/builtin/orgpki.ErrRowNotAuthentic: error
 internal/builtin/orgpki.NewRepo: func(db *pgxpool.Pool, s *sealer.Sealer) *orgpki.Repo
 internal/builtin/orgpki.NewRepoFromKey: func(db *pgxpool.Pool, keyID string, key []byte) (*orgpki.Repo, error)
 internal/builtin/orgpki.NewRepoFromLocal: func(db *pgxpool.Pool, local *builtin.Local) *orgpki.Repo
+internal/builtin/orgpki.ReadAuthenticatedRow: func(ctx context.Context, q interface{QueryRow(context.Context, string, ...any) pgx.Row}, s *sealer.Sealer, orgID uuid.UUID) (orgpki.Row, bool, error)
 internal/builtin/orgpki.Repo.CachedCACert: func(orgID uuid.UUID) ([]byte, bool)
 internal/builtin/orgpki.Repo.Ensure: func(ctx context.Context, orgID uuid.UUID) (orgpki.Bundle, error)
 internal/builtin/orgpki.Repo.IssueRunnerCert: func(ctx context.Context, orgID uuid.UUID, runnerID uuid.UUID, host string, csrDER []byte) (orgpki.RunnerCert, error)
@@ -98,6 +130,7 @@ internal/builtin/orgpki.Repo.PrimeVerificationCache: func(ctx context.Context, r
 internal/builtin/orgpki.Repo.SignJob: func(ctx context.Context, tx pgx.Tx, org uuid.UUID, j runnerproto.Job) (runnerproto.SignedJob, error)
 internal/builtin/orgpki.Repo.Validate: func(ctx context.Context) error
 internal/builtin/orgpki.Repo: struct{db *pgxpool.Pool; sealer *sealer.Sealer; cacheMu sync.RWMutex; verificationCAs map[uuid.UUID][]byte}
+internal/builtin/orgpki.Row: struct{CACertDER []byte; CAEnv sealer.Envelope; SignKeyID string; SignPubKey []byte; SignEnv sealer.Envelope}
 internal/builtin/orgpki.RunnerCert: struct{CertDER []byte; orgpki.Bundle; NotAfter time.Time}
 internal/builtin/orgpki.noopAuditor.Record: func(sealer.Event)
 internal/builtin/sealer.Auditor: interface{Record(sealer.Event)}
@@ -113,6 +146,7 @@ internal/builtin/sealer.ErrNoActiveKEK: error
 internal/builtin/sealer.ErrNoActor: error
 internal/builtin/sealer.ErrOnLocked: error
 internal/builtin/sealer.ErrRewrapIncomplete: error
+internal/builtin/sealer.ErrRewrapKEK: error
 internal/builtin/sealer.ErrUnknownKEK: error
 internal/builtin/sealer.ErrUnwrap: error
 internal/builtin/sealer.ErrWeakeningNotConfirmed: error
@@ -131,6 +165,7 @@ internal/builtin/sealer.New: func(root sealer.RootKey, audit sealer.Auditor, sto
 internal/builtin/sealer.NewLocalRootKey: func(id string, key []byte) (sealer.RootKey, error)
 internal/builtin/sealer.ParseLevel: func(s string) (sealer.Level, error)
 internal/builtin/sealer.Ref: struct{Store sealer.Scope; SecretID string; Name string; Version string}
+internal/builtin/sealer.RewrapKEK: func(org string, rec sealer.KEKRecord, source sealer.RootKey, target sealer.RootKey) (sealer.KEKRecord, error)
 internal/builtin/sealer.RootKey: interface{ID() string; Unwrap(wrapped []byte, aad []byte) ([]byte, error); Wrap(plain []byte, aad []byte) ([]byte, error)}
 internal/builtin/sealer.Scope: struct{PKI bool; Org string; Workspace string; Project string; User string}
 internal/builtin/sealer.Sealer.ChangeLevel: func(ctx context.Context, c sealer.LevelChange, st sealer.EnvelopeStore) (sealer.ChangeResult, error)

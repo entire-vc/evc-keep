@@ -23,9 +23,16 @@ spec.loader.exec_module(c)
 NODE_JOBS = {
     "runner-enroll-mutations", "mesh-ui-mutations", "public-hygiene-mutations",
     "builtin-mutations", "approvals-mutations", "deploy-api-mutations", "mesh-mutations",
-    "meshgate-mutations", "mesh-hierarchy-mutations", "dispatch-mutations",
-    "carrier-verify-mutations",
+    "meshgate-mutations", "mesh-hierarchy-mutations", "mesh-metadata-mutations", "dispatch-mutations",
+    "carrier-verify-mutations", "console-exec-predicate-mutations",
 }
+
+
+def expanded_selftests_script(config):
+    """Expand only the fully validated dispatcher job into its original commands."""
+    from test_ci_config import SELFTESTS, check_selftests_job
+    check_selftests_job(config)
+    return list(SELFTESTS)
 
 
 class GuardTests(unittest.TestCase):
@@ -243,6 +250,21 @@ class GuardTests(unittest.TestCase):
                 c.prepare(self.context)
             self.assertEqual(c.ARTIFACT.read_text(), "ALL\n")
 
+    def test_selftests_dispatcher_contract_refuses_noop_missing_and_reordered_gates(self):
+        import yaml
+        config = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
+        commands = expanded_selftests_script(config)
+        self.assertEqual(len(commands), 15)
+        self.assertEqual(commands[9],
+                         "KEEP_JOB_CACHE_REAL_TIMEOUT=1 python3 scripts/test_builtin_job_cache.py")
+        for script in (["true"], ["python3 scripts/dispatch_ci_selftests.py"],
+                       list(reversed(config["ci-selftests"]["script"]))):
+            with self.subTest(script=script):
+                broken = copy.deepcopy(config)
+                broken["ci-selftests"]["script"] = script
+                with self.assertRaises(AssertionError):
+                    expanded_selftests_script(broken)
+
     def test_default_full_and_every_other_gate_config_preserved(self):
         import yaml
         # Compare the merge base with the default branch, never candidate HEAD
@@ -252,6 +274,7 @@ class GuardTests(unittest.TestCase):
         previous = yaml.safe_load(subprocess.check_output(["git", "show",
             f"{base}:.gitlab-ci.yml"], cwd=ROOT))
         current = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
+        selftest_script = expanded_selftests_script(current)
         if current == previous:
             # No change to the pipeline config against the base (a push to the
             # default branch, or an MR that does not touch it): the edits this
@@ -294,6 +317,19 @@ class GuardTests(unittest.TestCase):
             if (isinstance(job, dict) and isinstance(prev, dict) and job.get("stage") == "post-review"
                     and job.get("dependencies") == [] and "dependencies" not in prev):
                 current[key] = {k: v for k, v in job.items() if k != "dependencies"}
+        # mesh-mutations may change its two time limits (the job timeout and the
+        # script `timeout` of the shard command); test_ci_config.py pins the
+        # values. Everything else about the job equals the base.
+        mm_limit = ("MUTATION_SHARD_INDEX=$CI_NODE_INDEX MUTATION_SHARD_TOTAL=$CI_NODE_TOTAL "
+                    "timeout -k 10s {} ./scripts/check-mesh-mutations.sh")
+        self.assertEqual(current["mesh-mutations"]["timeout"], "35m")
+        self.assertIn(mm_limit.format("30m"), current["mesh-mutations"]["script"])
+        for cfg in (current, previous):
+            job = cfg["mesh-mutations"]
+            job = {k: v for k, v in job.items() if k != "timeout"}
+            job["script"] = ["<shard command>" if line in (mm_limit.format("15m"), mm_limit.format("30m"))
+                             else line for line in job["script"]]
+            cfg["mesh-mutations"] = job
         # A postgres service may gain or lose its start-up `command` (the
         # fsync=off flags, pinned by check-ci-postgres-fsync.sh); nothing else
         # about a service is allowed to differ.
@@ -373,6 +409,10 @@ class GuardTests(unittest.TestCase):
         fast_lane = {"secret-scan-scope-selftest", "security-hygiene",
                      "golangci-lint", "ci-selftests"}
         directives = "./scripts/check-lint-directives.sh"
+        # No mutation job on a merge request, whatever the base carries: the
+        # loop below walks the base's keys, so a job the base lacks is checked here.
+        for gone in ("mutation-select", "mutations", "mutation-select-test"):
+            self.assertNotIn(gone, current)
         for key in previous:
             if key == "import-boundaries":
                 # Sharded (`parallel`) with path-filtered MR rules, both pinned by
@@ -410,10 +450,23 @@ class GuardTests(unittest.TestCase):
                 # test_ci_config.py); the script is otherwise as in the base.
                 guard = "sh scripts/check-ci-postgres-fsync.sh"
                 prev = {k: v for k, v in previous[key].items() if k != "tags"}
+                if key == "golangci-lint":
+                    # Its own job timeout, exactly 15m: 5m of headroom over the
+                    # 10m limit in .golangci.yml. The base may already carry it.
+                    self.assertEqual(job.pop("timeout", None), "15m", key)
+                    prev.pop("timeout", None)
                 if "script" in job:
                     job["script"] = [l for l in job["script"] if l != guard]
                     prev["script"] = [l for l in prev["script"] if l != guard]
                 if key == "ci-selftests":
+                    # The dispatcher preserves every original argv/env/order entry.
+                    # Validate before expansion; a no-op or omitted gate cannot be normalized away.
+                    dispatcher_script = ["python3 scripts/test_ci_selftests_dispatcher.py",
+                                         "python3 scripts/dispatch_ci_selftests.py"]
+                    self.assertEqual(job["script"], dispatcher_script)
+                    job["script"] = list(selftest_script)
+                    if prev["script"] == dispatcher_script:
+                        prev["script"] = list(selftest_script)
                     # The selector's tests joined it from mutation-select-test,
                     # with the packages they need (pinned by test_ci_config.py).
                     added = ["python3 scripts/test_mutation_select.py", "./scripts/check-mutation-select-redrun.sh"]
@@ -460,9 +513,15 @@ class GuardTests(unittest.TestCase):
                 # release stage; test_ci_config.py pins the list. Invariant,
                 # independent of the base: both once, in that order, at the end.
                 self.assertEqual(current[key].count("post-review"), 1)
-                self.assertEqual(current[key][-2:], ["post-review", "release"])
-                self.assertEqual(current[key][:-2], [s for s in previous[key] if s not in ("post-review", "release")])
-            elif key in {"mutation-select", "start-mutations", "mutations", "mutation-select-test"}:
+                # `publish` (push to the protected default branch only) sits between them.
+                self.assertEqual(current[key][-3:], ["post-review", "publish", "release"])
+                self.assertEqual(current[key][:-3], [s for s in previous[key] if s not in ("post-review", "publish", "release")])
+            elif key in {"mutation-range-mr", "start-mutations", "mutations-mr", "mutations-mr-check"}:
+                # Owner decision of 13.11.2026: no mutation job or child pipeline
+                # on a merge request. The bridge the base carries is gone
+                # (test_ci_config.py refuses any of them coming back).
+                self.assertNotIn(key, current)
+            elif key in {"mutation-select", "mutations", "mutation-select-test"}:
                 # No mutation job on a merge request: the selector, its gate and
                 # the child trigger are gone (test_ci_config.py refuses them),
                 # and the selector's own tests moved into ci-selftests.
@@ -499,14 +558,14 @@ class GuardTests(unittest.TestCase):
             elif key == "mesh-mutations":
                 # The one-caller guard and its own mutation script join the job;
                 # the mutants are sharded over at least 2 jobs, each running
-                # the whole script under the same 15 m limit; every other line
+                # the whole script under one shared time limit (normalized above); every other line
                 # and key equals the base.
                 same(key, skip_keys={"rules", "stage", "script", "before_script", "parallel", "resource_group"})
                 node_apk_only(key)
                 self.assertGreaterEqual(current[key].get("parallel", 1), 2)
                 added = ["./scripts/check-resolve-callers.sh", "./scripts/check-resolve-callers-mutations.sh"]
-                whole = "timeout -k 10s 15m ./scripts/check-mesh-mutations.sh"
-                sharded = "MUTATION_SHARD_INDEX=$CI_NODE_INDEX MUTATION_SHARD_TOTAL=$CI_NODE_TOTAL " + whole
+                # The shard command line was normalized to a marker on both sides.
+                whole = sharded = "<shard command>"
                 # The base may already carry them (main itself) or not (the MR
                 # that added them): compare both sides without the added lines.
                 self.assertEqual([l for l in current[key]["script"] if l not in added],
@@ -519,6 +578,16 @@ class GuardTests(unittest.TestCase):
                 # and field equals the base.
                 same(key, skip_keys={"rules", "stage", "resource_group", "before_script"})
                 node_apk_only(key)
+            elif key == "mutant-anchors":
+                # Invariant, independent of the base: the job downloads the Go
+                # modules itself (a cold runner cache has none, and the
+                # intake-receiver apply-only check fails closed without circl);
+                # every other line and field equals the base.
+                same(key, skip_keys={"before_script"})
+                download = "go mod download"
+                self.assertIn(download, current[key]["before_script"])
+                self.assertEqual([l for l in current[key]["before_script"] if l != download],
+                                 [l for l in previous[key]["before_script"] if l != download])
             elif key == "rotation-mutations":
                 # Shard count may grow to keep each shard under the job limit;
                 # invariant, independent of the base: never fewer than 4 shards.

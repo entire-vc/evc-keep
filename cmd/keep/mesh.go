@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/entire-vc/evc-keep/internal/reqid"
 	"github.com/google/uuid"
 )
 
@@ -84,13 +84,13 @@ func cmdMeshUninstall(c *client, ws string, jsonOut bool, w io.Writer) error {
 		return err
 	}
 	var res meshUninstallResult
-	if err := json.Unmarshal(body, &res); err != nil {
-		return fmt.Errorf("parse server response: %w", err)
+	if err := decodeBody(body, &res); err != nil {
+		return err
 	}
 	if res.WorkspaceID != ws {
 		res.WorkspaceID = "(unexpected value)"
 	}
-	if !auditRequestID.MatchString(res.RequestID) {
+	if !reqid.Valid(res.RequestID) {
 		res.RequestID = "(unexpected value)"
 	}
 	if res.Erased < 0 {

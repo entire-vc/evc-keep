@@ -22,7 +22,7 @@ fresh() {
 	(cd "$scratch/t" && git init -q && git config gc.auto 0 && git config maintenance.auto false &&
 		git add -A && git -c user.name=redrun -c user.email=redrun@example.invalid commit -qm tree)
 }
-suite() { (cd "$scratch/t" && python3 scripts/test_mutation_select.py >"$scratch/out" 2>&1); }
+suite() { (cd "$scratch/t" && python3 scripts/test_mutation_select.py "$@" >"$scratch/out" 2>&1); }
 
 fresh
 suite || { cat "$scratch/out" >&2; echo "FAIL: the selector tests are red on the real tree" >&2; exit 1; }
@@ -36,7 +36,9 @@ cut() {
 	(cd "$scratch/t" && perl -0pi -e "$2" "$1")
 	after=$(cksum <"$scratch/t/$1")
 	if [ "$before" = "$after" ]; then echo "BAD MUTANT (no change): $3" >&2; fail=1; return; fi
-	if suite; then echo "SURVIVED: $3" >&2; fail=1; else echo "killed:   $3"; fi
+	# One failing test already kills this cut. A survivor still runs every test,
+	# as does the unmodified baseline above; no cut is skipped.
+	if suite --failfast; then echo "SURVIVED: $3" >&2; fail=1; else echo "killed:   $3"; fi
 }
 
 M=scripts/mutation-select.map

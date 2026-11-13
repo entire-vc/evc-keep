@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/entire-vc/evc-keep/internal/obs"
 	"github.com/entire-vc/evc-keep/internal/testutil/canary"
 	"github.com/entire-vc/evc-keep/pkg/provider/memory"
 	"github.com/entire-vc/evc-keep/pkg/provider/svctoken"
@@ -628,5 +629,31 @@ func TestExtIssue5xxIsOrphaned(t *testing.T) {
 	_, err := mesh.RotateSelf(context.Background(), r.x, r.store, r.hook, uuid.New())
 	if !errors.Is(err, mesh.ErrOrphaned) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// Through Keep's closed-key logger the ext journal keeps op, outcome and
+// account_id (threat model §4.4.1).
+func TestExtJournalSurvivesObsLogger(t *testing.T) {
+	r := newExtRig(t, 0)
+	var logs bytes.Buffer
+	acct := uuid.NewString()
+	x, err := mesh.NewExtSelf(mesh.ExtConfig{BaseURL: r.s.srv.URL, AccountID: acct, Log: obs.New(&logs),
+		TokenSource: func(ctx context.Context) (mesh.Token, error) {
+			tok, err := r.store.Token(ctx)
+			return mesh.Token(tok), err
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mesh.RotateSelf(context.Background(), x, r.store, nil, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `"account_id":"`+acct+`"`) || !strings.Contains(out, `"op":"issue"`) || !strings.Contains(out, `"outcome":"ok"`) {
+		t.Errorf("ext journal lost attributes: %s", out)
+	}
+	if strings.Contains(out, "dropped disallowed log attribute") {
+		t.Errorf("attribute dropped: %s", out)
 	}
 }

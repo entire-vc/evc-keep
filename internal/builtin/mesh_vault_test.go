@@ -4,7 +4,7 @@ import "testing"
 
 func TestMeshPathIsClosed(t *testing.T) {
 	const ws = "0b7a1c52-6f0e-4a54-9d0c-1b3f2f1a9c11"
-	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshKeepSecret} {
+	for _, kind := range []string{MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshKeepSecret} {
 		p, err := meshPath(ws, kind)
 		if err != nil || p != "mesh/"+ws+"/"+kind {
 			t.Errorf("meshPath(%q) = %q, %v", kind, p, err)

@@ -391,7 +391,7 @@ func (t *toolbox) deploy(ctx context.Context, raw json.RawMessage) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	res, err := decodeDeploy(body)
+	res, err := decodeDeploy(status, body)
 	if err != nil {
 		return nil, err
 	}
@@ -406,12 +406,15 @@ func (t *toolbox) deploy(ctx context.Context, raw json.RawMessage) (any, error) 
 		if err != nil {
 			return nil, err
 		}
-		if res, err = decodeDeploy(body); err != nil {
+		if res, err = decodeDeploy(status, body); err != nil {
 			return nil, err
 		}
 	}
 	return res, nil
 }
+
+// healthStatus is runnerproto.HealthStatus, the closed list a healthcheck may report.
+var healthStatus = map[string]bool{"ok": true, "failed": true, "skipped": true}
 
 var carrierStatus = map[string]bool{"pending": true, "match": true, "mismatch": true, "unreachable": true, "failed": true}
 
@@ -499,6 +502,11 @@ var rotateClasses = map[string]bool{"no_carriers": true, "deploy_failed": true, 
 
 var approvalStatus = map[string]bool{"requested": true, "approved": true, "rejected": true, "expired": true}
 
+// validApproval applies the same closed metadata contract to deploy and rotate.
+func validApproval(a *DeployApproval) bool {
+	return a == nil || (validUUID(a.ID) && approvalStatus[a.Status] && a.URL != "" && len(a.URL) <= 512 && !strings.ContainsAny(a.URL, " \t\r\n"))
+}
+
 func (t *toolbox) rotate(ctx context.Context, raw json.RawMessage) (any, error) {
 	var a struct {
 		SecretID    string `json:"secret_id"`
@@ -579,7 +587,7 @@ func decodeRotate(status int, body []byte) (RotateResult, error) {
 	if (status == http.StatusAccepted && (r.OK || r.ErrorClass != "")) || (status == http.StatusOK && r.OK && (r.Version == "" || r.Fingerprint == "")) {
 		return RotateResult{}, errUnexpectedShape
 	}
-	if a := r.Approval; a != nil && (!validUUID(a.ID) || !approvalStatus[a.Status] || a.URL == "" || len(a.URL) > 512 || strings.ContainsAny(a.URL, " \t\r\n")) {
+	if !validApproval(r.Approval) {
 		return RotateResult{}, errUnexpectedShape
 	}
 	for _, c := range r.Carriers {
@@ -592,15 +600,38 @@ func decodeRotate(status int, body []byte) (RotateResult, error) {
 
 func waitsForHuman(r RotateResult) bool { return r.Approval != nil && r.Approval.Status == "requested" }
 
-func decodeDeploy(body []byte) (DeployResult, error) {
+func decodeDeploy(status int, body []byte) (DeployResult, error) {
 	var r DeployResult
+	if status != http.StatusOK && status != http.StatusAccepted {
+		return DeployResult{}, errUnexpectedShape
+	}
 	if decodeStrict(body, &r) != nil || !reqid.Valid(r.RequestID) {
 		return DeployResult{}, errUnexpectedShape
 	}
-	if r.ErrorClass != "" && knownClass(r.ErrorClass) != r.ErrorClass {
+	// A deploy answer carries an API class or one of the runner's closed result
+	// classes; exact match only.
+	if r.ErrorClass != "" && !deployClassKnown(r.ErrorClass) {
 		return DeployResult{}, errUnexpectedShape
 	}
 	if r.Fingerprint != "" && !fingerprintShape.MatchString(r.Fingerprint) {
+		return DeployResult{}, errUnexpectedShape
+	}
+	if (r.Version != "" && !versionRe.MatchString(r.Version)) || !validApproval(r.Approval) {
+		return DeployResult{}, errUnexpectedShape
+	}
+	// A failed deploy names a version only when the value was written and the
+	// consumer did not come up: healthcheck_failed, with both version and fingerprint.
+	laidDown := r.ErrorClass == string(runnerproto.ErrClassHealthcheck) && r.Version != "" && r.Fingerprint != ""
+	if (!r.OK && (r.Version != "" || r.Fingerprint != "") && !laidDown) || (r.OK && r.ErrorClass != "") {
+		return DeployResult{}, errUnexpectedShape
+	}
+	if (status == http.StatusAccepted && (r.OK || r.ErrorClass != "")) || (status == http.StatusOK && r.OK && (r.Version == "" || r.Fingerprint == "")) {
+		return DeployResult{}, errUnexpectedShape
+	}
+	if r.Healthcheck != nil {
+		r.Healthcheck.CheckedAt = r.Healthcheck.CheckedAt.UTC().Truncate(time.Second)
+	}
+	if r.Healthcheck != nil && !healthStatus[r.Healthcheck.Status] {
 		return DeployResult{}, errUnexpectedShape
 	}
 	return r, nil
@@ -633,6 +664,20 @@ func errorAnswer(err error) ErrorAnswer {
 		return ErrorAnswer{ErrorClass: string(apperr.ClassNotReady), Message: "request cancelled"}
 	}
 	return ErrorAnswer{ErrorClass: string(apperr.ClassInternal), Message: "internal error"}
+}
+
+// deployClassKnown reports whether c is in the API's closed class list or the
+// runner's closed result classes; exact match only.
+func deployClassKnown(c string) bool {
+	if runnerproto.ErrorClass(c).Valid() {
+		return true
+	}
+	for _, k := range apperr.Classes() {
+		if string(k) == c {
+			return true
+		}
+	}
+	return false
 }
 
 // knownClass keeps a class the server sent only if our own closed list has

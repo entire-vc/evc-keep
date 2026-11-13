@@ -1,0 +1,10 @@
+{
+  "_comment": "Captured from the real evc-mesh Handshaker.Run (internal/extensions/external/handshake.go, evc-mesh main 3d3869a7) against a recording HTTP server; the signing secret inside the body is a synthetic fixture value. Regenerate by running Handshaker.Run for extension keep-rotator and recording the install request.",
+  "mesh_commit": "3d3869a722d0fac9bb3fa987b0038649321a51fb",
+  "path": "/mesh/install",
+  "timestamp": "1793610861",
+  "signature": "cb56d0c403e8810bd8a5249f4b5b78d6dc0ebe7de8dea7686518be25e8a7572e",
+  "user_agent": "evc-mesh-extension/1.0",
+  "content_type": "application/json",
+  "body": "{\"extension_id\":\"keep-rotator\",\"version\":\"0.1.0\",\"workspace_id\":\"11111111-2222-4333-8444-555555555555\",\"signing_secret\":\"synthetic-ci-fixture-signing-secret-0001\",\"events\":[\"workspace.member.added\",\"project.created\",\"task.gate.decided\"],\"events_path\":\"/mesh/events\"}"
+}

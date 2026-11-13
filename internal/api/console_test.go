@@ -408,8 +408,44 @@ func TestConsoleExecCardShowsTemplateModeAndParameterNames(t *testing.T) {
 			t.Errorf("exec card misses %q", want)
 		}
 	}
-	if strings.Contains(body, "0000") || strings.Contains(body, "uid / gid") {
+	if hasDeploymentTargetRows(body) {
 		t.Error("exec card renders deployment target rows")
+	}
+}
+
+// deploymentTargetRow matches the <dt> labels only a deployment target emits
+// (rows() always ends with Mode and uid / gid). Matching row labels, not
+// arbitrary text, keeps a random UUID containing "0000" from looking like a mode.
+var deploymentTargetRow = regexp.MustCompile(`<dt>(Mode|uid / gid)</dt>`)
+
+func hasDeploymentTargetRows(body string) bool { return deploymentTargetRow.MatchString(body) }
+
+func renderCard(t *testing.T, a deployment.Approval) string {
+	t.Helper()
+	var sb strings.Builder
+	if err := consoleTemplates.ExecuteTemplate(&sb, "card", toCard(a, "csrf")); err != nil {
+		t.Fatal(err)
+	}
+	return sb.String()
+}
+
+// A UUID with 0000 inside is ordinary rendered text, not a deployment target.
+// The positive controls prove the predicate still fires on real rows.
+func TestExecCardPredicateIgnoresUUIDWithZeros(t *testing.T) {
+	exec := &deployment.ApprovalExec{TemplateID: "gh-issues", Digest: strings.Repeat("ab", 32), Mode: "allowlist", ParamNames: []string{"path"}}
+	a := deployment.Approval{ID: uuid.New(), RequestID: "11111111-0000-4111-8111-111111111111", Status: "requested", Exec: exec}
+	body := renderCard(t, a)
+	if !strings.Contains(body, "11111111-0000-4111-8111-111111111111") {
+		t.Fatal("control: the UUID is not rendered, the test proves nothing")
+	}
+	if hasDeploymentTargetRows(body) {
+		t.Error("UUID with 0000 taken for a deployment target row")
+	}
+	// positive control: the same approval without Exec renders real target rows
+	a.Exec = nil
+	a.Target = runnerproto.Target{}
+	if !hasDeploymentTargetRows(renderCard(t, a)) {
+		t.Error("predicate is blind to real deployment target rows")
 	}
 }
 

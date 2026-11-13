@@ -120,11 +120,11 @@ func TestRunOne_LeakOverridesSkip(t *testing.T) {
 			}, check{name: "leak-then-skip", run: func(e *env) {
 				switch channel {
 				case "stdout":
-					_, _ = syscall.Write(1, []byte(e.canary.base))
+					_, _ = syscall.Write(1, []byte(e.canary.Value(1)))
 				case "stderr":
-					_, _ = syscall.Write(2, []byte(e.canary.base))
+					_, _ = syscall.Write(2, []byte(e.canary.Value(1)))
 				case "logger":
-					logger.Info("control", "value", e.canary.base)
+					logger.Info("control", "value", e.canary.Value(1))
 				}
 				e.skip("capability skip control")
 			}})

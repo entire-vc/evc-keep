@@ -64,7 +64,9 @@ type FileJournal struct {
 // see which files are synced, and in what order.
 var syncFile = (*os.File).Sync
 
-// OpenFileJournal loads the journal at path, creating it with mode 0600.
+// OpenFileJournal loads the journal at path, creating it with mode 0600. An
+// existing path must be an ordinary file, not a symlink: a FIFO or other
+// special file is refused at once, without blocking.
 //
 // A last line without its newline is dropped: a crash between Claim's write
 // and its sync can leave one, and that claim never returned success, so no
@@ -72,7 +74,7 @@ var syncFile = (*os.File).Sync
 // refuses to open rather than forget ids.
 func OpenFileJournal(path string, now time.Time) (*FileJournal, error) {
 	mem := NewMemJournal()
-	if b, err := os.ReadFile(path); err == nil { //nolint:gosec // G304: path is the runner's own configured journal
+	if b, err := readJournal(path); err == nil {
 		lines := strings.Split(string(b), "\n")
 		// The last element follows the final newline: empty for a journal
 		// that ended cleanly, otherwise the torn line.
@@ -86,6 +88,8 @@ func OpenFileJournal(path string, now time.Time) (*FileJournal, error) {
 				mem.seen[id] = t
 			}
 		}
+	} else if errors.Is(err, errJournalNotRegular) {
+		return nil, err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("runnerproto: read replay journal: %w", err)
 	}
@@ -105,7 +109,7 @@ func OpenFileJournal(path string, now time.Time) (*FileJournal, error) {
 // file that has forgotten ids still inside their window.
 func rewriteJournal(path string, seen map[string]time.Time) error {
 	tmp := path + ".tmp"
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) { //nolint:gosec // G703: path is the runner's own configured journal
 		return err
 	}
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: see OpenFileJournal
@@ -127,10 +131,10 @@ func rewriteJournal(path string, seen map[string]time.Time) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(tmp, path); err != nil { //nolint:gosec // G703: see above
 		return err
 	}
-	d, err := os.Open(filepath.Dir(path))
+	d, err := os.Open(filepath.Dir(path)) //nolint:gosec // G703: see above
 	if err != nil {
 		return err
 	}

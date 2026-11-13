@@ -22,6 +22,18 @@ func withRequestID(next http.Handler) http.Handler {
 	})
 }
 
+// withServerRequestID discards a caller-supplied X-Request-Id for one route
+// and issues a fresh server-generated id, in the context (so the log line and
+// every body see it) and in the response header. It wraps logged, so the
+// route's own log line carries the server id too.
+func withServerRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := reqid.New()
+		w.Header().Set(reqid.HeaderName, id)
+		next.ServeHTTP(w, r.WithContext(reqid.WithContext(r.Context(), id)))
+	})
+}
+
 // statusRecorder captures the status code a handler wrote, defaulting to
 // 200 to match http.ResponseWriter's own implicit behavior when a handler
 // never calls WriteHeader itself.

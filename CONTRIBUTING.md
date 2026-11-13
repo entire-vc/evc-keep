@@ -48,13 +48,14 @@ is indistinguishable from a check that can't.
   Follow [the local PostgreSQL procedure](#local-mutation-checks-with-postgresql)
   to reset the database before each script. Shared files (`go.mod`, the
   linter config, the mutation helpers) select all of them.
-  Mutation checks are not a merge condition: a merge request pipeline
-  creates no mutation job (security, lint, tests and the build are what it
-  must pass). Every mutation job runs in the nightly schedule, which covers
-  what each merge brought to `main` (the browser mutation suite also runs
-  on every push to `main`), and on a release tag, where the
-  `release` job waits for all of them: a red mutation suite stops the release,
-  not your merge request. A red nightly is fixed like a red `main`.
+  In CI a merge request pipeline runs no mutation suite and starts no
+  mutation child pipeline (owner decision of 13.11.2026), so the local run
+  above is your own check. The full set runs in the nightly schedule, which
+  covers what each merge brought to `main` (the browser mutation suite also
+  runs on every push to `main`), and on a release tag, where the `release`
+  job waits for all of them. The batch pipeline (`KEEP_MUTATION_BATCH=true`)
+  runs only when someone starts it by hand. A red nightly is fixed like a
+  red `main`.
 - Before waiting on CI, look at the pipeline of `main`. If `main` is red,
   your merge request will not go green for reasons that are not yours:
   depend on the fix for `main` instead of re-running CI.

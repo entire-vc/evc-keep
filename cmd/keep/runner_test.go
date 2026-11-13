@@ -268,3 +268,110 @@ func indexOf(s, substr string) int {
 	}
 	return -1
 }
+
+func enrollServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+func runEnroll(t *testing.T, srv *httptest.Server) (rc int, stdout, stderr string) {
+	t.Helper()
+	t.Setenv("KEEP_ADMIN_TOKEN", testAdminTokenFixture)
+	policyPath := policyFileFixture(t)
+	return captureOutput(t, func() int {
+		return runRunnerEnrollToken([]string{"-host", "h1", "-policy", policyPath, "-server", srv.URL, "-insecure-skip-verify"})
+	})
+}
+
+// TestRunnerEnrollTokenFailsClosedOnEmptyToken: a 201 without a token must
+// not print a blank line and exit 0 — keep-runner enroll would be fed an
+// empty token.
+func TestRunnerEnrollTokenFailsClosedOnEmptyToken(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"token":""}`, `{"token":" "}`, `{"token":"\n"}`} {
+		srv := enrollServer(t, http.StatusCreated, body)
+		rc, stdout, stderr := runEnroll(t, srv)
+		srv.Close()
+		if rc == 0 || stdout != "" {
+			t.Errorf("body %s: rc=%d stdout=%q, want non-zero and empty stdout", body, rc, stdout)
+		}
+		if !contains(stderr, "no token") {
+			t.Errorf("body %s: stderr is not the static message: %q", body, stderr)
+		}
+	}
+}
+
+// TestRunnerEnrollTokenSuccessLineIsClosedList: token_id and host from the
+// response reach stderr only in a fixed shape.
+func TestRunnerEnrollTokenSuccessLineIsClosedList(t *testing.T) {
+	c := canary.New()
+	evil := c.Value(0)
+	body, _ := json.Marshal(map[string]any{"token": "keep_renr_fixture", "token_id": evil, //nolint:gosec // G101: fixture, not a credential
+		"last4": evil,
+		"host":  "h1-" + evil, "expires_at": "2030-01-01T00:00:00Z"})
+	srv := enrollServer(t, http.StatusCreated, string(body))
+	defer srv.Close()
+	rc, stdout, stderr := runEnroll(t, srv)
+	if rc != 0 || stdout != "keep_renr_fixture\n" {
+		t.Fatalf("rc=%d stdout=%q", rc, stdout)
+	}
+	if c.In(stderr) || c.In(stdout) {
+		t.Errorf("canary from token_id/host reached output: %q", stderr)
+	}
+	if !contains(stderr, unexpectedValue) {
+		t.Errorf("hostile fields not replaced: %q", stderr)
+	}
+	if contains(stderr, evil[:8]) {
+		t.Errorf("prefix of a server-chosen field reached stderr: %q", stderr)
+	}
+	if !contains(stderr, "(\u2026ture)") && !contains(stderr, "(…ture)") {
+		t.Errorf("last4 not derived from the token: %q", stderr)
+	}
+}
+
+// TestRunnerEnrollTokenRejectsNonCanonicalTokenID: uuid.Parse also accepts
+// 32 bare hex digits, braces and urn: forms, which String() would re-dash
+// and print — only the canonical 36-character form is echoed.
+func TestRunnerEnrollTokenRejectsNonCanonicalTokenID(t *testing.T) {
+	for _, id := range []string{"0123456789abcdef0123456789abcdef", "{018f4d1e-0000-7000-8000-000000000000}", "urn:uuid:018f4d1e-0000-7000-8000-000000000000", "018F4D1E-0000-7000-8000-000000000000"} {
+		srv := enrollServer(t, http.StatusCreated, `{"token":"keep_renr_fixture","token_id":"`+id+`","expires_at":"2030-01-01T00:00:00Z"}`)
+		_, _, stderr := runEnroll(t, srv)
+		srv.Close()
+		if !contains(stderr, "issued token "+unexpectedValue) {
+			t.Errorf("token_id %q echoed: %q", id, stderr)
+		}
+	}
+}
+
+func TestRunnerEnrollTokenSuccessLineEchoesOwnHost(t *testing.T) {
+	srv := enrollServer(t, http.StatusCreated, `{"token":"keep_renr_fixture","token_id":"018f4d1e-0000-7000-8000-000000000000","last4":"abcd","host":"h1","expires_at":"2030-01-01T00:00:00Z"}`)
+	defer srv.Close()
+	rc, _, stderr := runEnroll(t, srv)
+	if rc != 0 || !contains(stderr, `for host "h1"`) || !contains(stderr, "issued token 018f4d1e-0000-7000-8000-000000000000") {
+		t.Errorf("rc=%d stderr=%q", rc, stderr)
+	}
+}
+
+func TestRunnerRevokeFailsClosedOnOKFalse(t *testing.T) {
+	t.Setenv("KEEP_ADMIN_TOKEN", testAdminTokenFixture)
+	for _, body := range []string{`{"ok":false}`, `{}`} {
+		srv := enrollServer(t, http.StatusOK, body)
+		rc, stdout, stderr := captureOutput(t, func() int {
+			return runRunnerRevoke([]string{"-server", srv.URL, "-insecure-skip-verify", "018f4d1e-0000-7000-8000-000000000000"})
+		})
+		srv.Close()
+		if rc == 0 || stdout != "" || !contains(stderr, "did not confirm") {
+			t.Errorf("body %s: rc=%d stdout=%q stderr=%q", body, rc, stdout, stderr)
+		}
+	}
+	srv := enrollServer(t, http.StatusOK, `{"ok":true,"request_id":"r1"}`)
+	defer srv.Close()
+	rc, stdout, _ := captureOutput(t, func() int {
+		return runRunnerRevoke([]string{"-server", srv.URL, "-insecure-skip-verify", "018f4d1e-0000-7000-8000-000000000000"})
+	})
+	if rc != 0 || !contains(stdout, "ok=true") {
+		t.Errorf("positive control: rc=%d stdout=%q", rc, stdout)
+	}
+}

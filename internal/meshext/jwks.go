@@ -36,6 +36,10 @@ var ErrKeysUnavailable = errors.New("meshext: mesh signing keys unavailable")
 // mesh-extension.json.
 const ExtensionID = "keep"
 
+// RotatorExtensionID is the id of the keep-rotator manifest: a companion
+// identity of the keep installation, with its own window and signing secret.
+const RotatorExtensionID = "keep-rotator"
+
 const (
 	jwksPath      = "/api/v1/.well-known/jwks.json"
 	jwksTTL       = 5 * time.Minute

@@ -56,6 +56,10 @@ func (l *Local) SealMaterial(ctx context.Context, s dispatch.Snapshot, recipient
 	p := l.Provider(s.Job.OrgID, workspace, project, user)
 	p.db = p.db.withTx(tx)
 	p.seal = p.seal.WithStore(p.db)
+	if s.Job.Action == runnerproto.ActionDiscover {
+		// Not issued by this path yet: refuse rather than reach the verify key.
+		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+	}
 	if s.Job.NeedsFingerprintKey() {
 		// A verify job gets the key that produced the frozen fingerprint and
 		// nothing else: the value is never resolved, let alone sealed.

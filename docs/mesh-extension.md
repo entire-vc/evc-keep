@@ -29,9 +29,16 @@ hold this split.
 
 `keep-rotator` is an external extension pointing at the same `keep_url`, with
 the paths of `keep`, because Mesh requires them of an external manifest. Keep
-answers its install handshake with `401` (the handshake accepts only
-`extension_id` `keep`) and writes nothing, so Mesh reports the rotator's
-connection as not healthy; its token works regardless. Its first token is
+answers its install handshake once the workspace has its `keep` installation and
+the rotator is authorized the same way `keep` is, but separately: an org admin
+opens the rotator's own window (`POST /orgs/{org}/mesh/pending-installs` with
+`"extension_id": "keep-rotator"`, the same `mesh_url` as the installation, the
+SHA-256 of the rotator's signing secret); the handshake that presents that secret
+binds it, in a slot of its own (`rotator_signing_secret`), and a repeat is
+accepted only with that secret. A `keep` window never binds the rotator and the
+other way round; without a window, with another secret, an expired window or
+another organisation the answer is the uniform `401` and nothing is written. The
+rotator spends its own rate-limit budgets, not those of `keep`. Its first token is
 issued in Mesh to the administrator and reaches Keep through
 `KEEP_MESH_SVC_BOOTSTRAP_FILE`; Keep seals it as `mesh-service-token` and rotates
 it from then on ([self-rotation](mesh-service-account.md)). The two extensions
@@ -497,6 +504,18 @@ own organizations, workspaces, events secrets and a synthetic value, and prints
 only the ref, version, fingerprint and length. Run it with
 `KEEP_DATABASE_URL=<disposable server> go test -count=1 -run TestMeshExtensionSmoke -v ./cmd/keep-server/app`.
 `scripts/check-mesh-mutations.sh` proves it goes red when a guard is off.
+
+## `GET /orgs/{org_id}/mesh/secrets/{ref}/metadata`
+
+The metadata probe (protocol `mesh-keep-metadata-v1`): Mesh asks which version of a stored secret Keep holds and how long it is, without the value. Same signature as `PUT` and `resolve` (events secret over the tag, timestamp, single-use nonce, method, path and the SHA-256 of the empty body), TLS only. The signed method and path keep it from serving any other route.
+
+- Request: no query, no body (`Content-Length` absent or 0, no `Transfer-Encoding`), a lowercase organization id, a `ref` of the closed alphabet. `HEAD` is `405`. A body is read up to 4096 bytes before the signature (`413` beyond); a signed non-empty body is refused with `400` after the signature held.
+- Answer `200`, exactly `{"version":"<positive decimal int64>","length":<1..32768>,"request_id":"<server id>"}`, `Cache-Control: no-store`. No fingerprint: it would need the value.
+- Reader: one scalar `SELECT version::text, octet_length(ciphertext) - 28` of the newest active version in the organization's built-in store and `mesh/<workspace>/secrets/<ref>`. It reads no ciphertext, wrapped key or key id, opens nothing and writes nothing. A stored size outside what Keep writes is `503`, not clamped.
+- Errors, all `{error_class, message, request_id}` and `no-store`: `401 authentication failed`, `403 request refused` (organization is not the installation's), `404 not found` (missing, disabled, erased and another workspace's ref alike), `400 invalid metadata request`, `413 metadata request too large`, `429 request rate limited` (own budget of 60 a minute, burst 10, per workspace), `503 metadata unavailable` (storage, nonce store, journal, or a build without the reader).
+- Audit: `mesh.secret.metadata` (migration `00049` adds it to the closed registry before the reader exists). A verified call is recorded, the success with the ref, version and length, every refusal nameless, and there is no answer without the record; a failing journal or nonce store is `503` with no metadata. Unsigned calls are not recorded.
+
+Guards: `TestMeshMetadata*` (`cmd/keep-server/app`), `TestMeshMetadataSQLIsScalarOnly` and `TestMeshMetadataReaderReachesNoValuePath` (`internal/builtin`); `scripts/check-mesh-metadata-mutations.sh` proves each goes red.
 
 ## The secrets screen in the Mesh iframe
 

@@ -147,7 +147,7 @@ func (a *keyLevelAuditor) settle(org, id string) {
 func (a *keyLevelAuditor) record(e builtin.KeyEvent) {
 	r, ok := eventRecord(e)
 	if !ok {
-		a.log.Error("audit event not journaled", "error_class", "audit_unmapped", "action_name", e.Action)
+		a.log.Error("audit event not journaled", "error_class", "audit_unmapped", "action_name", string(e.Action))
 		return
 	}
 	a.mu.Lock()

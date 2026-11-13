@@ -67,6 +67,18 @@ import (
 // (unit-active/http), same category as "status" and "error_class" above —
 // never the healthcheck's own response body, which internal/runner/health
 // never keeps past the pass/fail comparison in the first place.
+//
+// "op", "outcome" and "length" are the plugin-journal keys (threat model
+// §4.4.1): "op" and "outcome" are short closed-vocabulary words (issue,
+// not_found, denied, ...) and "length" is a byte count. Because the names are
+// generic, [isAllowedAttr] checks the value, not only the key: "op" and
+// "outcome" must match [enumValuePattern], and "length" must be an integer,
+// same as "count" and "body_len". This is a guard on the SHAPE of the value:
+// it drops anything with digits, upper case, punctuation or more than 32
+// characters, but a secret made only of lower-case letters and "_" would
+// still fit the shape, and a numeric secret would fit "length". The values
+// are therefore safe because the call sites pass constants and v.Len(), not
+// because the filter can tell a secret from a word.
 var allowed = map[string]bool{
 	"method":      true,
 	"route":       true,
@@ -80,7 +92,14 @@ var allowed = map[string]bool{
 	"kind":        true,
 	"body_len":    true,
 	"count":       true,
+	"op":          true,
+	"outcome":     true,
+	"length":      true,
 }
+
+// enumValuePattern is the shape of an "op"/"outcome" value: a lower-case
+// snake_case word of at most 32 characters.
+var enumValuePattern = regexp.MustCompile(`^[a-z][a-z_]{0,31}$`)
 
 // isAllowed reports whether k may pass through unfiltered. Beyond the fixed
 // set above, an entity id or name is allowed under any key that says so by
@@ -90,7 +109,8 @@ var allowed = map[string]bool{
 // new component. The values behind these keys must themselves already be
 // safe to log (ids and names, never a secret's value) — that invariant is
 // enforced by callers and by pkg/secret's own String()/LogValue() behavior,
-// not by this filter.
+// not by this filter. What the filter does enforce is the value's kind: only
+// a string or an integer passes under these keys ([suffixKindOK]).
 //
 // That suffix rule is wider than the fixed list above, and it stays that
 // way deliberately — but it is not a blank check for any identifier a
@@ -119,13 +139,21 @@ func isAllowed(k string) bool {
 	return strings.HasSuffix(k, "_id") || strings.HasSuffix(k, "_name")
 }
 
-// isAllowedAttr is [isAllowed] plus the value kind for the numeric keys: a
-// "count" or "body_len" carries an integer or nothing.
+// isAllowedAttr is [isAllowed] plus the value kind: a suffix-rule key carries
+// only a string or an integer ([suffixKindOK]); for the numeric keys, a
+// "count", "body_len" or "length" carries an integer or nothing, and an "op"
+// or "outcome" a short snake_case word (see [enumValuePattern]).
 func isAllowedAttr(a slog.Attr) bool {
 	if !isAllowed(a.Key) {
 		return false
 	}
-	if a.Key == "count" || a.Key == "body_len" {
+	if !allowed[a.Key] && !suffixKindOK(a.Value.Resolve().Kind()) {
+		return false
+	}
+	if a.Key == "op" || a.Key == "outcome" {
+		return a.Value.Kind() == slog.KindString && enumValuePattern.MatchString(a.Value.String())
+	}
+	if a.Key == "count" || a.Key == "body_len" || a.Key == "length" {
 		switch a.Value.Resolve().Kind() {
 		case slog.KindInt64, slog.KindUint64:
 			return true
@@ -134,6 +162,22 @@ func isAllowedAttr(a slog.Attr) bool {
 		}
 	}
 	return true
+}
+
+// suffixKindOK reports whether a value of kind k may sit under a key admitted
+// by the suffix rule ("*_id", "*_name", bare "id" or "name"): a string or an
+// integer, nothing else. A slog.Group, an Any (a uuid.UUID, a []byte, an error,
+// a Stringer, a named string type), a Bool, a Float, a Time or a Duration is
+// dropped whole, so a nested or byte-typed value cannot ride under an id key.
+// The string's own shape is not checked: the values are safe because call
+// sites pass identifiers, see [isAllowed].
+func suffixKindOK(k slog.Kind) bool {
+	switch k {
+	case slog.KindString, slog.KindInt64, slog.KindUint64:
+		return true
+	default:
+		return false
+	}
 }
 
 // stackArgsPattern matches a call-site line's trailing argument list, e.g.
@@ -162,11 +206,12 @@ func sanitizeStack(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// Handler is a slog.Handler that enforces the allow-list above. Attrs
-// nested inside a group (slog.Group(...)) are checked as a single top-level
-// key and dropped as a unit when disallowed, never recursed into — letting
-// an arbitrary key through one level down would defeat the point of a
-// closed list.
+// Handler is a slog.Handler that enforces the allow-list above. A group
+// (slog.Group(...)) is one top-level attribute and is never recursed into —
+// letting an arbitrary key through one level down would defeat the point of a
+// closed list. Under a disallowed key the group is dropped as a unit; under a
+// suffix-rule key ("agent_id") it is a KindGroup value, which
+// [suffixKindOK] drops the same way, with a warning naming the key.
 type Handler struct {
 	next slog.Handler
 }
@@ -175,8 +220,9 @@ type Handler struct {
 // filter. level sets the minimum level the underlying handler emits.
 //
 // Everything the handler writes also passes through [scrubWriter]: the
-// allow-list filters keys, and the "*_id" suffix rule lets any value
-// through under a key such as "principal_id", so a token's random part is
+// allow-list filters keys and the "*_id" suffix rule passes only a string or
+// an integer (after Resolve) under a key such as "principal_id", but the
+// string itself is not inspected, so a token's random part is
 // blanked on the rendered line — in a value at any depth, in the message,
 // under any allowed key — after slog has marshaled whatever it was given.
 // It recognizes the canonical text form only (one unbroken run); a token

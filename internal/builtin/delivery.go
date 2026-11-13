@@ -89,7 +89,7 @@ func OpenRunnerMaterial(j runnerproto.Job, recipient *ecdh.PrivateKey, env runne
 // fingerprint key, under VerifyKeyInfo, and never a value. Sealed stays empty
 // whatever the provider; the caller owns and wipes key.
 func SealRunnerKey(j runnerproto.Job, recipient []byte, key fingerprint.Key) (runnerproto.ValueEnvelope, error) {
-	if j.Validate() != nil || !j.NeedsFingerprintKey() || j.NeedsValue() {
+	if j.Validate() != nil || j.Action != runnerproto.ActionVerify {
 		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
 	}
 	parsed, err := fingerprint.Parse(j.ExpectedFingerprint)
@@ -118,7 +118,7 @@ func SealRunnerKey(j runnerproto.Job, recipient []byte, key fingerprint.Key) (ru
 // caller wipes the key. Errors never carry input.
 func OpenRunnerKey(j runnerproto.Job, recipient *ecdh.PrivateKey, env runnerproto.ValueEnvelope) (fingerprint.Key, error) {
 	parsed, err := fingerprint.Parse(j.ExpectedFingerprint)
-	if recipient == nil || err != nil || j.Validate() != nil || !j.NeedsFingerprintKey() || env.JobID != j.JobID || len(env.Sealed) != 0 {
+	if recipient == nil || err != nil || j.Validate() != nil || j.Action != runnerproto.ActionVerify || env.JobID != j.JobID || len(env.Sealed) != 0 {
 		return fingerprint.Key{}, ErrDeliveryMaterial
 	}
 	rawKey, err := openRunnerBytes(recipient, runnerproto.VerifyKeyInfo(j), env.SealedFingerprintKey)
@@ -180,4 +180,57 @@ func sealRunnerBytes(recipient, info, plain []byte) ([]byte, error) {
 		return nil, ErrDeliveryMaterial
 	}
 	return append(enc, cipher...), nil
+}
+
+// SealDiscoverKey seals the store's fingerprint key for a discover job under
+// DiscoverKeyInfo. A discover job carries no expected fingerprint, so the key
+// id travels inside the sealed payload (length byte, id, key bytes) and the
+// runner learns it only by opening. Sealed stays empty: no value. The caller
+// owns and wipes key.
+func SealDiscoverKey(j runnerproto.Job, recipient []byte, key fingerprint.Key) (runnerproto.ValueEnvelope, error) {
+	if j.Validate() != nil || j.Action != runnerproto.ActionDiscover {
+		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+	}
+	if _, err := fingerprint.Compute(key, secret.Value{}); err != nil {
+		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+	}
+	id := key.ID()
+	env := runnerproto.ValueEnvelope{JobID: j.JobID}
+	var err error
+	fingerprint.ExposeKey(key, func(raw []byte) {
+		if len(raw) != fingerprint.KeySize || id == "" || len(id) > 16 {
+			err = ErrDeliveryMaterial
+			return
+		}
+		plain := append([]byte{byte(len(id))}, id...) //nolint:gosec // G115: len(id) <= 16, checked above
+		plain = append(plain, raw...)
+		defer clear(plain)
+		env.SealedFingerprintKey, err = sealRunnerBytes(recipient, runnerproto.DiscoverKeyInfo(j), plain)
+	})
+	if err != nil {
+		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+	}
+	return env, nil
+}
+
+// OpenDiscoverKey is the runner's side of SealDiscoverKey. The caller wipes
+// the key. Errors never carry input.
+func OpenDiscoverKey(j runnerproto.Job, recipient *ecdh.PrivateKey, env runnerproto.ValueEnvelope) (fingerprint.Key, error) {
+	if recipient == nil || j.Validate() != nil || j.Action != runnerproto.ActionDiscover || env.JobID != j.JobID || len(env.Sealed) != 0 {
+		return fingerprint.Key{}, ErrDeliveryMaterial
+	}
+	plain, err := openRunnerBytes(recipient, runnerproto.DiscoverKeyInfo(j), env.SealedFingerprintKey)
+	defer clear(plain)
+	if err != nil || len(plain) < 1 {
+		return fingerprint.Key{}, ErrDeliveryMaterial
+	}
+	n := int(plain[0])
+	if n == 0 || len(plain) != 1+n+fingerprint.KeySize {
+		return fingerprint.Key{}, ErrDeliveryMaterial
+	}
+	key, err := fingerprint.NewKey(string(plain[1:1+n]), plain[1+n:])
+	if err != nil {
+		return fingerprint.Key{}, ErrDeliveryMaterial
+	}
+	return key, nil
 }

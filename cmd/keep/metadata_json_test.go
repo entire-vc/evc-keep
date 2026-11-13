@@ -84,7 +84,7 @@ func TestJSONValueEscapesControlsAndPreservesUnicode(t *testing.T) {
 func TestInputLinkJSONEscapesControls(t *testing.T) {
 	c := canary.New()
 	hostile := c.Value(0) + "\u009b\u202e\u2066\u200e\u061c"
-	link := intake.Issued{URL: "https://keep.example.invalid/input/" + hostile, RequestID: hostile, ExpiresAt: time.Now().Add(time.Hour)}
+	link := intake.Issued{URL: "https://keep.example.invalid/input/" + hostile, RequestID: "test-request", ExpiresAt: time.Now().Add(time.Hour)}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(link)

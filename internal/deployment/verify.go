@@ -102,6 +102,8 @@ type verifyCarrier struct {
 	state                   VerifyState
 	jobID                   uuid.UUID
 	failedStructure         bool
+	// class is set only for an item that fails before any job exists.
+	class runnerproto.ErrorClass
 }
 
 // SubmitVerify creates one verification: a signed-at-pull verify job per
@@ -200,8 +202,8 @@ func (r *Repo) SubmitVerify(ctx context.Context, in VerifyRequest) (VerifyReport
 		if c.state != VerifyPending {
 			completed = time.Now().UTC()
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO carrier_verification_items(verification_id,org_id,carrier_id,runner_id,job_id,state,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-			verificationID, in.OrgID, c.id, runner, job, string(c.state), completed); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO carrier_verification_items(verification_id,org_id,carrier_id,runner_id,job_id,state,error_class,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+			verificationID, in.OrgID, c.id, runner, job, string(c.state), string(c.class), completed); err != nil {
 			return VerifyReport{}, ErrUnavailable
 		}
 	}
@@ -245,10 +247,53 @@ func loadVerifyCarriers(ctx context.Context, tx pgx.Tx, org, secretID uuid.UUID)
 	if rows.Err() != nil {
 		return nil, ErrUnavailable
 	}
+	rows.Close()
+	for i := range out {
+		if err := nameSystemdCredential(ctx, tx, org, secretID, &out[i]); err != nil {
+			return nil, err
+		}
+	}
 	if len(out) > MaxVerifyCarriers {
 		return nil, ErrTooManyCarriers
 	}
 	return out, nil
+}
+
+// nameSystemdCredential gives a systemd-credential carrier the credential name
+// it was sealed under: the Unit of the newest completed deploy of this secret
+// to the same destination through a runner of the same host. The name is read
+// from the server's own delivery record, never from a request. With no such
+// deploy the item fails here, before any job, with a closed class.
+func nameSystemdCredential(ctx context.Context, tx pgx.Tx, org, secretID uuid.UUID, c *verifyCarrier) error {
+	if c.failedStructure || c.target.Kind != runnerproto.TargetSystemdCredential {
+		return nil
+	}
+	want, err := json.Marshal(struct {
+		Kind        runnerproto.TargetKind
+		Path, Field string
+	}{c.target.Kind, c.target.Path, c.target.Field})
+	if err != nil {
+		return ErrInvalidArgument
+	}
+	var raw []byte
+	err = tx.QueryRow(ctx, `SELECT dr.target FROM deployment_jobs j
+	 JOIN deployment_requests dr ON dr.org_id=j.org_id AND dr.id=j.deployment_request_id
+	 JOIN runners r ON r.org_id=j.org_id AND r.id=j.runner_id
+	 WHERE j.org_id=$1 AND j.secret_id=$2 AND r.host=$3 AND j.action='deploy' AND j.status='completed' AND dr.target @> $4::jsonb
+	 ORDER BY j.created_at DESC, j.id DESC LIMIT 1`, org, secretID, c.host, want).Scan(&raw)
+	var last runnerproto.Target
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return ErrUnavailable
+	case json.Unmarshal(raw, &last) != nil:
+	default:
+		c.target.Unit = last.Unit
+	}
+	if c.target.Unit == "" {
+		c.failedStructure, c.class = true, runnerproto.ErrClassInvalidJob
+	}
+	return nil
 }
 
 // liveRunner picks the most recently enrolled live runner of a host.

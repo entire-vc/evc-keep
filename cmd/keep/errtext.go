@@ -1,15 +1,21 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/entire-vc/evc-keep/internal/apperr"
+	"github.com/entire-vc/evc-keep/internal/reqid"
 )
 
 const (
 	maxErrTextRunes = 512
+	// maxRequestIDLen is not the request id policy (internal/reqid.Valid is);
+	// it stays because the pinned runner.go that scripts/ci-runner-response-proof.py
+	// overlays onto this tree still sizes a text cut with it.
 	maxRequestIDLen = 64
 	unexpectedValue = "(unexpected value)"
 )
@@ -58,16 +64,58 @@ func safeClass(c string) string {
 	return unexpectedValue
 }
 
-// safeRequestID passes a request id through only if it is short and made of
-// token characters; otherwise it is not printed.
+// safeRequestID passes a request id through only if it has the shape
+// internal/reqid accepts (1–36 of [A-Za-z0-9-], or empty); otherwise it is
+// not printed. The server's cap keeps a 52-character token random part out
+// of the echo, so the CLI must not accept anything the server would not.
 func safeRequestID(id string) string {
-	if len(id) > maxRequestIDLen {
+	if id != "" && !reqid.Valid(id) {
 		return unexpectedValue
 	}
-	for _, r := range id {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
-			return unexpectedValue
-		}
-	}
 	return id
+}
+
+// classMessages is the closed set of texts the CLI prints for a server error.
+// The wire message is untrusted even under a known class (it can carry any
+// printable text, a secret value included), so it never reaches the terminal:
+// the class alone selects a static local text (threat model §4.3).
+var classMessages = map[string]string{
+	"internal":                 "internal server error",
+	"invalid_argument":         "invalid argument",
+	"not_ready":                "server not ready",
+	"unauthenticated":          "authentication required",
+	"not_found":                "not found",
+	"secret_not_found":         "secret not found",
+	"override_locked":          "override locked",
+	"no_store_bound":           "no store bound",
+	"ambiguous_context":        "ambiguous context",
+	"already_exists":           "already exists",
+	"permission_denied":        "permission denied",
+	"rate_limited":             "rate limited",
+	"payload_too_large":        "payload too large",
+	"metadata_not_approved":    "metadata not approved",
+	"deployment_not_confirmed": "deployment not confirmed",
+	"revoke_pending":           "revoke pending",
+}
+
+// staticMessage returns the local text for a server error class; a class
+// outside the closed set gets the generic one.
+func staticMessage(class string) string {
+	if m, ok := classMessages[class]; ok {
+		return m
+	}
+	return "request failed"
+}
+
+// errBadResponse replaces a decoder error for a 2xx body: time.ParseError and
+// json.SyntaxError quote the body, so the cause is never wrapped.
+var errBadResponse = errors.New("parse server response: invalid body")
+
+// decodeBody is the one place a 2xx body is decoded into a result: a failure
+// is errBadResponse, never the decoder's own error.
+func decodeBody(body []byte, v any) error {
+	if err := json.Unmarshal(body, v); err != nil {
+		return errBadResponse
+	}
+	return nil
 }

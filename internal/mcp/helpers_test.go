@@ -80,7 +80,7 @@ func restFake(t *testing.T, hostile string, s *seen) *httptest.Server {
 		reply(w, 201, extra(map[string]any{"url": "https://keep.example/input/tok", "expires_at": time.Unix(3, 0).UTC(), "request_id": testRequest}))
 	}))
 	mux.HandleFunc("POST /v1/deployments", wrap(func(w http.ResponseWriter, r *http.Request) {
-		reply(w, 200, extra(map[string]any{"ok": true, "request_id": testRequest, "fingerprint": "kfp1:k:abcdefghijklmnop", "version": "v1"}))
+		reply(w, 200, extra(map[string]any{"ok": true, "request_id": testRequest, "fingerprint": "kfp1:k:abcdefghijklmnop", "version": "1"}))
 	}))
 	mux.HandleFunc("GET /v1/deployments/{id}", wrap(func(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, extra(map[string]any{"ok": true, "request_id": testRequest}))

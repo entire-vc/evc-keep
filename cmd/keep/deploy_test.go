@@ -182,7 +182,15 @@ func TestDeployCLIExitCodes(t *testing.T) {
 		"server-error":  {http.StatusBadRequest, `{"error_class":"invalid_argument","message":"deployment rejected: secret \"db-password\", target kind env-file","request_id":"req-9"}`, 1, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv := deployServer(t, func(w http.ResponseWriter) { w.WriteHeader(tc.status); _, _ = w.Write([]byte(tc.body)) }, func(http.ResponseWriter) {}, nil)
+			var serverURL string
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(strings.ReplaceAll(tc.body, "https://keep.example.test", serverURL)))
+			}))
+			serverURL = "https://" + srv.Listener.Addr().String()
+			srv.Start()
+			t.Cleanup(srv.Close)
+			tc.print = strings.ReplaceAll(tc.print, "https://keep.example.test", serverURL)
 			var out, errout bytes.Buffer
 			if code := run(deployArgs, nil, &out, &errout, deployEnv(srv.URL)); code != tc.want {
 				t.Fatalf("exit %d want %d: %s %s", code, tc.want, out.String(), errout.String())
