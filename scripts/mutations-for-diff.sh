@@ -59,6 +59,7 @@ loghygiene: internal/store internal/obs cmd/keep-server
 public-hygiene: scripts/check-public-hygiene
 providertest: pkg/provider
 pgscratch: internal/testutil/pgscratch test/security
+upgrade-rollback: docs/deploy.md scripts/check-upgrade-rollback.sh cmd/keep-server/app
 runnerproto: pkg/runnerproto
 runner-enroll: internal/builtin internal/registry internal/enrolltoken internal/runner internal/mtls internal/api internal/config internal/store cmd/keep-server cmd/keep-runner cmd/keep/
 sealer: internal/builtin/sealer

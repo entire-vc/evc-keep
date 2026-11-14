@@ -89,11 +89,22 @@ func validDeployMetadata(r deployResult, serverURL string) bool {
 		base, err := url.Parse(serverURL)
 		// An exact canonical link excludes userinfo, query, fragment, encoded
 		// path aliases and alternate ports without echoing a URL parse error.
-		if err != nil || base.Host == "" || a.URL != "https://"+base.Host+"/console/approvals/"+a.ID {
+		if err != nil || base.Host == "" || a.URL != approvalScheme(base)+"://"+base.Host+"/console/approvals/"+a.ID {
 			return false
 		}
 	}
 	return true
+}
+
+// approvalScheme is the scheme an approval link must carry: https, except that
+// a server reached over plain http on a loopback host (the quickstart, where
+// KEEP_PUBLIC_URL is http) links to itself over http. The loopback test is the
+// one requireSecureURL applies; an https server never accepts an http link.
+func approvalScheme(server *url.URL) string {
+	if server.Scheme == "http" && isLoopbackHost(server.Hostname()) {
+		return "http"
+	}
+	return "https"
 }
 
 // deployHealthValid accepts an absent healthcheck or one whose status is

@@ -13,12 +13,40 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 doc=$root/docs/quickstart.md
 tmp=$(mktemp -d)
-trap 'find "$tmp" -delete' EXIT INT TERM
+
+# The runs write the CLI's login state and clean the host between runs. They run
+# with a HOME of their own, so the developer's real ~/.config/keep and
+# ~/keep-quickstart are neither read nor removed. The toolchain caches stay where
+# they were, so nothing is downloaded again. A fingerprint of the real config
+# directories (HOME's and the inherited XDG_CONFIG_HOME's; names, sizes and checksums,
+# compared in memory, never printed) is
+# taken before and checked after: the script fails if anything there changed.
+export GOCACHE=${GOCACHE:-$(go env GOCACHE)} GOMODCACHE=${GOMODCACHE:-$(go env GOMODCACHE)}
+real_home=$HOME
+real_xdg=${XDG_CONFIG_HOME:-}
+real_state() { # the CLI's config directories of the real user: $HOME/.config/keep and the inherited XDG one
+	local d
+	for d in "$real_home/.config/keep" ${real_xdg:+"$real_xdg/keep"}; do
+		if [ -d "$d" ]; then printf '%s\n' "dir $d"; find "$d" -type f -exec cksum {} + | sort; else printf '%s\n' "none $d"; fi
+	done
+}
+real_before=$(real_state)
+mkdir -p "$tmp/home"
+export HOME=$tmp/home
+# An inherited XDG_CONFIG_HOME wins over HOME for the CLI (cmd/keep/token.go):
+# it must not point out of the temporary tree.
+unset XDG_CONFIG_HOME
+cleanup_run() {
+	HOME=$real_home
+	find "$tmp" -delete 2>/dev/null || true
+}
+trap cleanup_run EXIT INT TERM
 
 export PGHOST=${PGHOST:-127.0.0.1} PGUSER=postgres PGPASSWORD=keep-quickstart
 
 reset() {
 	find "$HOME/keep-quickstart" -delete 2>/dev/null || true
+	find "$HOME/.config" -delete 2>/dev/null || true
 	find /run/qs-systemctl -delete 2>/dev/null || true
 	find /etc/systemd/system -maxdepth 1 -name keep-quickstart-consumer.service -delete 2>/dev/null || true
 	pkill -x keep-server 2>/dev/null || true
@@ -65,6 +93,14 @@ mutant unmarked-block 'an sh block with no marker' \
 	's = s.replace("<!-- quickstart: list-meta -->\n", "")'
 mutant deleted-step 'lost the step deploy' \
 	'i = s.index("<!-- quickstart: deploy -->"); j = s.index("<!-- quickstart: target -->"); s = s[:i] + s[j:]'
+# The outside-policy step: a deploy past the policy must wait for approval (exit
+# 3), not be accepted, and must not write the file.
+mutant outside-policy-exit-not-3 'step deploy-outside-policy exited non-zero' \
+	's = s.replace("--wait 5s --json > \"$QS/outside.json\"", "--wait 5s --json --no-such-flag > \"$QS/outside.json\"")'
+mutant outside-policy-file-written 'step deploy-outside-policy exited non-zero' \
+	's = s.replace("[ ! -e \"$QS/outside.key\" ]", "touch \"$QS/outside.key\"; [ ! -e \"$QS/outside.key\" ]")'
+mutant outside-policy-deleted 'lost the step deploy-outside-policy' \
+	'i = s.index("<!-- quickstart: deploy-outside-policy -->"); j = s.index("## 15. The audit journal"); s = s[:i] + s[j:]'
 mutant unhealthy-consumer 'step deploy exited non-zero' \
 	's = s.replace("\"body_marker\": \"keep-quickstart-ok\"", "\"body_marker\": \"never-served\"")'
 mutant value-on-stdout 'value canary found in' \
@@ -110,6 +146,22 @@ mutant root-key-on-stdout 'root.key found in' \
 	"$LINE"'s = s.replace(line, line + "; cat \"$QS/root.key\"")'
 mutant admin-token-on-stdout 'admin.token found in' \
 	"$LINE"'s = s.replace(line, line + "; cat \"$QS/admin.token\"")'
+# The CLI's config directory (login state) is inside the scan: only the token
+# file, only the admin token. Anything else there is a leak.
+mutant config-dir-other-file 'value canary found in' \
+	"$LINE"'s = s.replace(line, "cp \"$QS/target/demo.key\" \"$XDG_CONFIG_HOME/keep/other\"; " + line)'
+# Appended after the last keep call: an earlier append would break the token and
+# fail the audit step for another reason.
+mutant db-pw-in-cli-token 'db.pw found in' \
+	's = s.replace("\nkeep audit verify\n", "\nkeep audit verify\ncat \"$QS/db.pw\" >> \"$XDG_CONFIG_HOME/keep/token\"\n")'
+mutant admin-token-in-cli-other-file 'admin.token found in' \
+	"$LINE"'s = s.replace(line, "cp \"$QS/admin.token\" \"$XDG_CONFIG_HOME/keep/token.bak\"; " + line)'
+mutant login-to-real-home 'QS_CLI_TOKEN_FILE does not hold' \
+	's = s.replace("export XDG_CONFIG_HOME=\"$QS/config\"\n", "")'
+# A copy of the login state outside the run directory (the run's own HOME, not
+# under $QS) is found too: the scan also covers $HOME/.config/keep when it exists.
+mutant admin-token-in-real-home 'admin.token found in' \
+	"$LINE"'s = s.replace(line, "mkdir -p \"$HOME/.config/keep\"; cp \"$QS/admin.token\" \"$HOME/.config/keep/token\"; " + line)'
 # The page itself: modes outside the allowlists.
 mutant ci-skip-on-a-real-step 'only clone, database and drop-database may be' \
 	's = s.replace("<!-- quickstart: list-meta -->", "<!-- quickstart: list-meta ci-skip -->")'
@@ -126,5 +178,6 @@ mutant deleted-restart-permission 'lost the step restart-permission' \
 	'i = s.index("<!-- quickstart: restart-permission -->"); j = s.index("## 12. The host policy"); s = s[:i] + s[j:]'
 
 reset
+[ "$(real_state)" = "$real_before" ] || { echo "FAIL quickstart red runs: the real ~/.config/keep changed during the run" >&2; failed=1; }
 [ "$failed" -eq 0 ] || { echo "FAIL quickstart red runs" >&2; exit 1; }
 echo "PASS quickstart red runs"

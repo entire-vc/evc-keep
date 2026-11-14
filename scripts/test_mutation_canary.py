@@ -254,7 +254,7 @@ class GuardTests(unittest.TestCase):
         import yaml
         config = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
         commands = expanded_selftests_script(config)
-        self.assertEqual(len(commands), 15)
+        self.assertEqual(len(commands), 16)
         self.assertEqual(commands[9],
                          "KEEP_JOB_CACHE_REAL_TIMEOUT=1 python3 scripts/test_builtin_job_cache.py")
         for script in (["true"], ["python3 scripts/dispatch_ci_selftests.py"],
@@ -609,6 +609,12 @@ class GuardTests(unittest.TestCase):
                     [{k: v for k, v in sv.items() if k != "command"} for sv in current[key]["services"]],
                     [{k: v for k, v in sv.items() if k != "command"} for sv in previous[key]["services"]], key)
                 self.assertEqual(service_commands[key], [fast], key)
+            elif key == "upgrade-rollback-redrun":
+                # Renamed to the mutation framework's convention and moved from
+                # a four-mutant MR job to a post-review job that runs all ten
+                # (pinned by test_ci_config.py).
+                self.assertNotIn(key, current)
+                self.assertIn("upgrade-rollback-mutations", current)
             elif key == "mutation-select-shadow":
                 # The shadow report became the selection itself: mutation-select,
                 # with the gate and trigger beside it (pinned by test_ci_config.py).
@@ -642,7 +648,10 @@ class GuardTests(unittest.TestCase):
         # whose artifact tenancy-mutations depends on.
         old_fmt, new_fmt = previous["fmt-vet"]["script"], current["fmt-vet"]["script"]
         moved = current.get("ci-selftests", {}).get("script", [])
-        self.assertEqual([l for l in old_fmt if l not in new_fmt and l not in moved], [])
+        # The only commands allowed to disappear: the self-tests of the MR
+        # mutation gate scripts, deleted together with those scripts.
+        retired = {"python3 scripts/test_ci_play_gate.py", "python3 scripts/test_mr_mutation_gate.py"}
+        self.assertEqual([l for l in old_fmt if l not in new_fmt and l not in moved and l not in retired], [])
         self.assertEqual([l for l in old_fmt if l in new_fmt], [l for l in new_fmt if l in old_fmt])
         self.assertIn("python3 scripts/mutation-canary.py prepare", new_fmt)
         self.assertEqual(current["fmt-vet"]["artifacts"], previous["fmt-vet"]["artifacts"])

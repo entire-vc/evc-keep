@@ -114,7 +114,7 @@ class Uncertainty(unittest.TestCase):
     def test_shared_ci_paths_select_everything(self):
         for f in (".gitlab-ci.yml", ".gitlab/ci/x.yml", ".golangci.yml", "go.mod", "go.sum", "scripts/mutation-helpers.sh",
                   "scripts/mutation-select.py", "scripts/mutation-select.map", "scripts/generate-mutation-pipeline.py",
-                  "scripts/mutation-range.py", "scripts/check-mr-mutation-gate.py", "internal/zonecheck/plaintext_api.txt"):
+                  "scripts/mutation-range.py", "internal/zonecheck/plaintext_api.txt"):
             rep = run([f])[0]
             self.assertTrue(rep["all"] and rep["jobs"]["all"], f)
             self.assertEqual(jobs(rep), set(ms.post_review_jobs(ms.Layout((ROOT / ".gitlab-ci.yml").read_text()).config)), f)
@@ -148,8 +148,8 @@ class Uncertainty(unittest.TestCase):
 
     def test_non_go_paths_select_nothing(self):
         # Paths no mutation suite reads: no family, not ALL.
-        for files in (["Dockerfile"], ["api/openapi.yaml"], ["docs/deploy.md"], ["LICENSE"], ["CONTRIBUTING.md"],
-                      ["Dockerfile", "api/openapi.yaml", "docs/deploy.md", "LICENSE", "README.md"]):
+        for files in (["Dockerfile"], ["api/openapi.yaml"], ["docs/quickstart.md"], ["LICENSE"], ["CONTRIBUTING.md"],
+                      ["Dockerfile", "api/openapi.yaml", "docs/quickstart.md", "LICENSE", "README.md"]):
             rep, sel, skip = run(files)
             self.assertFalse(rep["all"], (files, rep.get("reason")))
             self.assertEqual((sel, jobs(rep)), (set(), set()), files)
@@ -459,7 +459,7 @@ class ScriptsAndJobs(unittest.TestCase):
     def test_scripts_no_mutation_suite_runs_select_nothing(self):
         for f in ("scripts/check-core-shard-balance.sh", "scripts/core-shard.sh", "scripts/core-shard-weights.txt",
                   "scripts/test_ci_config.py", "scripts/check-ci-dry-run.py", "scripts/check-no-silent-skip-selftest.sh",
-                  "scripts/generate-test-pipeline.py", "scripts/ci-play-mutation-jobs.sh", "scripts/README.md",
+                  "scripts/generate-test-pipeline.py", "scripts/README.md",
                   "scripts/new-tool.sh"):
             rep, sel, _ = run([f])
             self.assertFalse(rep["all"], (f, rep.get("reason")))
@@ -927,8 +927,9 @@ class Receipts(unittest.TestCase):
         # a test file in the package counts like its code
         test_file = next(f for f in sorted(self.files) if f.startswith("internal/builtin/sealer/") and f.endswith("_test.go"))
         self.assertIn("sealer-mutations", changed(test_file))
-        # documentation changes nothing
-        self.assertEqual(changed("docs/deploy.md"), set())
+        # documentation changes nothing, except the one the upgrade check executes
+        self.assertEqual(changed("docs/quickstart.md"), set())
+        self.assertEqual(changed("docs/deploy.md"), {"upgrade-rollback-mutations"})
         # the job definition is an input
         config = copy.deepcopy(self.config)
         config["sealer-mutations"]["timeout"] = "1m"

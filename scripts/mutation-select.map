@@ -92,6 +92,7 @@ script intake-receiver roots=internal/builtin
 script intake-service  roots=cmd/keep,cmd/keep-server,internal/api,internal/builtin,internal/builtin/sealer,internal/catalog,internal/intake/...,internal/config,internal/metatext,internal/tenancy,internal/store,web/intake
 script metadata        roots=internal/api,internal/catalog,internal/metatext,internal/tenancy
 script mcp             roots=internal/mcp
+script upgrade-rollback roots=cmd/keep-server/app
 script pgscratch       roots=internal/testutil/pgscratch,test/security
 
 # ── links imports do not show ────────────────────────────────────────────
@@ -109,6 +110,8 @@ path plugins/mesh/cmd/keep-lane-poller/** -> script lanepoller,mesh-plugin,mesh-
 path plugins/mesh/** -> script mesh-plugin,mesh-rotation-e2e,meshgate
 
 # ── cannot change a mutation result ──────────────────────────────────────
+# The executable docs check and its red runs read these two.
+path docs/deploy.md -> script upgrade-rollback
 path **/*.md -> inert
 path docs/** -> inert
 path LICENSE -> inert

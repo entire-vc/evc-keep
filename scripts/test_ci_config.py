@@ -31,7 +31,7 @@ MUTATIONS = {"public-hygiene", "execpolicy", "sealer", "fingerprint", "runnerpro
              "rotation-wiring",
              "carrier-verify", "pgscratch", "mesh", "mesh-ui", "meshgate", "mesh-hierarchy", "mesh-metadata",
              "keylevel-reconcile", "mesh-plugin", "mesh-rotation-e2e", "bootstrap-org",
-             "lanepoller", "listening", "console-exec-predicate", "transfer", "transfer-profile"}
+             "lanepoller", "listening", "console-exec-predicate", "transfer", "transfer-profile", "upgrade-rollback"}
 # The mutation batch (a schedule on main every 4 hours) runs only the jobs
 # check_mutation_batch names: every other job opens its rules with this one.
 BATCH_IF = '$KEEP_MUTATION_BATCH == "true"'
@@ -601,7 +601,6 @@ def check_config(config, driver):
     generator = config["fmt-vet"]
     assert generator["variables"]["GIT_DEPTH"] == 0
     assert "python3 scripts/test_ci_config.py" in generator["script"]
-    assert "python3 scripts/test_ci_play_gate.py" in generator["script"]
     assert "python3 scripts/test_mutation_canary.py" in generator["script"]
     assert "./scripts/check-lint-directives.sh" in generator["script"]
     assert "go vet ./..." in generator["script"]
@@ -637,6 +636,11 @@ def check_config(config, driver):
     assert dispatch.get("timeout") == "20m"
     assert dispatch["script"] == ["timeout -k 10s 19m ./scripts/check-dispatch-mutations.sh"]
     assert dispatch.get("when", "on_success") == "on_success"
+    rollback = config["upgrade-rollback-mutations"]
+    assert rollback["stage"] == "post-review"
+    assert rollback["script"] == ["./scripts/check-upgrade-rollback-mutations.sh"]
+    assert "REDRUN_ONLY" not in rollback.get("variables", {}), "the job must run all mutants"
+    assert rollback["rules"] == MUTATION_RULES
     carriers = config["carriers-mutations"]
     assert carriers.get("parallel") == 4
     assert carriers.get("timeout") == "20m"
@@ -665,6 +669,7 @@ SELFTESTS = [
     "python3 scripts/test_dispatch_baseline_diagnostics.py",
     "python3 scripts/test_mutation_select.py",
     "./scripts/check-mutation-select-redrun.sh",
+    "python3 scripts/test_intake_hpke_mutant_diagnostics.py",
 ]
 SELFTESTS_APK = "apk add --no-cache bash git python3 py3-yaml perl tar"
 SCAN_ONLY_NEVER = {"if": '$KEEP_BRANCH_PUSH_SCAN_ONLY == "true"', "when": "never"}
@@ -735,7 +740,8 @@ def check_selftests_job(config):
     command_names = ("mutation_shards", "carriers", "intake_baseline", "intake_mutant",
                      "catalog_mutant", "runnerproto", "tenancy", "cli_witnesses",
                      "approvals", "builtin_job_cache", "baseline_diag", "w3_stubs",
-                     "dispatch_baseline", "mutation_select", "mutation_select_redrun")
+                     "dispatch_baseline", "mutation_select", "mutation_select_redrun",
+                     "intake_hpke_mutant")
     expected_commands = []
     for name, command in zip(command_names, SELFTESTS, strict=True):
         words = shlex.split(command)
@@ -1272,6 +1278,21 @@ class CIConfig(unittest.TestCase):
         backtest = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(backtest)
         return backtest
+
+    def test_core_go_test_deadline_is_15m_under_shard_and_job_limits(self):
+        """go test's per-package deadline for core shards is >= 15m, with the
+        27m shard limit and the 30m job limit both above it by >= 5m."""
+        child = yaml.safe_load((ROOT / ".gitlab/ci/full-tests.yml").read_text())
+        script = "\n".join(str(x) for x in child["test"]["script"])
+        m = re.search(r"timeout (\d+) env [^\n]*KEEP_GO_TEST_TIMEOUT=(\d+)m ", script)
+        self.assertIsNotNone(m, "core shard must set KEEP_GO_TEST_TIMEOUT")
+        shard_s, go_min = int(m.group(1)), int(m.group(2))
+        job_min = int(str(child["test"]["timeout"]).removesuffix("m"))
+        self.assertGreaterEqual(go_min, 15)
+        self.assertGreaterEqual(shard_s, go_min * 60 + 300)
+        self.assertGreaterEqual(job_min, go_min + 5)
+        wrapper = (ROOT / "scripts/check-no-silent-skip.sh").read_text()
+        self.assertIn('-timeout "${KEEP_GO_TEST_TIMEOUT:-600s}"', wrapper)
 
     def test_core_shard_timeout_marker_for_gnu_and_busybox_codes(self):
         child = yaml.safe_load((ROOT / ".gitlab/ci/full-tests.yml").read_text())

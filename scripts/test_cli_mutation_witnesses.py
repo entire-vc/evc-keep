@@ -83,7 +83,8 @@ sys.exit(1)
   # plus the four shared-client response cap mutants (unbounded read, size check removed, off-by-one, missing extra byte);
   # debug-traces-response-body is re-anchored on the capped read line,
   # plus runner-policy-error-echoed now echoing the -policy path (readPolicyFile's error is already static).
-  self.assertEqual(hashlib.sha256(new.split('# AC red run (1):')[1].encode()).hexdigest(),'7e64c77e71bf43dd04d42f1e6fedd6d7f9389c3c4f0f71f41844c08e335089ee')
+  # deploy-approval-url-unchecked re-anchored on approvalScheme(base), plus three approval scheme metadata mutants (https only, either scheme, loopback predicate dropped).
+  self.assertEqual(hashlib.sha256(new.split('# AC red run (1):')[1].encode()).hexdigest(),'1608eeaa227a3fcef73a243d5c1fb320b3175f5effbf728577532f56cb791b3a')
   names=re.findall(r'^mutate ([a-z0-9-]+) ',new,re.M);self.assertEqual(len(names),106)
   tests=set()
   for f in (ROOT/'cmd/keep').glob('*test.go'):tests.update(re.findall(r'^func (Test[A-Za-z0-9_]+)\(',f.read_text(),re.M))

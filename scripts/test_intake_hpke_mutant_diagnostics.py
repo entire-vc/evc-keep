@@ -16,9 +16,12 @@ class HpkeDiagnostics(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'scripts/lib').mkdir(parents=True)
-            for name in ('scripts/lib/gocache.sh', 'scripts/temp-workspace.sh',
-                         'scripts/intake_mutant_diagnostics.py', 'scripts/check-intake-browser.mjs',
-                         'scripts/lib/chromium-startup.mjs', 'scripts/lib/chromium-profile.mjs'):
+            # Everything the real gate sources or imports; a list of names goes stale
+            # (mutation-helpers.sh was added later and the probe died before the gate ran).
+            names = ['scripts/lib/gocache.sh', 'scripts/temp-workspace.sh', 'scripts/mutation-helpers.sh',
+                     'scripts/intake_mutant_diagnostics.py', 'scripts/check-intake-browser.mjs']
+            names += sorted(str(p.relative_to(ROOT)) for p in (ROOT / 'scripts/lib').glob('*.mjs'))
+            for name in names:
                 shutil.copyfile(ROOT / name, root / name)
             (root / 'web/intake/testdata').mkdir(parents=True)
             shutil.copyfile(ROOT / 'web/intake/testdata/rfc9180-x25519-aes256.json',

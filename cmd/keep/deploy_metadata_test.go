@@ -42,7 +42,7 @@ func TestDeployCLIMetadataNoLeak(t *testing.T) {
 						r.Version = v
 					case "approval.id":
 						r.Approval.ID = v
-						r.Approval.URL = "https://" + strings.TrimPrefix(server, "http://") + "/console/approvals/" + v
+						r.Approval.URL = server + "/console/approvals/" + v
 					case "approval.status":
 						r.Approval.Status = v
 					case "approval.url":
@@ -78,14 +78,15 @@ func TestDeployCLIMetadataShapes(t *testing.T) {
 		"approval-status-case":   func(r *deployResult, _ string) { r.Approval.Status = "Requested" },
 		"approval-status-prefix": func(r *deployResult, _ string) { r.Approval.Status = "requested-extra" },
 		"url-empty":              func(r *deployResult, _ string) { r.Approval.URL = "" },
-		"url-http": func(r *deployResult, _ string) {
-			r.Approval.URL = strings.Replace(r.Approval.URL, "https:", "http:", 1)
+		// The server is plain http on loopback, so an https link is a scheme mismatch.
+		"url-https-on-http-server": func(r *deployResult, _ string) {
+			r.Approval.URL = strings.Replace(r.Approval.URL, "http:", "https:", 1)
 		},
 		"url-relative":     func(r *deployResult, _ string) { r.Approval.URL = "/console/approvals/a-1" },
 		"url-foreign-host": func(r *deployResult, _ string) { r.Approval.URL = "https://other.example.test/console/approvals/a-1" },
 		"url-port":         func(r *deployResult, _ string) { r.Approval.URL = "https://127.0.0.1:1/console/approvals/a-1" },
 		"url-userinfo": func(r *deployResult, _ string) {
-			r.Approval.URL = strings.Replace(r.Approval.URL, "https://", "https://user@", 1)
+			r.Approval.URL = strings.Replace(r.Approval.URL, "http://", "http://user@", 1)
 		},
 		"url-query":        func(r *deployResult, _ string) { r.Approval.URL += "?x=1" },
 		"url-fragment":     func(r *deployResult, _ string) { r.Approval.URL += "#x" },
@@ -102,7 +103,7 @@ func TestDeployCLIMetadataShapes(t *testing.T) {
 			exerciseDeployMetadata(t, func(r *deployResult, server string) {
 				r.Approval.Status = status
 				r.Approval.ID = "01900000-0000-7000-8000-000000000001"
-				r.Approval.URL = "https://" + strings.TrimPrefix(server, "http://") + "/console/approvals/" + r.Approval.ID
+				r.Approval.URL = server + "/console/approvals/" + r.Approval.ID
 				r.Version = "9223372036854775807"
 			}, true, canary.New(), false)
 		})
@@ -136,7 +137,7 @@ func exerciseDeployMetadata(t *testing.T, change func(*deployResult, string), va
 				if (polling && (req.Method != http.MethodGet || req.URL.Path != "/v1/deployments/req-1")) || (!polling && req.Method != http.MethodPost) {
 					t.Error("unexpected deployment request")
 				}
-				res := deployResult{OK: true, RequestID: "req-1", Fingerprint: "kfp1:k1:abcdefghijklmnop", Version: "7", Approval: &deployApproval{ID: "a-1", Status: "requested", URL: "https://" + strings.TrimPrefix(serverURL, "http://") + "/console/approvals/a-1"}}
+				res := deployResult{OK: true, RequestID: "req-1", Fingerprint: "kfp1:k1:abcdefghijklmnop", Version: "7", Approval: &deployApproval{ID: "a-1", Status: "requested", URL: serverURL + "/console/approvals/a-1"}}
 				if change != nil {
 					change(&res, serverURL)
 				}
@@ -207,5 +208,40 @@ func exerciseDeployMetadata(t *testing.T, change func(*deployResult, string), va
 				}
 			}
 		}
+	}
+}
+
+// The approval link must carry the server's own scheme: https, or http only
+// when the server itself is plain http on a loopback host (the quickstart).
+func TestValidDeployMetadataApprovalScheme(t *testing.T) {
+	const id = "01900000-0000-7000-8000-000000000001"
+	link := func(scheme, host string) string { return scheme + "://" + host + "/console/approvals/" + id }
+	cases := []struct {
+		name   string
+		server string
+		url    string
+		want   bool
+	}{
+		{"http-ipv4-loopback", "http://127.0.0.1:8080", link("http", "127.0.0.1:8080"), true},
+		{"http-localhost", "http://localhost:8080", link("http", "localhost:8080"), true},
+		{"http-ipv6-loopback", "http://[::1]:8080", link("http", "[::1]:8080"), true},
+		{"https-server-https-link", "https://keep.example.test", link("https", "keep.example.test"), true},
+		{"https-server-http-link-downgrade", "https://keep.example.test", link("http", "keep.example.test"), false},
+		{"https-loopback-server-http-link", "https://127.0.0.1:8443", link("http", "127.0.0.1:8443"), false},
+		{"http-loopback-other-host", "http://127.0.0.1:8080", link("http", "127.0.0.2:8080"), false},
+		{"http-loopback-other-port", "http://127.0.0.1:8080", link("http", "127.0.0.1:8081"), false},
+		{"http-loopback-https-link", "http://127.0.0.1:8080", link("https", "127.0.0.1:8080"), false},
+		{"http-loopback-userinfo", "http://127.0.0.1:8080", "http://u@127.0.0.1:8080/console/approvals/" + id, false},
+		{"http-loopback-query", "http://127.0.0.1:8080", link("http", "127.0.0.1:8080") + "?x=1", false},
+		{"http-loopback-fragment", "http://127.0.0.1:8080", link("http", "127.0.0.1:8080") + "#x", false},
+		{"http-non-loopback-server-http-link", "http://keep.example.test", link("http", "keep.example.test"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := deployResult{Approval: &deployApproval{ID: id, Status: "requested", URL: c.url}}
+			if got := validDeployMetadata(r, c.server); got != c.want {
+				t.Errorf("validDeployMetadata(server %s) = %v, want %v", c.server, got, c.want)
+			}
+		})
 	}
 }

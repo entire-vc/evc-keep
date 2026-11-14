@@ -187,7 +187,7 @@ func TestDeployCLIExitCodes(t *testing.T) {
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(strings.ReplaceAll(tc.body, "https://keep.example.test", serverURL)))
 			}))
-			serverURL = "https://" + srv.Listener.Addr().String()
+			serverURL = "http://" + srv.Listener.Addr().String()
 			srv.Start()
 			t.Cleanup(srv.Close)
 			tc.print = strings.ReplaceAll(tc.print, "https://keep.example.test", serverURL)
@@ -212,6 +212,40 @@ func TestDeployCLIExitCodes(t *testing.T) {
 	args := append(append([]string{}, deployArgs[:len(deployArgs)-2]...), "--wait", "50ms")
 	if code := run(args, nil, &bytes.Buffer{}, &bytes.Buffer{}, deployEnv(srv.URL)); code != 4 {
 		t.Fatalf("pending exit %d", code)
+	}
+}
+
+// Quickstart shape: the server is plain http on loopback and links to itself
+// over http. The answer is exit 3 with the closed approval metadata, nothing else.
+func TestDeployCLIApprovalOnHTTPLoopbackServer(t *testing.T) {
+	deployPollEvery = 10 * time.Millisecond
+	const id = "01900000-0000-7000-8000-000000000001"
+	var serverURL string
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"ok":false,"request_id":"req-1","approval":{"id":"` + id + `","status":"requested","url":"` + serverURL + `/console/approvals/` + id + `"}}`))
+	}))
+	serverURL = "http://" + srv.Listener.Addr().String()
+	srv.Start()
+	t.Cleanup(srv.Close)
+	var out, errout bytes.Buffer
+	args := append(append([]string{}, deployArgs...), "--json")
+	if code := run(args, nil, &out, &errout, deployEnv(serverURL)); code != exitDeployApproval {
+		t.Fatalf("exit %d want %d: %s %s", code, exitDeployApproval, out.String(), errout.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v", err)
+	}
+	ap, _ := got["approval"].(map[string]any)
+	if ap["id"] != id || ap["status"] != "requested" || ap["url"] != serverURL+"/console/approvals/"+id || len(ap) != 3 {
+		t.Fatalf("approval metadata wrong: %v", ap)
+	}
+	closed := map[string]bool{"ok": true, "request_id": true, "approval": true, "error_class": true, "fingerprint": true, "version": true, "healthcheck": true, "message": true}
+	for k := range got {
+		if !closed[k] {
+			t.Errorf("field %q outside the closed list", k)
+		}
 	}
 }
 

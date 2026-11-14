@@ -134,6 +134,16 @@ func loadWatches(t *testing.T, partialRun bool) []watch {
 		if x.name == "db.pw" {
 			w.allowed[filepath.Clean(os.Getenv("QS_SERVER_ENV"))] = true
 		}
+		if x.name == "admin.token" {
+			// `keep login` stores the token in the CLI's config directory, which
+			// the run keeps inside the scanned tree: this one file, this one value.
+			if cli := os.Getenv("QS_CLI_TOKEN_FILE"); cli != "" {
+				w.allowed[filepath.Clean(cli)] = true
+				if cb, cerr := os.ReadFile(cli); !partialRun && (cerr != nil || strings.TrimSpace(string(cb)) != v) { //nolint:gosec // G304: the check's own file
+					t.Errorf("QS_CLI_TOKEN_FILE does not hold the admin token: login did not write inside the scanned tree (positive control)")
+				}
+			}
+		}
 		if !w.found(string(b)) || !w.found("x"+v+"y") {
 			t.Errorf("%s: detector is blind (positive control)", x.name)
 		}

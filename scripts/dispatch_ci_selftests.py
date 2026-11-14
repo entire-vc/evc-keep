@@ -23,6 +23,7 @@ COMMANDS = (
     ("dispatch_baseline", ("python3", "scripts/test_dispatch_baseline_diagnostics.py"), {}),
     ("mutation_select", ("python3", "scripts/test_mutation_select.py"), {}),
     ("mutation_select_redrun", ("./scripts/check-mutation-select-redrun.sh",), {}),
+    ("intake_hpke_mutant", ("python3", "scripts/test_intake_hpke_mutant_diagnostics.py"), {}),
 )
 NAMES = tuple(row[0] for row in COMMANDS)
 FULL = frozenset(range(len(COMMANDS)))
@@ -36,6 +37,7 @@ SCRIPT_TEST_MAP = {
     "scripts/test_carriers_mutations.py": {1},
     "scripts/test_intake_baseline_diagnostics.py": {2},
     "scripts/test_intake_mutant_diagnostics.py": {3},
+    "scripts/test_intake_hpke_mutant_diagnostics.py": {15},
     "scripts/test_catalog_mutant_diagnostics.py": {4},
     "scripts/test_runnerproto_mutations.py": {5},
     "scripts/test_tenancy_mutations.py": {6},

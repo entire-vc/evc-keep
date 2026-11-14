@@ -7,8 +7,10 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+. "$root/scripts/lib/gocache.sh"
+. "$root/scripts/temp-workspace.sh"
+. "$root/scripts/mutation-helpers.sh" # apply-only mode (MUTATION_APPLY_ONLY=1) on merge requests
+temp_workspace
 fail=0
 
 run() { # label doc script -> output in $work/out, status returned
@@ -17,7 +19,7 @@ run() { # label doc script -> output in $work/out, status returned
 
 # REDRUN_ONLY=name[,name] runs only those mutants (and skips the baseline), for development.
 only=${REDRUN_ONLY:-} # one mutant name or a comma list
-if [ -n "$only" ]; then
+if [ -n "$only" ] || mutation_apply_only; then
 	:
 elif run baseline "$root/docs/deploy.md" "$root/scripts/check-upgrade-rollback.sh"; then
 	echo "ok   baseline: the unmutated check passes"
@@ -52,6 +54,7 @@ edit_script() {
 expect_red() {
 	local name=$1 doc=$2 script=$3 msg=$4
 	case ",$only," in ,,|*",$name,"*) ;; *) return ;; esac
+	mutation_applied "$name" && return
 	if run "$name" "$doc" "$script"; then
 		echo "FAIL $name: the check stayed green"; fail=1
 	elif grep -q -F -- "$msg" "$work/out"; then
@@ -73,4 +76,4 @@ edit_script canary-in-output 'audit0=$(audit_count)' 'echo "leak $(cat "$work/st
 edit_script password-in-output 'audit0=$(audit_count)' 'echo "leak $pw"; audit0=$(audit_count)' 'carries the database password or the root key'
 
 [ "$fail" -eq 0 ] || exit 1
-echo "PASS check-upgrade-rollback-redrun"
+echo "PASS check-upgrade-rollback-mutations"

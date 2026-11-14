@@ -408,8 +408,21 @@ metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy
 metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy-approval-status-unchecked deploy.go \
     'switch a.Status {' 'switch "requested" {'
 metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy-approval-url-unchecked deploy.go \
-    'err != nil || base.Host == "" || a.URL != "https://"+base.Host+"/console/approvals/"+a.ID' \
-    'false && (err != nil || base.Host == "" || a.URL != "https://"+base.Host+"/console/approvals/"+a.ID)'
+    'err != nil || base.Host == "" || a.URL != approvalScheme(base)+"://"+base.Host+"/console/approvals/"+a.ID' \
+    'false && (err != nil || base.Host == "" || a.URL != approvalScheme(base)+"://"+base.Host+"/console/approvals/"+a.ID)'
+# The approval link scheme: https always (the quickstart's http loopback link
+# is refused again), either scheme accepted (an http link from an https server
+# is a downgrade), and the loopback predicate dropped (any http server may
+# link over http).
+metadata_mutate TestValidDeployMetadataApprovalScheme 'validDeployMetadata(server' deploy-approval-scheme-https-only deploy.go \
+    'a.URL != approvalScheme(base)+"://"+base.Host' \
+    'a.URL != "https://"+base.Host'
+metadata_mutate TestValidDeployMetadataApprovalScheme 'validDeployMetadata(server' deploy-approval-scheme-unmatched deploy.go \
+    'a.URL != approvalScheme(base)+"://"+base.Host+"/console/approvals/"+a.ID' \
+    '(a.URL != "https://"+base.Host+"/console/approvals/"+a.ID && a.URL != "http://"+base.Host+"/console/approvals/"+a.ID)'
+metadata_mutate TestValidDeployMetadataApprovalScheme 'validDeployMetadata(server' deploy-approval-scheme-any-http deploy.go \
+    'server.Scheme == "http" && isLoopbackHost(server.Hostname())' \
+    'server.Scheme == "http"'
 
 # deploy answers: the id/class normalisation removed entirely, the id-shape
 # check bypassed alone, the class filter bypassed alone, and the poll ban lifted.
