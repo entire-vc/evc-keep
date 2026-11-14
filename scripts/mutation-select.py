@@ -38,7 +38,7 @@ ALL_PATTERNS = [
     r"^go\.mod$", r"^go\.sum$", r"^\.golangci\.yml$",
     # The selector, its map and the pipeline generator never narrow their own change.
     r"^scripts/mutation-select\.(py|map)$", r"^scripts/mutation-range\.py$",
-    r"^scripts/generate-mutation-pipeline\.py$", r"^scripts/check-mr-mutation-gate\.py$",
+    r"^scripts/generate-mutation-pipeline\.py$",
     r"^internal/testutil/", r"^internal/zonecheck/",
 ]
 CI_CONFIG = ".gitlab-ci.yml"

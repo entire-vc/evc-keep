@@ -110,7 +110,7 @@ def validate(d, report, context):
     require(report["changed"] == files)
     mapping = module.Map((ROOT / "scripts/mutation-select.map").read_text())
     require({s for s, v in mapping.scripts.items() if v["always"]} == ALWAYS)
-    require(len(mapping.scripts) == 53)  # pinned to the current map; any other map is not this canary.
+    require(len(mapping.scripts) == 54)  # pinned to the current map; any other map is not this canary.
     packages = graph["packages"]
     require(packages and all(isinstance(v, dict) and set(v) == {"dir", "imports", "tests"}
                             for v in packages.values()))

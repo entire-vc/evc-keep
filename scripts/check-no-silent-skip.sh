@@ -43,7 +43,9 @@ if [ "$#" -eq 0 ]; then set -- ./...; fi
 sel=""
 if [ -n "${KEEP_TEST_SKIP:-}" ]; then sel=1; set -- -skip "$KEEP_TEST_SKIP" "$@"; fi
 if [ -n "${KEEP_TEST_RUN:-}" ]; then sel=1; set -- -run "$KEEP_TEST_RUN" "$@"; fi
-go test -timeout 600s -race -count=1 -p 1 -v "$@" >"$LOG" 2>&1
+# Per-package go test deadline: 10m by default; the core shards raise it (cmd/keep-server/app
+# alone ran 416-600s on main and hit the 10m panic). Must stay below the CI job limit.
+go test -timeout "${KEEP_GO_TEST_TIMEOUT:-600s}" -race -count=1 -p 1 -v "$@" >"$LOG" 2>&1
 status=$?
 
 cat "$LOG"

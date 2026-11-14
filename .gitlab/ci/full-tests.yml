@@ -112,7 +112,10 @@ test:
           # The inner limit sits below the job's 30m so a slow runner reads as
           # CI-TIMEOUT in the log, not as a silent kill or a failing test.
           # shellcheck disable=SC2086
-          timeout 1620 env KEEP_CATALOG_AUDIT_STRICT= ./scripts/check-no-silent-skip.sh $packages
+          # go test's own per-package deadline is 15m (default 10m was hit by
+          # cmd/keep-server/app: 600s on two heads, 416-557s on main); the
+          # 27m shard limit and 30m job limit both stay above it.
+          timeout 1620 env KEEP_CATALOG_AUDIT_STRICT= KEEP_GO_TEST_TIMEOUT=15m ./scripts/check-no-silent-skip.sh $packages
           rc=$?
           # GNU timeout exits 124, busybox (this alpine image) 143.
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then echo "CI-TIMEOUT: suite $TEST_SUITE exceeded 27m (runner load, not a test failure)"; fi

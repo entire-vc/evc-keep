@@ -80,6 +80,7 @@ umask 077
 export PATH="$PWD/bin:\$PATH"
 export PGHOST="${PGHOST:-127.0.0.1}"
 export KEEP_SERVER=http://127.0.0.1:8080
+export XDG_CONFIG_HOME="$QS/config"
 EOF
 echo 'export PGUSER=postgres PGPASSWORD=keep-quickstart' > "$QS/pg-admin.env"
 ```
@@ -192,7 +193,9 @@ echo "export KEEP_ORG=$(sed -n 's/^org_id=//p' "$QS/bootstrap.out")" >> "$QS/env
 
 ## 8. Log in and create a secret reference
 
-`keep login` reads the token from standard input. `create-ref` creates the
+`keep login` reads the token from standard input and stores it under
+`$XDG_CONFIG_HOME/keep` (here `~/keep-quickstart/config/keep`, so your own
+`~/.config/keep` is not touched; the last step removes it with the directory). `create-ref` creates the
 secret's name and where it will live; there is no value yet.
 
 <!-- quickstart: login -->
@@ -420,6 +423,22 @@ mode `0600`; compare its size with the length from step 10 without reading it:
 stat -c '%a %s %n' "$QS/target/demo.key"
 ```
 
+A target the policy has no rule for is not refused and not written: it waits
+for an approval by someone other than you. `keep deploy` then exits with 3 and
+prints the approval's id, status and link, and the file does not exist:
+
+<!-- quickstart: deploy-outside-policy -->
+```sh
+. "$HOME/keep-quickstart/env.sh"
+rc=0
+keep deploy DEMO_API_KEY --runner "$RUNNER_ID" --kind file --target "$QS/outside.key" \
+  --uid "$(id -u)" --gid "$(id -g)" --consumer systemd:keep-quickstart-consumer --wait 5s --json > "$QS/outside.json" || rc=$?
+cat "$QS/outside.json"
+[ "$rc" -eq 3 ]
+jq -e '.approval.status == "requested"' "$QS/outside.json"
+[ ! -e "$QS/outside.key" ]
+```
+
 ## 15. The audit journal
 
 Every step above wrote a record to a hash chain. `audit verify` checks the
@@ -438,7 +457,6 @@ keep audit verify
 . "$HOME/keep-quickstart/env.sh"
 kill "$(cat "$QS/runner.pid")" "$(cat "$QS/server.pid")"
 sudo systemctl stop keep-quickstart-consumer
-rm -f "$HOME/.config/keep/token"
 ```
 
 <!-- quickstart: drop-database ci-skip -->

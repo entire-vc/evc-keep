@@ -85,7 +85,7 @@ END { if (!failed && (id != "" || infence)) { print "FAIL quickstart: unterminat
 ' "$doc"
 
 ls "$steps"/*.sh >/dev/null 2>&1 || fail "the page has no marked block"
-for need in build migrate server-start bootstrap-org create-ref input-link open-link list-meta mcp consumer restart-permission runner-enroll runner-start deploy-policy deploy audit cleanup; do
+for need in build migrate server-start bootstrap-org create-ref input-link open-link list-meta mcp consumer restart-permission runner-enroll runner-start deploy-policy deploy deploy-outside-policy audit cleanup; do
 	ls "$steps"/*-"$need".sh >/dev/null 2>&1 || fail "the page lost the step $need"
 done
 for f in "$steps"/*.mode; do
@@ -99,8 +99,8 @@ for f in "$steps"/*.mode; do
 done
 
 leak_scan() { # leak_scan partial|full: 0 if clean (partial: no positive controls)
-	QS_PARTIAL=$([ "$1" = partial ] && echo 1 || echo 0) QS_CANARY_FILE="$secrets/canary" QS_TARGET="$qs/target/demo.key" QS_SCAN="$out:$qs" \
-		QS_DB_PW_FILE="$qs/db.pw" QS_ROOT_KEY_FILE="$qs/root.key" QS_ADMIN_TOKEN_FILE="$qs/admin.token" QS_SERVER_ENV="$qs/keep-server.env" \
+	QS_PARTIAL=$([ "$1" = partial ] && echo 1 || echo 0) QS_CANARY_FILE="$secrets/canary" QS_TARGET="$qs/target/demo.key" QS_SCAN="$out:$qs$([ -d "$HOME/.config/keep" ] && printf %s ":$HOME/.config/keep")" \
+		QS_DB_PW_FILE="$qs/db.pw" QS_ROOT_KEY_FILE="$qs/root.key" QS_ADMIN_TOKEN_FILE="$qs/admin.token" QS_SERVER_ENV="$qs/keep-server.env" QS_CLI_TOKEN_FILE="$qs/config/keep/token" \
 		go test -tags quickstart -count=1 -v -run 'TestScanCanFail|TestRawFetchCanFail|TestQuickstartNoLeak' ./test/quickstart >"$work/go-test.log" 2>&1
 }
 
