@@ -376,7 +376,7 @@ paths:
       summary: Per-carrier progress of a rotation (carrier_id, phase, state), version and fingerprint once done
       responses:
         "429": {description: Per-principal request limit reached; Retry-After says when to retry}
-        "200": {description: "Terminal: ok with version and fingerprint, or error_class with failed carriers stale; no version is reported for a failed run"}
+        "200": {description: "Terminal: ok with version and fingerprint, or error_class with failed carriers stale; no version is reported for a failed run. incident_opened (boolean, only present when true) says the failed run left the previous version alive and opened an incident"}
         "202": {description: Run in progress}
         "404": {description: Run unavailable}
   /orgs/{org_id}/secrets/{secret_id}/versions:
@@ -469,6 +469,69 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /orgs/{org_id}/secrets/{secret_id}/carriers/adopt:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - {name: secret_id, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      summary: Attest and adopt an existing YAML scalar without writing it
+      description: >
+        Requires adopt_carrier at the secret scope (admin, or an explicit agent
+        grant intersected with its admin sponsor). The current catalog version,
+        fingerprint and host come from the server. An exact adoption_rules entry
+        may allow a non-production request; otherwise bound human approval is
+        required. Production always requires approval and trusted host attributes.
+        The runner also requires an exact adoption_targets grant and a read rule.
+        No carrier is registered before the live enrolled runner returns a matching,
+        unexpired, one-use attestation. Unknown input fields are rejected.
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdoptCarrierRequest"
+      responses:
+        '200':
+          description: Terminal read-only attestation; registered or failed
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CarrierAdoptionResult"}
+        '202':
+          description: Pending runner or human approval; no completed deployment
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CarrierAdoptionResult"}
+        '400': {description: Invalid request or unsupported provider}
+        '403': {description: Policy or approval refused}
+        '404': {description: Missing, foreign or not authorized — one answer}
+        '409': {description: Request id already bound to a different operation}
+        '429': {description: Shared admission rate limit reached}
+        '503': {description: Adoption unavailable}
+  /orgs/{org_id}/secrets/{secret_id}/carriers/adopt/{request_id}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - {name: secret_id, in: path, required: true, schema: {type: string, format: uuid}}
+      - {name: request_id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read the state of a bound carrier adoption request
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Terminal read-only attestation; registered or failed
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CarrierAdoptionResult"}
+        '202':
+          description: Pending runner or human approval
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CarrierAdoptionResult"}
+        '400': {description: Invalid secret id}
+        '403': {description: Policy or approval refused}
+        '404': {description: Missing, foreign or not authorized — one answer}
+        '429': {description: Shared admission rate limit reached}
+        '503': {description: Adoption unavailable}
   /orgs/{org_id}/secrets/{secret_id}/carriers/verify:
     parameters:
       - $ref: "#/components/parameters/OrgID"
@@ -510,6 +573,73 @@ paths:
         '200': {description: Every carrier answered}
         '202': {description: Runners still answering}
         '404': {description: secret missing, foreign or not readable (secret_not_found), or request unknown or made for another secret (not_found) — the last two are one answer}
+  /orgs/{org_id}/carriers/discover:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+    post:
+      summary: Ask a runner to look for known secret names on its host and compare them with the registry, without any value
+      description: >
+        Needs manage_runners at the organization. The body names the runner
+        and an org-owned store whose fingerprint key the runner uses; paths
+        and rules are never supplied, the runner's own host policy owns them.
+        The report lists match, stale, sprawl and unknown_find findings with
+        path, name and keyed fingerprint; never a value and never a length.
+        An unknown_find, and a sprawl that holds a value the store issued,
+        open an incident for a person; nothing is rotated automatically.
+        The answer is the report's first page (offset 0); the rest is read
+        through the GET route. Every answer carries the top-level fields
+        offset and total; ok is computed over the whole report, never over
+        one page.
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [runner_id, store_id]
+              properties:
+                runner_id: {type: string, format: uuid}
+                store_id: {type: string, format: uuid}
+                request_id: {type: string}
+      responses:
+        '200': {description: Report complete; ok only when every finding is a match}
+        '202': {description: Runner still scanning}
+        '400': {description: Invalid request}
+        '403': {description: manage_runners missing}
+        '404': {description: runner or store missing, foreign or not org-owned — one answer}
+        '409': {description: Request id reused, or a discover already running on this runner}
+        '429': {description: Discover rate limit reached}
+        '503': {description: Discovery service unavailable}
+  /orgs/{org_id}/carriers/discover/{request_id}:
+    parameters:
+      - $ref: "#/components/parameters/OrgID"
+      - {name: request_id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read the state and one page of findings of a carrier discovery
+      description: >
+        A completed report is read in pages of at most 4096 findings,
+        ordered by path, name and line, so a given offset always returns the
+        same lines. offset is the first line of the page and total the line
+        count of the whole report; a page at offset equal to total is empty.
+        ok is true only when every line of the whole report is a match.
+      security: [{bearerAuth: []}]
+      parameters:
+        - name: offset
+          in: query
+          required: false
+          description: >
+            First line of the page, a decimal integer from 0 to total;
+            absent means 0. A sign, a leading zero, a repeated parameter or a
+            value past total is 400 invalid_argument.
+          schema: {type: integer, minimum: 0}
+      responses:
+        '200': {description: Report complete, failed or expired}
+        '202': {description: Runner still scanning}
+        '400': {description: offset invalid or past the report's total (invalid_argument)}
+        '403': {description: manage_runners missing}
+        '404': {description: request unknown or another organization's — one answer}
   /orgs/{org_id}/tokens:
     parameters:
       - $ref: "#/components/parameters/OrgID"
@@ -679,6 +809,8 @@ components:
           enum: [current, previous, disabled, erased]
     Carrier:
       type: object
+      additionalProperties: false
+      required: [id, org_id, secret_id, version, provenance, host, target, status, fingerprint_match]
       description: threat model §4.3 Carrier row — the closed field list
       properties:
         id:
@@ -687,6 +819,20 @@ components:
         secret_id:
           type: string
           format: uuid
+        org_id:
+          type: string
+          format: uuid
+        version:
+          type: string
+          description: Last attested catalog provider version
+        provenance:
+          type: string
+          enum: [deployment, adoption]
+          description: Registration evidence; later verification does not replace this provenance
+        attestation_job_id:
+          type: string
+          format: uuid
+          description: Immutable accepted registration receipt; present for adoption
         host:
           type: string
         runner_id:
@@ -694,11 +840,17 @@ components:
           format: uuid
         target:
           type: object
+          additionalProperties: false
+          required: [kind, path]
           properties:
             kind:
               type: string
+              enum: [env-file, file, launchd-env, systemd-credential, mcp-config, hermes-config, yaml-scalar]
             path:
               type: string
+            field:
+              type: string
+              description: Exact field; for yaml-scalar a dotted mapping selector
         consumer:
           type: string
         healthcheck:
@@ -711,6 +863,50 @@ components:
           format: date-time
         fingerprint_match:
           type: boolean
+    AdoptCarrierRequest:
+      type: object
+      additionalProperties: false
+      required: [runner_id, target]
+      properties:
+        request_id:
+          type: string
+          description: Optional idempotency key; defaults to the response X-Request-ID
+        runner_id: {type: string, format: uuid}
+        target:
+          type: object
+          additionalProperties: false
+          required: [kind, path, field]
+          properties:
+            kind: {type: string, enum: [yaml-scalar]}
+            path:
+              type: string
+              description: Absolute allowlisted regular file; symlinks and path traversal refused
+            field:
+              type: string
+              maxLength: 256
+              pattern: '^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,15}$'
+              description: Exact 1–16 mapping keys; no arrays, globbing or literal-dot keys
+    CarrierAdoptionResult:
+      type: object
+      additionalProperties: false
+      required: [ok, request_id, status, version_id]
+      properties:
+        ok: {type: boolean}
+        request_id: {type: string}
+        status: {type: string, enum: [pending, approval_required, registered, failed]}
+        version_id: {type: string, format: uuid}
+        job_id: {type: string, format: uuid}
+        error_class:
+          type: string
+          description: Closed runner error class; no observed fingerprint, scalar or parser text
+        approval:
+          type: object
+          additionalProperties: false
+          required: [id, status, url]
+          properties:
+            id: {type: string, format: uuid}
+            status: {type: string, enum: [requested, approved, rejected, expired]}
+            url: {type: string}
     RegisterCarrierRequest:
       type: object
       required: [version, host, target_kind, target_path]
@@ -769,7 +965,8 @@ components:
       description: >
         identity.IssueResponse's own closed shape — "token" is this route's
         one documented exception to the threat model's per-object field
-        lists (no §4.3 row covers token issuance; raised with Calvin)
+        lists (no §4.3 row covers token issuance; the exception is recorded
+        in the threat model)
       properties:
         token:
           type: string

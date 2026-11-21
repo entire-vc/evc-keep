@@ -16,6 +16,7 @@ import (
 	"github.com/entire-vc/evc-keep/internal/meshext"
 	"github.com/entire-vc/evc-keep/internal/reqid"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // MeshPendingResult is the response of POST /orgs/{org_id}/mesh/pending-installs.
@@ -155,12 +156,16 @@ type meshHandshakeRequest struct {
 	ExtensionID   string   `json:"extension_id"`
 	WorkspaceID   string   `json:"workspace_id"`
 	SigningSecret meshCred `json:"signing_secret"`
+	// Settings is Mesh's snapshot of the extension's non-secret workspace
+	// settings, sent with every handshake; absent from an older Mesh. Only
+	// the keys meshext.Settings names are read.
+	Settings json.RawMessage `json:"settings"`
 }
 
 // handleHandshake is Mesh's install handshake: no bearer, X-Mesh-Timestamp
 // and X-Mesh-Signature = hex HMAC-SHA256 of "<timestamp>.<body>" keyed with
 // the signing_secret of the body. A workspace already bound answers 200 only
-// to the secret it is bound with, and writes nothing. An unbound one is bound
+// to the secret it is bound with, and applies its settings snapshot. An unbound one is bound
 // only inside a live window an org admin opened for this workspace and this
 // secret's SHA-256: the secret becomes the events secret, the window is
 // spent, and the admin who opened it is the installer. Every other request
@@ -220,6 +225,61 @@ func (m *meshRoutes) handleHandshake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parsing names no input value. Its error is returned only after the
+	// workspace authenticates: a self-signed request alone proves no ownership.
+	// keep-rotator has no settings of its own and its snapshot is not read.
+	var settings meshext.Settings
+	hasSettings := false
+	var settingsErr error
+	if !rotator {
+		settings, hasSettings, settingsErr = meshext.ParseSettings(req.Settings)
+	}
+	checkSettings := func() bool {
+		if settingsErr != nil {
+			writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid mesh settings", requestID)
+			return false
+		}
+		return true
+	}
+	// A change of the stored setting is journaled in the transaction that
+	// makes it (threat model §4.2.3); its log line is written once that
+	// transaction committed.
+	var journaled []audit.Record
+	var snapshot []meshext.Snapshot
+	if hasSettings {
+		snapshot = []meshext.Snapshot{{Settings: settings, SignedAt: secs,
+			Journal: func(ctx context.Context, tx pgx.Tx, org uuid.UUID, s meshext.Settings) error {
+				rec, err := m.journalApprovalsChannel(ctx, tx, org, ws, requestID, approvalsChannelReason(s))
+				if err == nil {
+					journaled = append(journaled, rec)
+				}
+				return err
+			}}}
+	}
+	logJournaled := func() {
+		if tj, ok := m.aud.(audit.TransactionalJournaler); ok {
+			for _, rec := range journaled {
+				tj.LogCommitted(r.Context(), rec)
+			}
+		}
+		journaled = nil
+	}
+	applySettings := func(org uuid.UUID) bool {
+		if !checkSettings() {
+			return false
+		}
+		if !hasSettings {
+			return true
+		}
+		if err := m.deps.Repo.SetSettings(r.Context(), ws, org, snapshot[0]); err != nil {
+			journaled = nil
+			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "database not reachable", requestID)
+			return false
+		}
+		logJournaled()
+		return true
+	}
+
 	unlock, err := m.deps.Repo.LockWorkspace(r.Context(), ws)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "database not reachable", requestID)
@@ -249,6 +309,9 @@ func (m *meshRoutes) handleHandshake(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "database not reachable", requestID)
 			return
 		} else if live && pend.Org == org && m.meshSecretMatch(pend.SecretSHA256, signingSecret) {
+			if !checkSettings() {
+				return
+			}
 			installer := identity.Principal{OrgID: pend.Org, ID: pend.OpenedBy, Kind: identity.KindUser, Scope: "org:" + pend.Org.String()}
 			// The budget is spent before the write, as on the unbound path:
 			// a committed upgrade is never answered 429 and left unjournaled.
@@ -261,15 +324,24 @@ func (m *meshRoutes) handleHandshake(w http.ResponseWriter, r *http.Request) {
 				// The store keeps signing with its events secret: the extension's is
 				// sealed beside it, never over it.
 				return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindExtSigning, signingSecret)
-			})
+			}, snapshot...)
 			switch {
 			case err == nil:
+				logJournaled()
 				m.audit(r, installer, requestID, audit.StatusOK, audit.ErrClassNone)
 				w.Header().Set("Cache-Control", "no-store")
 				writeJSON(w, http.StatusOK, okResult{OK: true, RequestID: requestID})
 				return
 			case errors.Is(err, meshext.ErrNoWindow), errors.Is(err, meshext.ErrNotStore):
 				// fall through to the repeat rules
+				journaled = nil
+			case errors.Is(err, meshext.ErrSettingsJournal):
+				// Rolled back with the upgrade; the window is still open and
+				// Mesh's next handshake applies the snapshot again.
+				journaled = nil
+				m.audit(r, installer, requestID, audit.StatusFailed, audit.ErrClassInternal)
+				writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "database not reachable", requestID)
+				return
 			default:
 				m.audit(r, installer, requestID, audit.StatusFailed, audit.ErrClassInternal)
 				writeError(w, http.StatusInternalServerError, apperr.ClassInternal, "internal error", requestID)
@@ -289,6 +361,11 @@ func (m *meshRoutes) handleHandshake(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Mesh repeats the handshake after a settings change: the snapshot
+		// of the repeat is the one that counts.
+		if !applySettings(org) {
+			return
+		}
 		writeJSON(w, http.StatusOK, okResult{OK: true, RequestID: requestID})
 		return
 	}
@@ -299,6 +376,9 @@ func (m *meshRoutes) handleHandshake(w http.ResponseWriter, r *http.Request) {
 	}
 	if !live || !m.meshSecretMatch(pend.SecretSHA256, signingSecret) {
 		deny()
+		return
+	}
+	if !checkSettings() {
 		return
 	}
 	refund()
@@ -316,15 +396,21 @@ func (m *meshRoutes) handleHandshake(w http.ResponseWriter, r *http.Request) {
 	installer := identity.Principal{OrgID: pend.Org, ID: pend.OpenedBy, Kind: identity.KindUser, Scope: "org:" + pend.Org.String()}
 	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(ctx context.Context) error {
 		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)
-	}); err != nil {
+	}, snapshot...); err != nil {
 		if errors.Is(err, meshext.ErrNoWindow) {
 			deny()
 			return
 		}
 		m.audit(r, installer, requestID, audit.StatusFailed, audit.ErrClassInternal)
+		if errors.Is(err, meshext.ErrSettingsJournal) {
+			// Rolled back with the binding; the window is still open.
+			writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, "database not reachable", requestID)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, apperr.ClassInternal, "internal error", requestID)
 		return
 	}
+	logJournaled()
 	m.audit(r, installer, requestID, audit.StatusOK, audit.ErrClassNone)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, okResult{OK: true, RequestID: requestID})
@@ -399,4 +485,42 @@ func (m *meshRoutes) handleRotatorHandshake(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	writeJSON(w, http.StatusOK, okResult{OK: true, RequestID: requestID})
+}
+
+// errNoTxJournal is a handshake that would change the approvals channel on a
+// server whose journal cannot append in the caller's transaction: the change
+// is refused rather than made unjournaled.
+var errNoTxJournal = errors.New("mesh: journal cannot append in a transaction")
+
+// journalApprovalsChannel appends, in tx, the mesh.approvals_channel record of
+// a change of workspace's approvals_via_mesh (threat model §4.2.3): the
+// workspace as a service actor through the Mesh plugin, and as the reason only
+// the new value, approvalsChannelReason; never anything else of the snapshot.
+func (m *meshRoutes) journalApprovalsChannel(ctx context.Context, tx pgx.Tx, org, workspace uuid.UUID, requestID, reason string) (audit.Record, error) {
+	tj, ok := m.aud.(audit.TransactionalJournaler)
+	if !ok {
+		return audit.Record{}, errNoTxJournal
+	}
+	return tj.AppendTx(ctx, tx, audit.Record{
+		RequestID: requestID,
+		OrgID:     org.String(),
+		Scope:     "org:" + org.String(),
+		Actor:     audit.Actor{Type: audit.ActorService, ID: workspace.String(), Via: audit.ViaMeshPlugin},
+		Action:    audit.ActionMeshApprovalsChannel,
+		Intent:    audit.Intent{Reason: reason},
+		Result:    audit.Result{Status: audit.StatusOK},
+	})
+}
+
+// approvalsChannelReason is the whole reason of a mesh.approvals_channel
+// record: one of three fixed strings.
+func approvalsChannelReason(s meshext.Settings) string {
+	switch {
+	case s.ApprovalsViaMesh == nil:
+		return "approvals_via_mesh=default"
+	case *s.ApprovalsViaMesh:
+		return "approvals_via_mesh=true"
+	default:
+		return "approvals_via_mesh=false"
+	}
 }

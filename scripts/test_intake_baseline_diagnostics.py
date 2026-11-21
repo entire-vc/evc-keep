@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-from intake_baseline_diagnostics import run_baseline
+from intake_baseline_diagnostics import designated_run_pattern, missing_passes, run_baseline
 
 
 class DiagnosticsTest(unittest.TestCase):
@@ -228,6 +228,48 @@ class StartupSnapshotControls(unittest.TestCase):
         self.assertTrue(safe[0]['timed_out'])
         self.assertNotIn('PRIVATE_SENTINEL', json.dumps(safe))
         self.assertEqual(page_startup_snapshots('page-startup-snapshot {"phase":"private","budget_ms":50}'), [])
+
+
+class DesignatedBaselineTest(unittest.TestCase):
+    """The service baseline proves every designated test, by name, passed."""
+
+    def test_run_pattern_is_anchored_and_sorted(self):
+        self.assertEqual(designated_run_pattern(['TestB', 'TestA', 'TestB']), '^(TestA|TestB)$')
+
+    def test_run_pattern_refuses_regex_and_empty(self):
+        for names in ([], ['TestA.*'], ['TestA|TestB'], ['TestA/sub'], ['TestA$'], [''], ['Example']):
+            with self.subTest(names=names), self.assertRaises(ValueError):
+                designated_run_pattern(names)
+
+    def test_every_designated_pass_line_is_required(self):
+        out = '=== RUN   TestA\n--- PASS: TestA (0.01s)\n=== RUN   TestB\n--- PASS: TestB (1.20s)\nok\n'
+        self.assertEqual(missing_passes(out, ['TestA', 'TestB']), [])
+        self.assertEqual(missing_passes(out, ['TestA', 'TestB', 'TestC']), ['TestC'])
+
+    def test_lookalike_lines_are_not_a_pass(self):
+        cases = {
+            'prefix of another test': '--- PASS: TestAB (0.01s)\n',
+            'subtest': '--- PASS: TestA/sub (0.01s)\n',
+            'indented': '    --- PASS: TestA (0.01s)\n',
+            'failed': '--- FAIL: TestA (0.01s)\n',
+            'skipped': '--- SKIP: TestA (0.01s)\n',
+            'only ran': '=== RUN   TestA\n',
+            'no output': '',
+        }
+        for label, out in cases.items():
+            with self.subTest(label):
+                self.assertEqual(missing_passes(out, ['TestA']), ['TestA'])
+
+    def test_service_script_uses_the_guard(self):
+        # The baseline must narrow only cmd/keep-server/app, through the
+        # anchored pattern, and judge every designated test by its PASS line.
+        script = (Path(__file__).resolve().parent / 'check-intake-service-mutations.sh').read_text()
+        self.assertIn("'-run',app_run,app_pkg]", script)
+        self.assertIn('app_run=designated_run_pattern(designated.get(app_pkg,()))', script)
+        self.assertIn('missing=missing_passes(out,all_designated)', script)
+        self.assertIn("raise SystemExit('FAIL baseline: a designated service test did not run and pass')", script)
+        service = next(line for line in script.splitlines() if line.lstrip().startswith('service_pkgs='))
+        self.assertNotIn('keep-server/app', service)
 
 
 if __name__ == '__main__':

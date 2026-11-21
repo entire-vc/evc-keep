@@ -29,15 +29,12 @@ temp_workspace
 src=""
 
 fail=0
-# mutate FILE NAME FROM TO: replace the first literal occurrence of FROM with TO.
+# mutate FILE NAME FROM TO: replace the only or explicitly named literal occurrence of FROM with TO.
 mutate() {
+	mutation_take_occurrences
 	src=$1 name=$2 from=$3 to=$4
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -46,20 +43,6 @@ mutate() {
 	run_mutant "$name"
 }
 
-# mutate_sed FILE NAME SED-EXPR: apply a sed edit to every line of the source.
-mutate_sed() {
-	src=$1 name=$2 expr=$3
-	rm -rf "$work/tree"
-	mutation_snapshot "$work/tree"
-	sed -e "$expr" "$root/$src" >"$work/tree/$src"
-	if cmp -s "$root/$src" "$work/tree/$src"; then
-		echo "FAIL $name: mutation did not apply — the source changed, update this script"
-		fail=1
-		return
-	fi
-	mutation_applied "$name" && return
-	run_mutant "$name"
-}
 
 # run_mutant NAME: the scratch tree must go red in a test, not in the build.
 run_mutant() {
@@ -82,10 +65,10 @@ mutate internal/runner/execrun/netns_linux.go no-inside-firewall 'n.cmd(ctx, []b
 mutate internal/runner/execrun/netns_linux.go inside-output-accepts 'type filter hook output priority 0; policy drop;' 'type filter hook output priority 0; policy accept;'
 mutate internal/runner/execrun/netns_linux.go no-pinned-port 'fmt.Sprintf("%s . %d", p.Addr.Addr(), p.Addr.Port())' 'p.Addr.Addr().String() + " . 1-65535"'
 mutate internal/runner/execrun/netns_linux.go no-masquerade 'ip saddr %[4]s oifname != "%[2]s" masquerade' 'ip saddr %[4]s oifname != "%[2]s" accept'
-mutate internal/runner/execrun/netns_linux.go no-ip-forward 'if err := os.WriteFile(ipForwardPath, []byte("1\\n"), 0o644);' 'if err := error(nil);'
+mutate internal/runner/execrun/netns_linux.go no-ip-forward 'if err := os.WriteFile(ipForwardPath, []byte("1\n"), 0o644);' 'if err := error(nil);'
 mutate internal/runner/execrun/netns_linux.go ip-forward-not-restored '_ = os.WriteFile(ipForwardPath, fwd.prior, 0o644)' '_ = fwd.prior'
 mutate internal/runner/execrun/netns_linux.go host-input-open 'iifname "%[2]s" counter drop' 'iifname "%[2]s" counter accept'
-mutate internal/runner/execrun/netns_linux.go no-hosts-pin 'hosts += p.Addr.Addr().String() + " " + p.Host + "\\n"' '_ = p'
+mutate internal/runner/execrun/netns_linux.go no-hosts-pin 'hosts += p.Addr.Addr().String() + " " + p.Host + "\n"' '_ = p'
 mutate internal/runner/execrun/netns_linux.go keeps-privileges '"--clear-groups", "--no-new-privs", "--bounding-set", "-all", "--inh-caps", "-all",' '"--clear-groups",'
 mutate internal/runner/execrun/netns_linux.go no-core-limit '"--", n.lim, "--core=0:0", "--"}' '"--"}'
 mutate internal/runner/execrun/netns_linux.go no-no-new-privs '"--clear-groups", "--no-new-privs",' '"--clear-groups",'
@@ -94,7 +77,7 @@ mutate internal/runner/execrun/netns_linux.go no-ipv6-refusal 'if !p.Addr.Addr()
 mutate internal/runner/execrun/netns_linux.go no-ns-delete '_ = n.cmd(c, nil, n.ip, "netns", "del", name)' '_ = c'
 mutate internal/runner/execrun/netns_linux.go no-etc-cleanup 'undo = append(undo, func() { _ = os.RemoveAll(etc) })' '_ = etc'
 mutate internal/runner/execrun/netns_linux.go no-host-table-delete '_ = n.cmd(c, nil, n.nft, "delete", "table", "ip", table)' '_ = c'
-mutate internal/runner/execrun/netns_linux.go no-sweep 'if strings.HasPrefix(e.Name(), "keep-") {' 'if false {'
+MUTATION_OCCURRENCE=1 mutate internal/runner/execrun/netns_linux.go no-sweep 'if strings.HasPrefix(e.Name(), "keep-") {' 'if false {'
 mutate internal/runner/execrun/netns_linux.go root-child-allowed 'n.ChildUID == 0 || n.ChildGID == 0 ||' 'false ||'
 mutate internal/runner/execrun/run.go no-account-sweep 'homeErr := errors.Join(sweepAccount(d.ChildUID), removeChildDir(home))' 'homeErr := errors.Join(removeChildDir(home))'
 mutate internal/runner/execrun/sweep_linux.go no-account-kill '_ = syscall.Kill(pid, syscall.SIGKILL)' '_ = pid'

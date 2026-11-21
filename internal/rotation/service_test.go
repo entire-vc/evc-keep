@@ -43,6 +43,10 @@ func TestServiceFailedCarrierActivatesNothing(t *testing.T) {
 	if len(states) != 3 || states[cid(2)].State != CarrierStale || states[cid(2)].Phase != PhaseDeploy {
 		t.Fatalf("carrier 2 must be stale in deploy: %+v", rep.Carriers)
 	}
+	// The failed carrier names its closed class; the others name none.
+	if states[cid(2)].Class != ClassDeployFailed || states[cid(1)].Class != ClassNone || states[cid(3)].Class != ClassNone {
+		t.Fatalf("per-carrier class: %+v", rep.Carriers)
+	}
 	// Carrier 1 took the layout but the run stopped before it was verified:
 	// nothing is confirmed on the new version, so it is stale too.
 	if c1 := states[cid(1)]; c1.State != CarrierStale || c1.Phase != PhaseVerify {
@@ -320,4 +324,107 @@ func startPlain(s *Service, ctx context.Context, ref Ref) (uuid.UUID, error) {
 	st, err := s.Start(ctx, ref, Origin{Actor: audit.Actor{Type: audit.ActorUser, ID: "tester", Via: audit.ViaAPI},
 		Scope: "org:" + ref.OrgID.String(), Name: "db-password", Class: "credential"})
 	return st.RunID, err
+}
+
+// Between the failed state and the recorded incident the run is not final: its
+// owner still holds the lease and is opening the incident. The report says so,
+// and once the incident is recorded the failure is final and carries it.
+func TestServiceReportSettlesOnlyWithTheIncident(t *testing.T) {
+	x, f := newFx(t), newFakes(2)
+	f.deployErr[cid(1)] = errors.New("write failed")
+	e := New(x.pool, f.deps())
+	s := NewService(e).WithJournal(audit.NewJournal(x.pool))
+	var mid RunReport
+	var midErr error
+	var seen int
+	e.afterFence = func(kind string) {
+		if kind != "incident" {
+			return
+		}
+		seen++
+		// The run of this secret: the hook runs before Start's caller sees the id.
+		var run uuid.UUID
+		if midErr = x.pool.QueryRow(x.ctx, `SELECT id FROM rotation_runs WHERE secret_id=$1`, x.ref.SecretID).Scan(&run); midErr == nil {
+			mid, midErr = s.Report(x.ctx, x.ref, run)
+		}
+	}
+	id, err := startPlain(s, x.ctx, x.ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+	if seen != 1 || midErr != nil {
+		t.Fatalf("the incident window was not observed: seen=%d err=%v", seen, midErr)
+	}
+	if !mid.Failed || mid.IncidentOpened || !mid.Settling {
+		t.Fatalf("a failed run whose incident is being opened must be settling: %+v", mid)
+	}
+	rep, err := s.Report(x.ctx, x.ref, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Failed || !rep.IncidentOpened || rep.Settling || rep.Class != ClassDeployFailed {
+		t.Fatalf("the final failure carries its incident: %+v", rep)
+	}
+}
+
+// An incident that could not be opened leaves a failed run with no live owner:
+// it is final as it is, never a run that looks active forever.
+func TestServiceReportFinalWhenTheIncidentFailed(t *testing.T) {
+	x, f := newFx(t), newFakes(2)
+	f.deployErr[cid(1)] = errors.New("write failed")
+	f.incErr = errors.New("journal down")
+	s := NewService(New(x.pool, f.deps())).WithJournal(audit.NewJournal(x.pool))
+	id, err := startPlain(s, x.ctx, x.ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Wait()
+	rep, err := s.Report(x.ctx, x.ref, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Failed || rep.IncidentOpened || rep.Settling {
+		t.Fatalf("a failure whose incident could not be opened is final without it: %+v", rep)
+	}
+}
+
+// Settling needs all of: a failed run, an incident still owed and an owner
+// whose lease is live. A lease left behind by an owner that died and ran out
+// is no owner: the failure is final, never a run that looks active forever.
+func TestServiceReportSettlingNeedsALiveOwnerAndAnOwedIncident(t *testing.T) {
+	for name, c := range map[string]struct {
+		until    time.Duration
+		incident bool
+		class    Class
+		settling bool
+	}{
+		"live owner, incident owed":     {until: time.Minute, class: ClassDeployFailed, settling: true},
+		"expired lease left behind":     {until: -time.Minute, class: ClassDeployFailed},
+		"live owner, incident recorded": {until: time.Minute, incident: true, class: ClassDeployFailed},
+		"live owner, superseded":        {until: time.Minute, class: ClassSuperseded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			x, f := newFx(t), newFakes(2)
+			f.deployErr[cid(1)] = errors.New("write failed")
+			f.incErr = errors.New("journal down")
+			s := NewService(New(x.pool, f.deps())).WithJournal(audit.NewJournal(x.pool))
+			id, err := startPlain(s, x.ctx, x.ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Wait()
+			if _, err := x.pool.Exec(x.ctx, `UPDATE rotation_runs SET lease_owner='other', lease_until=$2, incident_opened=$3, error_class=$4 WHERE id=$1 AND state='failed'`,
+				id, time.Now().Add(c.until), c.incident, string(c.class)); err != nil {
+				t.Fatal(err)
+			}
+			rep, err := s.Report(x.ctx, x.ref, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !rep.Failed || rep.Settling != c.settling {
+				t.Fatalf("want settling=%v: %+v", c.settling, rep)
+			}
+		})
+	}
 }

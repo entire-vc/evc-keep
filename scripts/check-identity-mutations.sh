@@ -37,13 +37,9 @@ if [ -z "${KEEP_DATABASE_URL:-}" ] && ! mutation_apply_only; then
 fi
 
 fail=0
-# edit SRC FROM TO: print SRC with the first literal occurrence of FROM
-# replaced by TO; exit 1 if FROM is not there.
+# edit SRC FROM TO [OCCURRENCE]: refuse absent or ambiguous anchors.
 edit() {
-	awk -v from="$2" -v to="$3" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$1"
+	mutation_edit "$1" "$2" "$3" "${4:-}"
 }
 
 # The packages every mutant is judged against: identity itself, plus the
@@ -52,23 +48,23 @@ edit() {
 # request id it echoes).
 pkgs="./$pkg/ ./internal/obs/ ./internal/tokenshape/ ./internal/reqid/"
 
-# mutate NAME FILE FROM TO [FROM2 TO2]: replace the first literal occurrence
+# mutate NAME FILE FROM TO [FROM2 TO2]: replace the only or explicitly named literal occurrence
 # of FROM (and, if given, of FROM2) with TO. FILE is relative to
 # internal/identity, or to the repo root when it contains a slash or starts
 # with a dot.
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$2 from=$3 to=$4
 	case $file in */* | .*) src=$file ;; *) src=$pkg/$file ;; esac
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! edit "$root/$src" "$from" "$to" >"$work/tree/$src"; then
+	if ! edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
 	fi
 	if [ $# -ge 6 ]; then
 		cp "$work/tree/$src" "$work/second"
-		if ! edit "$work/second" "$5" "$6" >"$work/tree/$src"; then
+		if ! edit "$work/second" "$5" "$6" "${mutation_occurrence2:-}" >"$work/tree/$src"; then
 			echo "FAIL $name: second edit did not apply — the source changed, update this script"
 			fail=1
 			return
@@ -100,7 +96,7 @@ mutate() {
 # AC red run (1): a token is stored as its own bytes instead
 # of SHA-256(token) — the leak test (TestTokenNeverStoredPlaintext) and the
 # canary lifecycle test must catch a plaintext-shaped tokens.token_hash.
-mutate hash-not-token       repo.go 'hash := HashToken(token)' 'hash := []byte(Reveal(token))'
+MUTATION_OCCURRENCE=1 mutate hash-not-token       repo.go 'hash := HashToken(token)' 'hash := []byte(Reveal(token))'
 # AC red run (2): the org-match middleware stops checking the
 # Principal's own OrgID and accepts whatever org_id the URL claims — the
 # isolation test must reject this (404 for a foreign org, never a silent

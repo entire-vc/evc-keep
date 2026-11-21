@@ -36,21 +36,15 @@ if ! mutation_apply_only && [ -z "${KEEP_DATABASE_URL:-}" ]; then
 fi
 
 fail=0
-# edit SRC FROM TO: print SRC with the first literal occurrence of FROM
-# replaced by TO; exit 1 if FROM is not there. Never pass a FROM/TO
-# containing a backslash escape (e.g. \n) — awk's -v assignment unescapes
-# it before the literal-substring match ever runs, so it silently fails to
-# find text that is visibly right there in the source.
+# edit SRC FROM TO [OCCURRENCE]: literal bytes; refuse absent or ambiguous anchors.
 edit() {
-	awk -v from="$2" -v to="$3" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$1"
+	mutation_edit "$1" "$2" "$3" "${4:-}"
 }
 
-# mutate NAME FILE FROM TO [FROM2 TO2]: replace the first literal occurrence
+# mutate NAME FILE FROM TO [FROM2 TO2]: replace the only or explicitly named literal occurrence
 # of FROM (and, if given, of FROM2) with TO. FILE is relative to cmd/keep.
 mutate() {
+	mutation_take_occurrences
 	name=$1 src=$pkg/$2 from=$3 to=$4
 	want=${metadata_witness:-}
 	if [ -z "$want" ]; then
@@ -74,29 +68,45 @@ mutate() {
 			return
 		fi
 	fi
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! edit "$root/$src" "$from" "$to" >"$work/tree/$src"; then
+	if ! edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
 	fi
 	if [ "$name" = json-control-escape-delete ]; then
-		python3 - "$work/tree/$src" <<'PY'
+		python3 - "$work/tree/$src" "$root/scripts/lib" <<'PY'
 import pathlib, sys
+sys.path.insert(0, sys.argv[2])
+from mutation_edit import named_edit
 p = pathlib.Path(sys.argv[1])
+def edit(text, old, new, occurrence=None, src=p):
+    return named_edit("json-control-escape-delete", text, old, new, occurrence, str(src))
 source = p.read_text()
-start = source.index('// encoding/json already escapes C0')
+marker = '// encoding/json already escapes C0'
+# A duplicated boundary must not select a different deletion block.
+edit(source, marker, marker)
+edit(source, '// cell makes', '// cell makes')
+start = source.index(marker)
 end = source.index('// cell makes', start)
-source = source[:start] + source[end:]
+source = edit(source, source[start:end], "")
 for dependency in ['unicode', 'unicode/utf16', 'unicode/utf8']:
-    source = source.replace('\t"' + dependency + '"\n', '')
+    source = edit(source, '\t"' + dependency + '"\n', '')
 p.write_text(source)
+# The streaming discover writer calls the same escaper: deleting it means
+# those calls write the encoder's bytes unchanged too.
+d = p.with_name('discover.go')
+calls = d.read_text()
+if calls.count('escapeJSONControls(') != 2:
+    sys.exit('discover.go escaper calls changed, update this script')
+calls = edit(calls, 'escapeJSONControls(', '(', 2, d)
+calls = edit(calls, 'escapeJSONControls(', '(', 1, d)
+d.write_text(calls)
 PY
 	fi
 	if [ $# -ge 6 ]; then
 		cp "$work/tree/$src" "$work/second"
-		if ! edit "$work/second" "$5" "$6" >"$work/tree/$src"; then
+		if ! edit "$work/second" "$5" "$6" "${mutation_occurrence2:-}" >"$work/tree/$src"; then
 			echo "FAIL $name: second edit did not apply — the source changed, update this script"
 			fail=1
 			return
@@ -205,7 +215,7 @@ mutate token-permission-error-echoes-path token.go \
 mutate token-empty-error-echoes-path token.go \
 	'errors.New("token file is empty — run `keep login`")' \
 	'fmt.Errorf("%s is empty", path)'
-mutate login-help-fails main.go \
+MUTATION_OCCURRENCE=1 mutate login-help-fails main.go \
 	'if errors.Is(err, flag.ErrHelp) {' \
 	'if false && errors.Is(err, flag.ErrHelp) {'
 # the client-side by-name resolver stops returning secret_not_found on a
@@ -250,7 +260,7 @@ mutate login-leaks-extra-args-in-error main.go \
 # login's FlagSet output goes back to stderr — a leading-dash token is then
 # echoed by the stdlib's own "flag provided but not defined: -TOKEN" text;
 # TestRunLoginSubcommandLeadingDashTokenNotEchoed's canary check must catch it.
-mutate login-flagset-output-to-stderr main.go \
+MUTATION_OCCURRENCE=1 mutate login-flagset-output-to-stderr main.go \
 	'fs.SetOutput(io.Discard)' 'fs.SetOutput(stderr)'
 # login stops recognising the unknown-flag parse error, so a leading-dash
 # token gets the generic "could not parse" text again instead of the
@@ -296,25 +306,25 @@ mutate server-parse-error-leaks-userinfo main.go \
 # --debug starts tracing response bodies — TestCLI_MetadataCanaryStaysOutOfDebugTrace
 # must see the description canary in stderr and go red.
 mutate debug-traces-response-body client.go \
-	'respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))' \
-	'respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1)); c.debugf("body: %s", respBody)'
+	'respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))' \
+	'respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1)); c.debugf("body: %s", respBody)'
 
 # The shared client's response cap (1 MiB, the internal/mcp limit). Each of
 # these silently re-opens the unbounded or mis-bounded read; the witnesses must
 # go red: a body of exactly the limit decodes, one byte more is refused, and an
 # endless body is cut off instead of read to the client timeout.
 mutate response-read-unbounded client.go \
-	'respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))' \
+	'respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))' \
 	'respBody, err := io.ReadAll(resp.Body)'
 mutate response-limit-check-removed client.go \
-	'if len(respBody) > maxResponseBytes {' \
+	'if len(respBody) > limit {' \
 	'if false {'
 mutate response-limit-off-by-one client.go \
-	'if len(respBody) > maxResponseBytes {' \
-	'if len(respBody) >= maxResponseBytes {'
+	'if len(respBody) > limit {' \
+	'if len(respBody) >= limit {'
 mutate response-limit-no-extra-byte client.go \
-	'io.LimitReader(resp.Body, maxResponseBytes+1)' \
-	'io.LimitReader(resp.Body, maxResponseBytes)'
+	'io.LimitReader(resp.Body, int64(limit)+1)' \
+	'io.LimitReader(resp.Body, int64(limit))'
 
 # (list-failure-rewritten-per-name retired: it relied on the not-found message
 # quoting the requested name, which differed between a foreign org, a miss and
@@ -332,7 +342,7 @@ mutate refused-token-file-swallowed main.go \
 # KEEP_SERVER becomes the --server flag default again — flag prints defaults
 # on -h and on parse errors, so a userinfo password in it reaches the
 # terminal; TestHelpAndParseErrorsDoNotPrintKeepServerPassword must catch it.
-mutate server-env-as-flag-default main.go \
+MUTATION_OCCURRENCE2=1 mutate server-env-as-flag-default main.go \
 	'fs.StringVar(&o.server, "server", "",' \
 	'fs.StringVar(&o.server, "server", getenv("KEEP_SERVER"),' \
 	'scopeLevel, scopeID := bindScopeFlags(fs)' \
@@ -390,10 +400,10 @@ mutate printapierror-message-printed runner.go \
 
 # Metadata guards: all output modes and both response stages must reject a
 # malformed field. Remove both calls as well as each individual property.
-metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy-metadata-guard-noop deploy.go \
+MUTATION_OCCURRENCE=1 metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy-metadata-guard-noop deploy.go \
     'if !validDeployMetadata(res, c.baseURL) {' 'if false {' \
     'if !validDeployMetadata(res, c.baseURL) {' 'if false {'
-metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy-metadata-post-unchecked deploy.go \
+MUTATION_OCCURRENCE=1 metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy-metadata-post-unchecked deploy.go \
     'if !validDeployMetadata(res, c.baseURL) {' 'if false {'
 metadata_mutate TestDeployCLIMetadataNoLeak 'metadata reached CLI output' deploy-metadata-poll-unchecked deploy.go \
     '		if !validDeployMetadata(res, c.baseURL) {' '		if false {'
@@ -577,7 +587,7 @@ mutate flag-parse-error-printed main.go \
 mutate subcommand-help-fails main.go \
 	'func flagParseFailed(name string, err error, stderr io.Writer) int {' \
 	'func flagParseFailed(name string, err error, stderr io.Writer) int { if errors.Is(err, flag.ErrHelp) { return 2 };'
-mutate runner-flagset-output-not-discarded runner.go \
+MUTATION_OCCURRENCE=1 mutate runner-flagset-output-not-discarded runner.go \
 	'fs.SetOutput(io.Discard)' \
 	'fs.SetOutput(os.Stderr)'
 mutate runner-unknown-command-echoes-argument main.go \
@@ -594,7 +604,7 @@ mutate request-failure-detail-echoed client.go \
 # print a static text chosen by class. The property is now held by
 # reporterr-message-unfiltered and apierror-error-restores-message, which
 # restore the message itself and go red under TestAPIErrorMessageNoLeak.)
-mutate runner-server-ca-path-echoed server_ca_read.go \
+MUTATION_OCCURRENCE=1 mutate runner-server-ca-path-echoed server_ca_read.go \
 	'return nil, errServerCAUnreadable' \
 	'return nil, errors.New("reading -server-ca: " + err.Error())'
 # readPolicyFile already returns a static error, so echoing err is inert; the
@@ -625,10 +635,76 @@ mutate runner-new-request-error-echoed runner.go \
 	'"keep runner enroll-token:", err)'
 mutate runner-enroll-decode-error-echoed runner.go \
 	'fmt.Fprintln(os.Stderr, "keep runner enroll-token: decoding response: server answer is not valid")' \
-	'fmt.Fprintf(os.Stderr, "keep runner enroll-token: decoding response: %v\\n", err)'
+	'fmt.Fprintf(os.Stderr, "keep runner enroll-token: decoding response: %v\n", err)'
 mutate runner-revoke-decode-error-echoed runner.go \
 	'fmt.Fprintln(os.Stderr, "keep runner revoke: decoding response: server answer is not valid")' \
-	'fmt.Fprintf(os.Stderr, "keep runner revoke: decoding response: %v\\n", err)'
+	'fmt.Fprintf(os.Stderr, "keep runner revoke: decoding response: %v\n", err)'
+
+# keep carriers discover reads a report page by page (threat model 4.3.4.1)
+# and prints no length of a finding (4.3.4.2).
+mutate discover-empty-page-accepted discover.go \
+	'len(page.Findings) == 0 || len(page.Findings) >' \
+	'len(page.Findings) >'
+mutate discover-total-change-accepted discover.go \
+	'page.Total != first.Total ||' \
+	'false ||'
+mutate discover-offset-mismatch-accepted discover.go \
+	'page.Offset != offset ||' \
+	'false ||'
+mutate discover-overlong-page-accepted discover.go \
+	'len(page.Findings) > first.Total-offset' \
+	'false'
+mutate discover-first-page-offset-accepted discover.go \
+	'res.Offset != 0 ||' \
+	'false ||'
+mutate discover-later-pages-skipped discover.go \
+	'offset < first.Total;' \
+	'offset < 0;'
+mutate discover-later-page-status-unchecked discover.go \
+	'if status != 200 || nextDiscoverPage' \
+	'if nextDiscoverPage'
+mutate discover-foreign-page-accepted discover.go \
+	'page.RequestID != first.RequestID ||' \
+	'false ||'
+mutate discover-ok-change-accepted discover.go \
+	'page.OK != first.OK ||' \
+	'false ||'
+mutate discover-stale-page-kept discover.go \
+	'res = discoverResult{}' \
+	'_ = discoverResult{}'
+mutate discover-ok-with-findings-accepted discover.go \
+	'if first.OK && out.other > 0 {' \
+	'if false {'
+mutate discover-first-page-pending-lines discover.go \
+	'(res.State != "completed" && (res.Total != 0 || len(res.Findings) != 0))' \
+	'false'
+mutate discover-first-page-invalid-id discover.go \
+	'(len(res.Findings) < res.Total && !reqid.Valid(res.RequestID))' \
+	'false'
+mutate discover-first-status-state-unchecked discover.go \
+	'(status == 202) != (res.State == "pending") ||' \
+	'false ||'
+mutate discover-first-status-set-unchecked discover.go \
+	'(status != 200 && status != 202) ||' \
+	'false ||'
+mutate discover-first-page-empty-accepted discover.go \
+	'(len(res.Findings) == 0 && res.Total > 0) ||' \
+	'false ||'
+mutate discover-json-head-unescaped discover.go \
+	'd.w.Write(escapeJSONControls(append(head' \
+	'd.w.Write((append(head'
+mutate discover-json-lines-unescaped discover.go \
+	'd.w.Write(escapeJSONControls(buf.Bytes()))' \
+	'd.w.Write(buf.Bytes())'
+mutate discover-length-in-json discover.go \
+	'	Incident    bool   ' \
+	'	Length int; Incident    bool   '
+mutate discover-length-column discover.go \
+	'FINGERPRINT")' \
+	'FINGERPRINT LENGTH")'
+mutate discover-length-in-help main.go \
+	'fingerprint, never a value; reads' \
+	'fingerprint and length, never a value; reads'
 
 mutation_apply_only && exit "$fail"
 

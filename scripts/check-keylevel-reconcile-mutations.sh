@@ -20,23 +20,12 @@ pkg=./cmd/keep-server/app
 # require a test matching TEST to fail with a real --- FAIL. Optional 6-8:
 # a second FILE FROM TO edited in the same mutant (a guard with two layers).
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$2 from=$3 to=$4 test=$5
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! python3 - "$work/tree/$file" "$from" "$to" "${6:-}" "${7:-}" "${8:-}" <<'PY'
-import sys
-p, a, b, f2, a2, b2 = sys.argv[1:]
-s = open(p).read()
-if s.count(a) < 1:
-    sys.exit(1)
-open(p, 'w').write(s.replace(a, b, 1))
-if f2:
-    q = p.rsplit('/tree/', 1)[0] + '/tree/' + f2
-    t = open(q).read()
-    if t.count(a2) < 1:
-        sys.exit(1)
-    open(q, 'w').write(t.replace(a2, b2, 1))
-PY
+	if ! { mutation_edit "$work/tree/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/edited" &&
+		mv "$work/edited" "$work/tree/$file" &&
+		{ [ -z "${6:-}" ] || { mutation_edit "$work/tree/$6" "$7" "$8" "${mutation_occurrence2:-}" >"$work/edited" && mv "$work/edited" "$work/tree/$6"; }; }; }
 	then
 		echo "FAIL $name: mutation did not apply, the source changed, update this script"
 		fail=1
@@ -210,7 +199,6 @@ mutate journal-dump-blind   $T 'FROM audit_records a WHERE org_id = $1`' 'FROM a
 mutate error-surface-dropped $T '	for e := error(err); e != nil;' '	for e := error(nil); e != nil;' 'TestKeyLevelHookFailureLeaksNoValue'
 
 # The unmutated tree is green, nothing skipped: a skip is not a pass.
-rm -rf "$work/tree"
 mutation_snapshot "$work/tree"
 if mutation_apply_only; then
 	:

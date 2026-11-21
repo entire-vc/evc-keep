@@ -32,6 +32,14 @@ Usage:
                                            serves MCP tools on stdin/stdout: list_secrets, get_secret_meta,
                                            request_secret_input, deploy; no tool takes or returns a value
   keep audit verify [--json]               checks the organization's audit chain; exit 1 if it is broken
+  keep carriers discover --runner ID --store ID [--request-id ID] [--wait 1m] [--json]
+                                           org admin (manage_runners): the runner looks on its host for
+                                           names Keep knows and compares them with the registry; prints
+                                           match, stale, sprawl and unknown_find with path, name and
+                                           fingerprint, never a value; reads the report page by page.
+                                           unknown_find, and sprawl holding an issued value, open an
+                                           incident for a person; nothing is rotated. exit 1: findings,
+                                           failed or pages that do not add up, 4: report still pending
   keep mesh uninstall <workspace_id> [--yes] [--json]
                                            org admin: removes a Mesh installation and crypto-erases
                                            every secret of the workspace; asks first unless --yes
@@ -88,6 +96,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		return runRunner(rest)
 	case "audit":
 		return runAuditSubcommand(rest, stdout, stderr, getenv)
+	case "carriers":
+		return runCarriers(rest, stdout, stderr, getenv)
 	case "mesh":
 		return runMeshSubcommand(rest, stdin, stdout, stderr, getenv)
 	default:

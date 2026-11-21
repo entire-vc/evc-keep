@@ -1,0 +1,10 @@
+[Unit]
+Description=Stand consumer consumer-b2
+[Service]
+User=svc
+Type=notify
+NotifyAccess=main
+Restart=no
+# Stand-only: the carrier as this start reads it, kept for the leak scan's needles.
+ExecStartPre=+/usr/local/sbin/testbed-seen.sh b2 /srv/app/b2/token
+ExecStart=/usr/local/bin/consumer -name b2 -source file -path /srv/app/b2/token -listen 127.0.0.1:19202

@@ -1,0 +1,173 @@
+# The rotation testbed: two isolated hosts (systemd containers, each with its
+# own network namespace, filesystem, hostname and keep-runner), keep-server and
+# PostgreSQL in their own containers, and the agent's and operator's
+# workstations. Driven by scripts/testbed/rotation.sh; see docs/rotation-testbed.md.
+name: ${TESTBED_PROJECT:-keep-rotation-testbed}
+
+x-args: &args
+  BUILD_COMMIT: "${TESTBED_COMMIT:-unknown}"
+  BUILD_TIME: "${TESTBED_BUILD_TIME:-unknown}"
+
+x-host: &host
+  build:
+    context: "${TESTBED_SRC:-../..}"
+    dockerfile: scripts/testbed/Dockerfile
+    target: host
+    args: *args
+  # systemd as PID 1 needs a private cgroup tree and a writable /run; no host
+  # filesystem is shared and no host port is published.
+  privileged: true
+  tmpfs: ["/run", "/run/lock", "/tmp"]
+  networks: [stand]
+  depends_on:
+    keep-server: {condition: service_healthy}
+  volumes:
+    - pki:/etc/keep/pki:ro
+
+services:
+  postgres:
+    build: {context: postgres}
+    environment:
+      # An isolated stand network with no published port: no password to guard.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    networks: [stand]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keep -d keep"]
+      interval: 2s
+      retries: 30
+
+  keep-server:
+    build:
+      context: "${TESTBED_SRC:-../..}"
+      dockerfile: scripts/testbed/Dockerfile
+      target: server
+      args:
+        <<: *args
+        SERVER_VARIANT: "${TESTBED_SERVER_VARIANT:-core}"
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-server
+    hostname: keep-server
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes:
+      - serverconf:/stand:ro
+      - exchange:/exchange
+    networks: [stand]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      retries: 30
+
+  host-a:
+    <<: *host
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-host
+    hostname: host-a
+  host-b:
+    <<: *host
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-host
+    hostname: host-b
+
+  # The agent: the keep CLI and one token. It shares the server's network
+  # namespace only because the CLI sends plain http to a loopback address and
+  # nothing else; it has no volume and no database.
+  agent:
+    build:
+      context: "${TESTBED_SRC:-../..}"
+      dockerfile: scripts/testbed/Dockerfile
+      target: tools
+      args: *args
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-tools
+    network_mode: "service:keep-server"
+    depends_on:
+      keep-server: {condition: service_healthy}
+
+  # The administrator's workstation: the keep CLI and the org admin's token,
+  # for what only an admin may ask (carrier discovery needs manage_runners).
+  # Like the agent it shares the server's network namespace for the CLI's
+  # loopback-only plain http, and has no volume and no database.
+  admin:
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-tools
+    network_mode: "service:keep-server"
+    depends_on:
+      keep-server: {condition: service_healthy}
+
+  # The operator: root of the stand. Makes the keys, reads the database, plays
+  # the human at the input page and scans for leaked values.
+  operator:
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-tools
+    networks: [stand]
+    volumes:
+      - meshconf:/meshconf
+      - serverconf:/stand
+      - pki:/pki
+      - exchange:/exchange
+      - operator:/operator
+
+  # ---- the disposable Mesh (profile "mesh", `rotation.sh up --mesh`) ----
+  # entire-vc/evc-mesh built from the source tree TESTBED_MESH_SRC, its own
+  # PostgreSQL and Redis. It shares keep-server's network namespace: Mesh and
+  # Keep each accept a plain-http address of the other only on loopback, and
+  # that is the one way to give them that without weakening either. Nothing
+  # here is published to the host.
+  mesh-postgres:
+    profiles: [mesh]
+    image: postgres:16-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
+    environment:
+      POSTGRES_USER: mesh
+      POSTGRES_DB: mesh
+      POSTGRES_HOST_AUTH_METHOD: trust
+    networks: [stand]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mesh -d mesh"]
+      interval: 2s
+      retries: 30
+  mesh-redis:
+    profiles: [mesh]
+    image: redis:7-alpine@sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7
+    networks: [stand]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+  mesh:
+    profiles: [mesh]
+    build:
+      context: "${TESTBED_MESH_SRC:-../../../evc-mesh}"
+      dockerfile: "${TESTBED_SRC:-../..}/scripts/testbed/mesh/Dockerfile"
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-mesh
+    network_mode: "service:keep-server"
+    entrypoint: ["/bin/sh", "-c", ". /meshconf/mesh.env && exec mesh-api"]
+    depends_on:
+      mesh-postgres: {condition: service_healthy}
+      mesh-redis: {condition: service_healthy}
+      keep-server: {condition: service_healthy}
+    volumes:
+      - meshconf:/meshconf:ro
+      - pki:/pki:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8005/health"]
+      interval: 2s
+      retries: 40
+  meshaux:
+    profiles: [mesh]
+    build:
+      context: "${TESTBED_SRC:-../..}"
+      dockerfile: scripts/testbed/Dockerfile
+      target: meshaux
+      args: *args
+    image: ${TESTBED_PROJECT:-keep-rotation-testbed}-meshaux
+    network_mode: "service:keep-server"
+    command: ["-manifest", "/etc/keep-testbed/keep-rotator.json", "-commit", "${TESTBED_COMMIT40:-0000000000000000000000000000000000000000}",
+              "-pubkey-out", "/exchange/catalog-public-key", "-digest-out", "/exchange/catalog-artifact-sha256", "-listen", "127.0.0.1:8090"]
+    volumes:
+      - exchange:/exchange
+    depends_on:
+      keep-server: {condition: service_healthy}
+
+networks:
+  stand: {}
+volumes:
+  meshconf: {}
+  serverconf: {}
+  pki: {}
+  exchange: {}
+  operator: {}

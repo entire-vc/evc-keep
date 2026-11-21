@@ -22,7 +22,7 @@ var knownNames = map[string]bool{
 	"KEEP_DATABASE_URL": true, "KEEP_ROOT_KEY_FILE": true, "KEEP_ROOT_KEY_ID": true,
 	"KEEP_PUBLIC_URL": true, "KEEP_SERVER_TLS_CERT_FILE": true,
 	"KEEP_SERVER_TLS_KEY_FILE": true, "KEEP_HTTP_ADDR": true, "KEEP_RUNNER_ADDR": true,
-	"KEEP_TRUSTED_PROXIES": true,
+	"KEEP_TRUSTED_PROXIES": true, "KEEP_RESTART_LANES": true,
 }
 
 // addressValues are the settings that name addresses, never a credential; the

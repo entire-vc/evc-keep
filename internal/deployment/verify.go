@@ -51,6 +51,11 @@ type VerifyRequest struct {
 	SecretID  uuid.UUID
 	RequestID string
 	Actor     audit.Actor
+	// ProviderVersion, when set, names the version the carriers are expected to
+	// hold instead of the newest enabled one: a rotation that put its carriers
+	// back on the old version reads them against it while the failed new
+	// version is still enabled. Empty is the newest enabled version.
+	ProviderVersion string
 }
 
 // VerifyItem is one carrier's line of a verification. No value, path content
@@ -61,6 +66,7 @@ type VerifyItem struct {
 	Host           string
 	TargetKind     runnerproto.TargetKind
 	TargetPath     string
+	TargetField    string
 	State          VerifyState
 	ErrorClass     runnerproto.ErrorClass
 	LastVerifiedAt *time.Time
@@ -118,7 +124,11 @@ func (r *Repo) SubmitVerify(ctx context.Context, in VerifyRequest) (VerifyReport
 	if in.OrgID == uuid.Nil || in.SecretID == uuid.Nil || in.Scope.ID == uuid.Nil || !reqid.Valid(in.RequestID) || in.Actor.ID == "" || !knownActor(in.Actor) {
 		return VerifyReport{}, ErrInvalidArgument
 	}
-	hash := bindHash("keep/verify/request/v1", in.OrgID.String(), in.SecretID.String(), in.Scope.String())
+	hashed := []string{in.OrgID.String(), in.SecretID.String(), in.Scope.String()}
+	if in.ProviderVersion != "" {
+		hashed = append(hashed, in.ProviderVersion) // unpinned requests keep their stored hash
+	}
+	hash := bindHash("keep/verify/request/v1", hashed...)
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return VerifyReport{}, ErrUnavailable
@@ -143,7 +153,7 @@ func (r *Repo) SubmitVerify(ctx context.Context, in VerifyRequest) (VerifyReport
 		return VerifyReport{}, ErrUnavailable
 	}
 	var versionID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT id FROM secret_versions WHERE org_id=$1 AND secret_id=$2 AND NOT disabled ORDER BY seal_seq DESC LIMIT 1`, in.OrgID, in.SecretID).Scan(&versionID)
+	err = tx.QueryRow(ctx, `SELECT id FROM secret_versions WHERE org_id=$1 AND secret_id=$2 AND NOT disabled AND ($3='' OR provider_version=$3) ORDER BY seal_seq DESC LIMIT 1`, in.OrgID, in.SecretID, in.ProviderVersion).Scan(&versionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return VerifyReport{}, ErrNotFound
 	}
@@ -364,7 +374,7 @@ func readVerify(ctx context.Context, q querier, org uuid.UUID, requestID string)
 		return VerifyReport{}, ErrUnavailable
 	}
 	rep.Scope.Level = tenancy.Level(level)
-	rows, err := q.Query(ctx, `SELECT i.carrier_id,i.runner_id,c.host,c.target_kind,c.target_path,
+	rows, err := q.Query(ctx, `SELECT i.carrier_id,i.runner_id,c.host,c.target_kind,c.target_path,c.target_field,
 	 CASE WHEN i.state='pending' AND j.expires_at<clock_timestamp() THEN 'unreachable' ELSE i.state END,
 	 CASE WHEN i.state='pending' AND j.expires_at<clock_timestamp() THEN 'job_expired' ELSE i.error_class END,
 	 i.completed_at
@@ -381,7 +391,7 @@ func readVerify(ctx context.Context, q querier, org uuid.UUID, requestID string)
 		var it VerifyItem
 		var runner *uuid.UUID
 		var state, class, kind string
-		if rows.Scan(&it.CarrierID, &runner, &it.Host, &kind, &it.TargetPath, &state, &class, &it.LastVerifiedAt) != nil {
+		if rows.Scan(&it.CarrierID, &runner, &it.Host, &kind, &it.TargetPath, &it.TargetField, &state, &class, &it.LastVerifiedAt) != nil {
 			return VerifyReport{}, ErrUnavailable
 		}
 		if runner != nil {

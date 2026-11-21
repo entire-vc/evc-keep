@@ -29,8 +29,10 @@ set +e
 go test -tags e2e -count=1 -v -timeout 10m ./test/e2e >"$log" 2>&1
 status=$?
 set -e
-grep -E '^\s*(---|ok|FAIL|PASS)' "$log" || true
-[ "$status" -eq 0 ] || { tail -40 "$log"; fail "go test exited $status"; }
+# Only test names and packages the tree declares: an assertion, a subtest name
+# or a panic in the log may carry a value (scripts/test-result-names.py).
+"$root/scripts/test-result-names.sh" "$root" <"$log" || echo "FAIL diagnostics: test-result-names.sh exited $?"
+[ "$status" -eq 0 ] || fail "go test exited $status"
 if grep -q -- '--- SKIP' "$log"; then fail "a subtest was skipped; SKIP is not PASS"; fi
 n=$(grep -c -- '--- PASS: TestW2InputLinkToRunnerPlacement/forbidden_targets/agent-readable_path' "$log" || true)
 [ "$n" -ge 2 ] || fail "the agent-readable path cases did not both pass (passed: $n)"

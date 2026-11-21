@@ -28,6 +28,40 @@ NODE_JOBS = {
 }
 
 
+def without_editor_python(job):
+    """The job with the mutation editor's python3 taken out of its install lines.
+
+    Only a whole install line of the exact shape test_ci_config.py accepts
+    (editor_install_line: the command and bare package names, no prefix, no
+    suffix) changes; any other line, `exit 0; apk add ... python3` included,
+    stays as written and so differs from the base. A line left installing
+    nothing is dropped, and so is nodejs riding with python3 on such a new line
+    (a job whose script reaches internal/api must install node with any apk
+    line: see test_internal_api_jobs_install_node). An emptied before_script
+    goes.
+    """
+    from test_ci_config import editor_install_line
+    lines = job.get("before_script")
+    if not isinstance(lines, list):
+        return job
+    kept = []
+    for line in lines:
+        install = editor_install_line(line)
+        if install is None or "python3" not in install[1]:
+            kept.append(line)
+            continue
+        command, packages = install
+        rest = [p for p in packages if p != "python3"]
+        if [p for p in rest if p != "nodejs"]:
+            kept.append(" ".join([command] + rest))
+    job = dict(job)
+    if kept:
+        job["before_script"] = kept
+    else:
+        del job["before_script"]
+    return job
+
+
 def expanded_selftests_script(config):
     """Expand only the fully validated dispatcher job into its original commands."""
     from test_ci_config import SELFTESTS, check_selftests_job
@@ -254,7 +288,7 @@ class GuardTests(unittest.TestCase):
         import yaml
         config = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
         commands = expanded_selftests_script(config)
-        self.assertEqual(len(commands), 16)
+        self.assertEqual(len(commands), 21)
         self.assertEqual(commands[9],
                          "KEEP_JOB_CACHE_REAL_TIMEOUT=1 python3 scripts/test_builtin_job_cache.py")
         for script in (["true"], ["python3 scripts/dispatch_ci_selftests.py"],
@@ -280,6 +314,27 @@ class GuardTests(unittest.TestCase):
             # default branch, or an MR that does not touch it): the edits this
             # test expects are already in the base, so there is no diff to guard.
             self.skipTest("pipeline config equals its merge base; nothing to compare")
+        # The public-hygiene check asks the merge request API about a merged
+        # stack parent with curl and jq (test_ci_config.py pins it):
+        # security-hygiene may gain one leading `apk add --no-cache curl jq`
+        # line, and the apk lines of the jobs running that check's selftest and
+        # mutations may gain a trailing ` curl jq`. Nothing else; the base may
+        # already carry them (main does): then both sides drop them.
+        hygiene_apk, hygiene_pkgs = "apk add --no-cache curl jq", " curl jq"
+        hygiene_jobs = ("ci-selftests", "public-hygiene-mutations")
+        self.assertEqual(current["security-hygiene"]["before_script"][0], hygiene_apk)
+        self.assertEqual(current["security-hygiene"]["before_script"].count(hygiene_apk), 1)
+        for key in hygiene_jobs:
+            self.assertTrue(current[key]["before_script"][0].endswith(hygiene_pkgs), key)
+        for cfg in (current, previous):
+            job = cfg["security-hygiene"]
+            cfg["security-hygiene"] = dict(job, before_script=[
+                l for l in job.get("before_script", []) if l != hygiene_apk])
+            for key in hygiene_jobs:
+                job = cfg[key]
+                cfg[key] = dict(job, before_script=[
+                    l[:-len(hygiene_pkgs)] if l.startswith("apk add ") and l.endswith(hygiene_pkgs) else l
+                    for l in job.get("before_script", [])])
         # The mutation batch (test_ci_config.py pins it): a job may open its
         # rules with the batch's `when: never`, and the workflow may carry the
         # batch rule and the pipeline name, each exactly as below. The base may
@@ -300,6 +355,43 @@ class GuardTests(unittest.TestCase):
                     cfg[key]["rules"] = [r for r in job.get("rules", []) if r != batch_rule]
                 elif isinstance(job.get("rules"), list) and job["rules"][:1] == [batch_never]:
                     cfg[key] = dict(job, rules=job["rules"][1:])
+        # The shared mutation editor needs python3 in every mutation job
+        # (test_ci_config.py pins it): that package in an install line is the
+        # only before_script difference allowed by this normalization; a line
+        # left installing nothing goes, and so does an emptied before_script.
+        for cfg in (current, previous):
+            for key, job in list(cfg.items()):
+                if isinstance(job, dict) and (key.endswith("-mutations") or key == "netns-mutation-run"):
+                    cfg[key] = without_editor_python(job)
+        # A push to a non-default branch creates no pipeline (test_ci_config.py
+        # pins it): the base's open-MR rule and scan-only push rule may be
+        # replaced by this one rule, at their place, and the scan-only `when:
+        # never` may leave any job's rules. The base may already carry the
+        # change (main does): then there is nothing to replace.
+        push_never = {"if": '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"', "when": "never"}
+        old_push = [{"if": '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"',
+                     "when": "never"},
+                    {"if": '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"',
+                     "variables": {"KEEP_BRANCH_PUSH_SCAN_ONLY": "true"}}]
+        scan_only_never = {"if": '$KEEP_BRANCH_PUSH_SCAN_ONLY == "true"', "when": "never"}
+        self.assertEqual(current["workflow"]["rules"].count(push_never), 1)
+        self.assertNotIn("KEEP_BRANCH_PUSH_SCAN_ONLY", repr(current))
+        rules = previous["workflow"]["rules"]
+        at = [i for i in range(len(rules) - 1) if rules[i:i + 2] == old_push]
+        if at:
+            previous["workflow"]["rules"] = rules[:at[0]] + [push_never] + rules[at[0] + 2:]
+        for key, job in list(previous.items()):
+            if isinstance(job, dict) and isinstance(job.get("rules"), list) and scan_only_never in job["rules"]:
+                previous[key] = dict(job, rules=[r for r in job["rules"] if r != scan_only_never])
+        # The branch scan's selftest joins secret-scan-scope-selftest, right
+        # after the scope selftest, once (test_ci_config.py pins it).
+        branch_selftest = "./scripts/check-branch-secret-scan-selftest.sh"
+        scope_job = current["secret-scan-scope-selftest"]["script"]
+        self.assertEqual(scope_job.count(branch_selftest), 1)
+        self.assertEqual(scope_job[scope_job.index(branch_selftest) - 1], "./scripts/check-secret-scan-scope.sh")
+        for cfg in (current, previous):
+            job = cfg["secret-scan-scope-selftest"]
+            cfg["secret-scan-scope-selftest"] = dict(job, script=[l for l in job["script"] if l != branch_selftest])
         # Jobs may move to or from the dedicated mutation runner tag; that tag
         # is the only difference allowed on them (test_ci_config.py pins which).
         for key, job in list(current.items()):
@@ -312,11 +404,37 @@ class GuardTests(unittest.TestCase):
                 previous[key] = {k: v for k, v in prev.items() if k != "tags"}
         # A post-review job may gain `dependencies: []` (no earlier artifact,
         # above all not the hour-long image tar; test_ci_config.py pins it).
+        # So may rotation-testbed: earlier artifacts in its checkout make the
+        # receipt report a dirty tree (test_ci_config.py pins it too).
         for key, job in list(current.items()):
             prev = previous.get(key)
-            if (isinstance(job, dict) and isinstance(prev, dict) and job.get("stage") == "post-review"
+            if (isinstance(job, dict) and isinstance(prev, dict)
+                    and (job.get("stage") == "post-review" or key == "rotation-testbed")
                     and job.get("dependencies") == [] and "dependencies" not in prev):
                 current[key] = {k: v for k, v in job.items() if k != "dependencies"}
+        # A job running a driver that prints through test-result-names.sh may
+        # gain python3: the token on its apk line, or one `apk add --no-cache
+        # python3` line (test_ci_config.py pins that every such job has it),
+        # with nodejs when its driver touches internal/api (pinned below by
+        # InternalApiNodeTests).
+        filter_drivers = {p.name for p in (ROOT / "scripts").glob("check-*.sh")
+                          if "test-result-names.sh" in p.read_text()}
+        self.assertTrue(filter_drivers)
+        for key, job in list(current.items()):
+            prev = previous.get(key)
+            if not (isinstance(job, dict) and isinstance(prev, dict)
+                    and any(d in line for line in job.get("script", []) for d in filter_drivers)):
+                continue
+            base_before = prev.get("before_script", [])
+            before = [" ".join(w for w in line.split(" ") if w != "python3")
+                      if line.startswith("apk add ") and line not in base_before else line
+                      for line in job.get("before_script", [])
+                      if line not in ("apk add --no-cache python3", "apk add --no-cache nodejs python3")
+                      or line in base_before]
+            job = {k: v for k, v in job.items() if k != "before_script"}
+            if before or "before_script" in prev:
+                job["before_script"] = before
+            current[key] = job
         # mesh-mutations may change its two time limits (the job timeout and the
         # script `timeout` of the shard command); test_ci_config.py pins the
         # values. Everything else about the job equals the base.
@@ -378,6 +496,19 @@ class GuardTests(unittest.TestCase):
                 paths, prev_paths = rule.pop("changes", []), prev_rule.pop("changes", [])
                 self.assertEqual(rule, prev_rule, key)
                 self.assertTrue(set(prev_paths) <= set(paths), key)
+
+        def only_gains_postgres(job, prev, key):
+            # A merge-request gate whose tests need a real database may gain
+            # one throwaway postgres:17 service and the variables naming it,
+            # nothing else: a test that would skip without a database now runs.
+            if "services" in prev or "services" not in job:
+                return
+            services, variables = job.pop("services"), job.pop("variables", {})
+            self.assertEqual([{k: v for k, v in sv.items() if k != "command"} for sv in services],
+                             [{"name": "postgres:17", "alias": "postgres"}], key)
+            self.assertEqual(prev.pop("variables", {}), {}, key)
+            self.assertEqual(set(variables), {"POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "KEEP_DATABASE_URL"}, key)
+            self.assertTrue(variables["KEEP_DATABASE_URL"].startswith("postgres://keep:keep@postgres:5432/keep?"), key)  # pragma: allowlist secret
 
         # The mesh plugin's mutation script moved out of mesh-plugin into the
         # sharded mesh-plugin-mutations (pinned by test_ci_config.py): dropping
@@ -442,6 +573,7 @@ class GuardTests(unittest.TestCase):
                 self.assertIn(job.pop("tags", None), (None, ["docker", "ci-burst"]), key)
                 prev = {k: v for k, v in previous[key].items() if k != "tags"}
                 rules_only_gain_paths(job, prev, key)
+                only_gains_postgres(job, prev, key)
                 self.assertEqual(job, prev, key)
             elif key in fast_lane:
                 job = dict(current[key])
@@ -470,11 +602,21 @@ class GuardTests(unittest.TestCase):
                     # The selector's tests joined it from mutation-select-test,
                     # with the packages they need (pinned by test_ci_config.py).
                     added = ["python3 scripts/test_mutation_select.py", "./scripts/check-mutation-select-redrun.sh"]
-                    self.assertEqual(job["script"][-2:], added)
+                    # Found by content, not position: later self-tests may be
+                    # appended after the pair (order is pinned by SELFTESTS in
+                    # test_ci_config.py). The pair stays adjacent and appears once.
+                    s = job["script"]
+                    at = [i for i in range(len(s) - 1) if s[i:i + 2] == added]
+                    self.assertEqual(len(at), 1, s)
                     job["script"] = [l for l in job["script"] if l not in added]
                     prev["script"] = [l for l in prev["script"] if l not in added]
                     strip = lambda lines: [l.replace(" perl tar", "") for l in lines]
                     job["before_script"], prev["before_script"] = strip(job["before_script"]), strip(prev["before_script"])
+                    # Four nodes from the test stage, needing nothing (pinned by
+                    # test_ci_config.py); the base may already carry them.
+                    self.assertEqual((job.pop("stage"), job.pop("needs"), job.pop("parallel")), ("test", [], 4))
+                    for field in ("stage", "needs", "parallel"):
+                        prev.pop(field, None)
                     # Its rules list the sources the selftests copy; that list may grow.
                     rules_only_gain_paths(job, prev, key)
                 self.assertEqual(job, prev, key)
@@ -571,6 +713,17 @@ class GuardTests(unittest.TestCase):
                 self.assertEqual([l for l in current[key]["script"] if l not in added],
                                  [sharded if l == whole else l for l in previous[key]["script"] if l not in added])
                 self.assertEqual([l for l in current[key]["script"] if l in added], added)
+            elif key == "public-hygiene-mutations":
+                # Helper controls run before the anchor driver. Keeping their
+                # fixtures in a mutation job makes the script dependency graph
+                # reach unrelated suites (and dynamic script paths).
+                same(key, skip_keys={"rules", "stage", "resource_group", "before_script", "script"})
+                node_apk_only(key)
+                self.assertFalse(any("check-mutation-helpers.sh" in str(l)
+                                     for l in current[key]["script"]))
+                self.assertEqual(current[key]["script"],
+                                 [l for l in previous[key]["script"]
+                                  if l != "./scripts/check-mutation-helpers.sh"])
             elif key in NODE_JOBS:
                 # Its baseline can run ./internal/api, whose screen script test
                 # needs node in CI. Invariant, independent of the base: the apk
@@ -582,8 +735,21 @@ class GuardTests(unittest.TestCase):
                 # Invariant, independent of the base: the job downloads the Go
                 # modules itself (a cold runner cache has none, and the
                 # intake-receiver apply-only check fails closed without circl);
-                # every other line and field equals the base.
-                same(key, skip_keys={"before_script"})
+                # the every-suite run on main has a 20m budget in a 25m job
+                # (the base may still carry 12m and 15m); every other line and
+                # field equals the base.
+                same(key, skip_keys={"before_script", "timeout", "script"})
+                self.assertEqual(current[key]["timeout"], "25m")
+                self.assertIn(previous[key].get("timeout"), ("15m", "25m"))
+                main_run = "timeout -k 10s {} ./scripts/check-mutant-anchors.sh --all"
+                self.assertEqual(sum(main_run.format("20m") in str(l) for l in current[key]["script"]), 1)
+                helper_test = "timeout -k 10s 2m ./scripts/check-mutation-helpers.sh"
+                self.assertEqual(current[key]["script"].count(helper_test), 1)
+                self.assertEqual(current[key]["script"][0], helper_test)
+                self.assertEqual([str(l).replace(main_run.format("20m"), main_run.format("12m"))
+                                  for l in current[key]["script"] if l != helper_test],
+                                 [str(l).replace(main_run.format("20m"), main_run.format("12m"))
+                                  for l in previous[key]["script"] if l != helper_test])
                 download = "go mod download"
                 self.assertIn(download, current[key]["before_script"])
                 self.assertEqual([l for l in current[key]["before_script"] if l != download],
@@ -620,6 +786,31 @@ class GuardTests(unittest.TestCase):
                 # with the gate and trigger beside it (pinned by test_ci_config.py).
                 self.assertNotIn(key, current)
                 self.assertIn("mutation-select", current)
+            elif key == ".mutation-schedule-rules":
+                # One rule anchor for every mutation job, the nightly schedule only
+                # (owner decision of 16.11.2026; pinned by test_ci_config.py).
+                self.assertNotIn(key, current)
+            elif key == "release":
+                # The nightly gate stays first, over the full history. Only the
+                # publishing description changes to the tag's CHANGELOG section.
+                same(key, skip_keys={"variables", "before_script", "script"})
+                self.assertEqual(current[key]["variables"], {"GIT_DEPTH": 0})
+                self.assertEqual(current[key]["before_script"], ["apk add --no-cache curl git python3"])
+                self.assertEqual(len(current[key]["script"]), 2)
+                gate = "python3 scripts/release-nightly-gate.py"
+                self.assertEqual(current[key]["script"][0], gate)
+                notes = 'notes=$(sh scripts/changelog-section.sh "$CI_COMMIT_TAG" CHANGELOG.md)\n'
+                script = current[key]["script"][1]
+                self.assertEqual(script.count(notes), 1)
+                self.assertIn('--data-urlencode "description=$notes"', script)
+                self.assertNotIn("description=Release", script)
+                # Normalize only the two intended publishing changes on either
+                # side; every other command and argument must equal the base.
+                def original_publish(text):
+                    return text.replace(notes, "").replace(
+                        '"description=$notes"', '"description=Release $CI_COMMIT_TAG"')
+                self.assertEqual(original_publish(script),
+                                 original_publish(previous[key]["script"][-1]))
             elif (key.endswith("-mutations") or key in {".mutation-rules", "netns-mutation-run"}) and isinstance(previous[key], dict):
                 # When a mutation job runs is pinned by test_ci_config.py
                 # (manual on a merge request, scheduled, not on a main push).
@@ -775,6 +966,53 @@ class InternalApiNodeTests(unittest.TestCase):
                 for line in apk:
                     self.assertIn("nodejs", line.split(), f"{key}: {line}")
         self.assertGreaterEqual(checked, 10)
+
+
+class EditorPythonAllowanceTests(unittest.TestCase):
+    """The python3 allowance takes out only a whole, exactly shaped install line."""
+
+    def test_allowed_lines_normalize_to_the_base(self):
+        cases = [
+            ("apk add --no-cache python3", None),
+            ("apk add --no-cache python3 nodejs", None),
+            ("apk add --no-cache build-base bash python3", "apk add --no-cache build-base bash"),
+            ("apt-get update -qq && apt-get install -y -qq --no-install-recommends iproute2 python3",
+             "apt-get update -qq && apt-get install -y -qq --no-install-recommends iproute2"),
+            ("apt-get update -qq && apt-get install -y -qq python3", None),
+        ]
+        for line, base in cases:
+            with self.subTest(line):
+                want = {"script": ["x"]} if base is None else {"before_script": [base], "script": ["x"]}
+                self.assertEqual(without_editor_python({"before_script": [line], "script": ["x"]}), want)
+
+    def test_prefix_suffix_or_extra_line_is_kept(self):
+        # Each of these changes what the job runs; the allowance must leave it
+        # in place so the config comparison sees it.
+        lines = [
+            "exit 0; apk add --no-cache python3",
+            ": && apk add --no-cache python3",
+            "printf x && apk add --no-cache python3",
+            "true || apk add --no-cache python3",
+            "apk add --no-cache python3; exit 0",
+            "apk add --no-cache python3 && exit 0",
+            "apk add --no-cache python3 curl",
+            "apk add python3",
+            "apt-get install -y python3",
+            "apk  add --no-cache python3",
+        ]
+        for line in lines[:-4]:
+            with self.subTest(line):
+                job = {"before_script": [line], "script": ["x"]}
+                self.assertEqual(without_editor_python(job), job)
+        # A wider package list still keeps its extra package, so it differs too.
+        self.assertEqual(without_editor_python({"before_script": [lines[-4]]}),
+                         {"before_script": ["apk add --no-cache curl"]})
+        for line in lines[-3:]:
+            with self.subTest(line):
+                job = {"before_script": [line]}
+                self.assertEqual(without_editor_python(job), job)
+        job = {"before_script": ["exit 0", "apk add --no-cache python3"], "script": ["x"]}
+        self.assertEqual(without_editor_python(job), {"before_script": ["exit 0"], "script": ["x"]})
 
 
 if __name__ == "__main__":

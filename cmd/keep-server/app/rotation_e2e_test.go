@@ -412,13 +412,20 @@ func TestRotateE2E_OneFailingCarrierActivatesNothing(t *testing.T) {
 		t.Fatalf("a failing carrier must activate nothing: %+v", res)
 	}
 	got := r.activeVersions()
-	if len(got) != 2 || got[0] != "1" {
-		t.Fatalf("the old version must stay active next to the unconfirmed new one, got %v", got)
+	if len(got) != 1 || got[0] != "1" {
+		t.Fatalf("only the old version may stay active after the rollback, got %v", got)
 	}
-	var revoked int
-	_ = r.f.pool.QueryRow(context.Background(), `SELECT count(*) FROM secret_versions WHERE secret_id=$1 AND disabled`, r.secretID).Scan(&revoked)
-	if revoked != 0 {
-		t.Fatalf("%d versions disabled after a failed run", revoked)
+	var disabled []string
+	rows, err := r.f.pool.Query(context.Background(), `SELECT provider_version FROM secret_versions WHERE secret_id=$1 AND disabled`, r.secretID)
+	must(t, err)
+	for rows.Next() {
+		var v string
+		_ = rows.Scan(&v)
+		disabled = append(disabled, v)
+	}
+	rows.Close()
+	if len(disabled) != 1 || disabled[0] != "2" {
+		t.Fatalf("the catalog must show only the new version revoked after a failed run, got %v", disabled)
 	}
 	r.checkNoLeak(seen)
 }

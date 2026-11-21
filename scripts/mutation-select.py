@@ -8,8 +8,9 @@ which post-review jobs run them. In the mutation batch (started by hand;
 scripts/mutation-range.py: the commits since the last green batch),
 scripts/generate-mutation-pipeline.py turns the "jobs" part of the answer into
 the child pipeline of post-review jobs; a merge request pipeline runs no mutation
-job (owner decision of 13.11.2026), and the nightly schedule and release tags
-do not use the selector and run every job.
+job (owner decision of 13.11.2026), and the nightly schedule, the only pipeline
+that runs mutation jobs (owner decision of 16.11.2026), does not use the
+selector and runs every job.
 
   scripts/mutation-select.py [--base origin/main] [--head HEAD] [--json out.json]
   scripts/mutation-select.py --files a.go b/c.sql        (explicit file list)

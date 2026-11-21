@@ -13,13 +13,10 @@ dir=internal/testutil/pgscratch
 
 fail=0
 mutate() {
-	name=$1 file=$2 test=$3 from=$4 to=$5 nth=${6:-1}
-	rm -rf "$work/tree"
+	mutation_take_occurrences
+	name=$1 file=$2 test=$3 from=$4 to=$5 nth=${6:-${mutation_occurrence:-}}
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" -v nth="$nth" '
-		!done && (i = index($0, from)) && ++seen == nth { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$file" >"$work/tree/$file"; then
+	if ! mutation_edit "$root/$file" "$from" "$to" "$nth" >"$work/tree/$file"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -43,7 +40,7 @@ mutate retry-everything $dir/ready.go TestConnectWithRetryDoesNotRetryRejectedCr
 # The give-up text names what expired and never repeats the DSN.
 mutate dsn-in-failure $dir/ready.go TestConnectWithRetryGivesUpWithClearReason 'attempts, budget, reason(last))' 'attempts, budget, last)'
 # The scratch-database entry point waits before its first statement.
-mutate new-skips-wait $dir/pgscratch.go TestNewWaitsForLateServer 'WaitReady(t)' 't.Helper()'
+MUTATION_OCCURRENCE=1 mutate new-skips-wait $dir/pgscratch.go TestNewWaitsForLateServer 'WaitReady(t)' 't.Helper()'
 mutate newrole-skips-wait $dir/pgscratch.go TestNewRoleWaitsForLateServer 'WaitReady(t)' 't.Helper()' 2
 # Retries are paced and bounded by the budget.
 mutate no-pause $dir/ready.go TestConnectWithRetryGivesUpWithClearReason 'time.Sleep(interval)' '_ = interval'

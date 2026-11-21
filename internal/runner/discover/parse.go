@@ -5,12 +5,24 @@ import (
 	"encoding/xml"
 	"io"
 
+	"github.com/entire-vc/evc-keep/internal/targets"
 	"github.com/entire-vc/evc-keep/pkg/fingerprint"
 )
 
 type entry struct{ name, value []byte }
 
 func parseCarrier(data []byte, rule Rule, path string, key fingerprint.Key) ([]Finding, error) {
+	if rule.Kind == YAMLScalar {
+		observed, err := targets.FingerprintYAML(data, rule.Names, key)
+		if err != nil {
+			return nil, ErrParse
+		}
+		out := make([]Finding, 0, len(observed))
+		for _, f := range observed {
+			out = append(out, Finding{Path: path, Name: f.Field, Fingerprint: f.Fingerprint, Len: f.Length})
+		}
+		return out, nil
+	}
 	var entries []entry
 	var err error
 	switch rule.Kind {

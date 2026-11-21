@@ -109,7 +109,9 @@ echo "ok: /version serves commit and build_time"
 # the older schema, and `migrate up` must recover.
 kill "$srv"; wait "$srv" 2>/dev/null || true
 latest=$(ls internal/store/migrations/*.sql | sed 's#.*/0*\([0-9]*\)_.*#\1#' | sort -n | tail -1)
-prev=$((latest - 1))
+# Parallel branches may reserve migration numbers that leave gaps in this tree.
+prev=$(ls internal/store/migrations/*.sql | sed 's#.*/0*\([0-9]*\)_.*#\1#' | sort -nr | sed -n '2p')
+[ -n "$prev" ] || fail "no previous migration exists"
 (cd "$work" && GOOSE_DRIVER=postgres GOOSE_DBSTRING="$KEEP_DATABASE_URL" \
 	go run github.com/pressly/goose/v3/cmd/goose@v3.27.0 -dir "$root/internal/store/migrations" down-to "$prev") >"$work/down.log" 2>&1 \
 	|| { sed "s/$pw/[pw]/g" "$work/down.log" | tail -5; fail "goose down-to $prev"; }

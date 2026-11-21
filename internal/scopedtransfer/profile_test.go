@@ -219,6 +219,7 @@ func TestProfileRegistryMatchesMigrations(t *testing.T) {
 		"org_ca": CopyRows, "runners": RequireEmpty, "enroll_tokens": RequireEmpty, "mesh_pending_installs": RequireEmpty,
 		"mesh_user_links": CopyRows, "mesh_gate_requests": RequireEmpty,
 		"mesh_rotator_pending_installs": RequireEmpty, "mesh_rotator_bindings": CopyRows,
+		"carrier_adoption_receipts": RequireEmpty,
 	} {
 		found := false
 		for _, policy := range policies {
@@ -244,7 +245,10 @@ func TestProfileRejectsUnpinnedMigrationContents(t *testing.T) {
 
 func TestProfileMigrationPinMatchesSource(t *testing.T) {
 	paths, err := filepath.Glob("../store/migrations/*.sql")
-	if err != nil || len(paths) != int(SchemaVersion) {
+	// SchemaVersion is the highest migration identity; reserved numbers may
+	// leave gaps. The complete name/content pin below still detects any
+	// missing migration, and TestProfileRegistryMatchesMigrations checks max.
+	if err != nil || len(paths) == 0 {
 		t.Fatal("migration identity positive control missing")
 	}
 	sort.Strings(paths)

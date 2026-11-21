@@ -11,6 +11,8 @@ as an integration — Keep has no hard dependency on Mesh.
 
 ## Status: pre-alpha
 
+Current release: 0.7.0 ([CHANGELOG](CHANGELOG.md)).
+
 The server and CLI support runner registration, renewal over mTLS, and
 revocation. `keep-runner enroll` registers a host and pins its organization's
 CA and job-signing key; `keep-runner check` verifies its local credential
@@ -27,7 +29,25 @@ deployments run without a person's approval is the organization's deployment
 policy, set by the operator with `keep-server set-deploy-policy`
 (`docs/deploy-policy.md`).
 
-Expect breaking changes while the interfaces stabilize.
+A `systemd-credential` carrier is verified under the unit of its last deploy.
+
+Carriers are tracked in a registry. `keep carriers discover` has a runner scan
+its own host and compare what it finds with the registry: each finding is
+`match`, `stale`, `sprawl` (a known name where no carrier is registered) or
+`unknown_find` (a registered carrier the scan did not find), with a keyed
+fingerprint and never a value (`docs/carrier-discovery.md`). Rotation lays a new version out on every
+carrier and checks each fingerprint before the old version is retired; a failed
+run is rolled back and opens an incident for a person. With the Mesh build, a
+secret bound to a Mesh agent rotates that agent's key through the same request.
+`keep-server offline-transfer` moves one organization between installations
+over files (`docs/offline-transfer.md`). In Mesh, the workspace setting `approvals_via_mesh` chooses
+per workspace whether approvals open a Mesh card or stay in Keep's console, and
+the extension asks only for the Mesh rights it uses (see Permissions). The embedded
+interface lists secrets and carrier status, shows each secret's versions and
+rotation history, and refreshes an active rotation run until it finishes.
+
+Expect breaking changes while the interfaces stabilize; each release lists them
+in the [CHANGELOG](CHANGELOG.md).
 
 ## Quickstart
 
@@ -107,8 +127,14 @@ released, and answered with `Cache-Control: no-store`. Details:
 | `agents:read` | Takes the agents from that snapshot (id, slug, sponsoring user) and keeps them in its mirror. | Creates, edits or deletes no agent. |
 | `agent_keys:read` | Keeps the key id, label and state (active, revoked) of agent keys, from the snapshot's active keys and the `agent.key.*` events. Keep makes no call to the agent-keys API under this permission. | Never sees or stores a key's secret part. Issues, rotates or revokes no key: that is the separate `keep-rotator` extension ([service account](docs/mesh-service-account.md)). |
 | `tasks:write` | When `KEEP_MESH_EXTENSION=1` and the card settings are configured, opens a confirmation card for a Keep request that needs a person's approval (`POST /api/v1/projects/{id}/tasks`), binds it to the request (`PUT /api/v1/tasks/{id}/external-ref`, request id and hash), arms its human gate, and moves it to cancelled when the request lapses. The card holds the secret's name and class, the target kind and the request id. | Puts no secret value, provider text or free text of the request on a card. Reads, edits or moves no other card. |
-| `comments:write` | Declared, but not used: Keep writes no comment to Mesh. | Reads or writes no comment. |
-| `secrets:write` | Declared, but Keep makes no call to Mesh under it. In the other direction, Mesh stores the values of its extension settings in Keep (`PUT` and `POST .../resolve` under `/orgs/{org_id}/mesh/secrets/{ref}`), signed with the install's events secret; Keep answers a write with `ref`, `version` and `fingerprint` only, and `resolve` with the stored value (the one exception above: rate limited, journaled before release, `Cache-Control: no-store`). | Pushes no secret value into Mesh on its own: a value leaves Keep for Mesh only as the answer to the workspace's signed `resolve` call. A workspace reaches only the refs it wrote itself. |
+
+Keep asks for no other right. It writes no comment to Mesh, so it does not
+ask for `comments:write`. It does not ask for `secrets:write` either: Mesh
+maps no call of an extension to that right, and the other direction, Mesh
+storing the values of its extension settings in Keep (`PUT` and
+`POST .../resolve` under `/orgs/{org_id}/mesh/secrets/{ref}`), is Keep's own
+API, authenticated by the install's events secret, and needs no right in
+Mesh. Keep answers a write with `ref`, `version` and `fingerprint` only.
 
 ### Events
 
@@ -136,7 +162,7 @@ other domain.
 | Slot | What it shows | What it does not do |
 |---|---|---|
 | `sidebar.item` | The `Keep` item, opening `/mesh/ui/secrets` in a frame: secrets of the organization and of the signed-in user by name, scope, class, version, fingerprint, length and status. Organization admins can change the organization key level there. | Never renders a value. |
-| `workspace.settings` | Mesh's settings form for the workspace setting `approvals_via_mesh`. Keep does not read this setting yet: confirmation cards are switched on by the server's own settings (`KEEP_MESH_*`). | Holds no secret value. |
+| `workspace.settings` | Mesh's settings form for the workspace setting `approvals_via_mesh`. Mesh sends a snapshot of the non-secret workspace settings with every install handshake; Keep reads only `approvals_via_mesh` and applies it per workspace. With the server's Mesh confirmation integration configured, `true` (the default) opens a confirmation card for a request that needs approval. `false`: no Mesh card; the request is approved in Keep's own console, and a deploy approval also gets a Telegram notice when one is configured. An older Mesh that sends no settings preserves the last setting, or the default on a new installation. | Holds no secret value. |
 
 ## Accounts
 

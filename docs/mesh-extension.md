@@ -144,6 +144,21 @@ Mesh calls the route with no bearer token:
   Unknown fields are ignored; `signing_secret` is 32 to 512 bytes (Mesh
   generates 64 hex characters and keeps it as the workspace secret
   `EXT_KEEP_SIGNING_SECRET`)
+- optional `settings`: an object, the full snapshot of the extension's non-secret
+  workspace settings. Keep reads only `approvals_via_mesh` (a JSON boolean) and
+  records it on every handshake that authenticates as the workspace, in the
+  order Mesh signed the snapshots: a snapshot whose `X-Mesh-Timestamp` is older
+  than that of the last applied one changes nothing (two snapshots signed in
+  the same second: the later arrival wins). If `settings` is absent, the stored
+  value is kept (default `true`). A snapshot without the key returns the setting
+  to the default. A snapshot that is not an object (including `null`), or a
+  non-boolean `approvals_via_mesh`, is `400`. With `false` an approval opens no Mesh card
+  and is decided in Keep's console.
+  Every change of the stored value is audited as `mesh.approvals_channel`, in
+  the same transaction as the change, with the workspace as the actor and only
+  the new value as the reason (`approvals_via_mesh=true`, `=false` or
+  `=default`); a snapshot that leaves the value as it is writes no record. If
+  the record cannot be written, nothing changes and the handshake gets `503`.
 
 The outcome:
 
@@ -155,7 +170,8 @@ The outcome:
   `200 {"ok": true, "request_id": "..."}`; nothing secret is returned;
 - the workspace is already connected and `signing_secret` is the bound events
   secret (Mesh repeats the handshake after a restart with the same secret):
-  `200`, and nothing is written;
+  `200`; the supplied settings snapshot is recorded if it changes the stored
+  setting. The installation credentials remain unchanged;
 - anything else (no window, an expired or spent window, another digest, a
   bad or stale signature, another `extension_id`, another secret for a
   connected workspace): the same `401 unauthenticated`, and nothing is written.
@@ -397,6 +413,12 @@ a part of them stops the start with the name of the missing variable:
 | `KEEP_MESH_CANCEL_STATUS_ID` | the project's cancelled status, for lapsed requests |
 | `KEEP_MESH_WORKSPACE_ID` or `KEEP_MESH_TOKEN_FILE` | where the extension actor's token comes from; exactly one of the two |
 
+With this integration configured, the extension workspace's
+`approvals_via_mesh` setting selects its approval channel. `false` leaves the
+request in Keep's console (with the configured Telegram notice for deploys)
+and makes no call to Mesh. `true`, the default, opens the Mesh confirmation
+card. Without this server configuration, Keep uses its ordinary approval flow.
+
 `KEEP_MESH_WORKSPACE_ID` names the installation whose actor token Keep sealed
 at the admin install or at the last `POST /mesh/token` delivery. Keep unseals it for each call to Mesh, so the token a
 later install or rotation seals is used next, without a restart; there is no
@@ -529,7 +551,9 @@ The manifest declares one sidebar item, titled `Keep`, at `/mesh/ui/secrets`. Th
 
 **Framing.** Every response carries `Content-Security-Policy: … frame-ancestors <origins>`, where the origins are the `mesh_url` values of the organization's install records. They never come from the request. With no session or no install record the value is `'none'`. `X-Frame-Options` is not sent (it cannot name an origin).
 
-**postMessage.** The screen script acts on a message only if `event.source` is the parent window and `event.origin` is one of the recorded origins; anything else is ignored silently. It accepts `mesh.context` (version 1) and sends `mesh.ready`, `mesh.resize`, `mesh.navigate` (a path with a single leading `/`) and `mesh.toast` (text up to 300 characters) with the Mesh origin as `targetOrigin`, never `*`. The token field of `mesh.context` is named `token`, as in the Mesh implementation.
+**postMessage.** The screen script acts on a message only if `event.source` is the parent window and `event.origin` is one of the recorded origins; anything else is ignored silently. It accepts `mesh.context` (version 1 and 2) and `mesh.theme` (version 2), and sends `mesh.ready`, `mesh.resize`, `mesh.navigate` (a path with a single leading `/`) and `mesh.toast` (text up to 300 characters) with the Mesh origin as `targetOrigin`, never `*`. The token field of `mesh.context` is named `token`, as in the Mesh implementation.
+
+**Theme and fonts.** The style is painted with the Mesh theme tokens (`hsl(var(--background))` and so on) and falls back to the Mesh light theme; it has no palette, font or dark mode of its own. The theme arrives as `theme: {mode, tokens}` in `mesh.context` and as a `mesh.theme` message when the person switches light and dark. The script sets on the root element only the listed colour tokens with a value of digits, dots, spaces and `%` (at most 32 characters) and `--radius` of the form `<number>rem`; `mode` `light` or `dark` sets `color-scheme`. Any other name or value is dropped silently. Inter (400–700) and JetBrains Mono (400) are built into the binary and served at `GET /mesh/ui/fonts/{name}` (only the embedded names, otherwise `404`; OFL-1.1, see `NOTICE`); the policy allows `font-src 'self'` and nothing else.
 
 **Key level on this server.** The level is read from `keep_org_key_level`. Changing it is offered only when the server has a key-level changer wired in; the standard server wires it in when the Mesh extension is enabled, and a server built without one shows the page read-only.
 

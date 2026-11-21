@@ -107,6 +107,27 @@ cli_mutation_witness() {
         runner-enroll-host-unchecked) printf '%s\n' 'TestRunnerEnrollTokenSuccessLineIsClosedList' ;;
         runner-revoke-ok-false-accepted) printf '%s\n' 'TestRunnerRevokeFailsClosedOnOKFalse' ;;
         printapierror-message-printed) printf '%s\n' 'TestPrintAPIErrorNeverPrintsMessage' ;;
+        discover-empty-page-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-total-change-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-offset-mismatch-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-overlong-page-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-first-page-offset-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-later-pages-skipped) printf '%s\n' 'TestDiscoverCLIReadsThreePagesWithTheWorstPage' ;;
+        discover-length-in-json) printf '%s\n' 'TestDiscoverCLIPrintsNoLength' ;;
+        discover-length-column) printf '%s\n' 'TestDiscoverCLIPrintsNoLength' ;;
+        discover-length-in-help) printf '%s\n' 'TestDiscoverCLIPrintsNoLength' ;;
+        discover-later-page-status-unchecked) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-foreign-page-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-ok-change-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-stale-page-kept) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-ok-with-findings-accepted) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-first-page-pending-lines) printf '%s\n' 'TestDiscoverCLIRefusesLinesOnAReportThatIsNotCompleted' ;;
+        discover-first-page-invalid-id) printf '%s\n' 'TestDiscoverCLIRefusesPagesThatDoNotAddUp' ;;
+        discover-first-status-state-unchecked) printf '%s\n' 'TestDiscoverCLIRefusesAFirstAnswerWhoseStatusDisagrees' ;;
+        discover-first-status-set-unchecked) printf '%s\n' 'TestDiscoverCLIRefusesAFirstAnswerWhoseStatusDisagrees' ;;
+        discover-first-page-empty-accepted) printf '%s\n' 'TestDiscoverCLIRefusesAnEmptyFirstPageBeforeTotal' ;;
+        discover-json-head-unescaped) printf '%s\n' 'TestDiscoverCLIJSONEscapesControls' ;;
+        discover-json-lines-unescaped) printf '%s\n' 'TestDiscoverCLIJSONEscapesControls' ;;
         *) return 1 ;;
     esac
 }

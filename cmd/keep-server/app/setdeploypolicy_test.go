@@ -163,7 +163,7 @@ func (w *policyWorld) policyAudit(t *testing.T) []string {
 	return out
 }
 
-var setPolicyStdout = regexp.MustCompile(`^org_id=([0-9a-f-]{36}) revision=(\d+) rules=(\d+) exec_rules=(\d+) max_deploys_per_hour=(\d+)( dry_run=true)?\nchange: (.*)\n$`)
+var setPolicyStdout = regexp.MustCompile(`^org_id=([0-9a-f-]{36}) revision=(\d+) rules=(\d+) exec_rules=(\d+) adoption_rules=(\d+) max_deploys_per_hour=(\d+)( dry_run=true)?\nchange: (.*)\n$`)
 
 // Written before the command: the canary value of the secret a rule names
 // is on no surface of the command — stdout, stderr, the log, or any column
@@ -217,12 +217,12 @@ func TestSetDeployPolicy_RuleTurnsApprovalIntoJob(t *testing.T) {
 
 	res := w.run(t, "--org-id", w.org.String(), "--policy-file", w.fileRule(t, w.secret, w.runner.String(), "/var/lib/partner/ext"))
 	m := setPolicyStdout.FindStringSubmatch(res.stdout)
-	if res.code != 0 || m == nil || m[1] != w.org.String() || m[2] != "1" || m[3] != "1" || m[4] != "0" || m[5] != "10" || m[6] != "" {
-		t.Fatalf("set: exit %d stdout %q stderr %q, want revision=1 rules=1 exec_rules=0 max_deploys_per_hour=10", res.code, res.stdout, res.stderr)
+	if res.code != 0 || m == nil || m[1] != w.org.String() || m[2] != "1" || m[3] != "1" || m[4] != "0" || m[5] != "0" || m[6] != "10" || m[7] != "" {
+		t.Fatalf("set: exit %d stdout %q stderr %q, want revision=1 rules=1 exec_rules=0 adoption_rules=0 max_deploys_per_hour=10", res.code, res.stdout, res.stderr)
 	}
 	ruleKey := w.secret.String() + "/" + w.runner.String() + "/file//var/lib/partner/ext"
-	if want := "revision=0->1 max_per_hour=10->10 +" + ruleKey; m[7] != want {
-		t.Errorf("change line %q, want %q", m[7], want)
+	if want := "revision=0->1 max_per_hour=10->10 +" + ruleKey; m[8] != want {
+		t.Errorf("change line %q, want %q", m[8], want)
 	}
 	if out := w.submit(t); out.Status != deployment.Queued || out.JobID == uuid.Nil {
 		t.Fatalf("with the rule: %s, want a queued job", out.Status)
@@ -239,13 +239,13 @@ func TestSetDeployPolicy_RuleTurnsApprovalIntoJob(t *testing.T) {
 
 	// The red control: the same secret, another directory.
 	res = w.run(t, "--org-id", w.org.String(), "--policy-file", w.fileRule(t, w.secret, w.runner.String(), "/srv/other"), "--max-deploys-per-hour", "20")
-	if m = setPolicyStdout.FindStringSubmatch(res.stdout); res.code != 0 || m == nil || m[2] != "2" || m[5] != "20" {
+	if m = setPolicyStdout.FindStringSubmatch(res.stdout); res.code != 0 || m == nil || m[2] != "2" || m[6] != "20" {
 		t.Fatalf("replace: exit %d stdout %q stderr %q, want revision=2 max_deploys_per_hour=20", res.code, res.stdout, res.stderr)
 	}
 	// Two full rule keys do not fit the 200-rune reason: the removed one is
 	// counted, not cut in half.
-	if want := "revision=1->2 max_per_hour=10->20 +" + w.secret.String() + "/" + w.runner.String() + "/file//srv/other (+1 more)"; m[7] != want {
-		t.Errorf("change line %q, want %q", m[7], want)
+	if want := "revision=1->2 max_per_hour=10->20 +" + w.secret.String() + "/" + w.runner.String() + "/file//srv/other (+1 more)"; m[8] != want {
+		t.Errorf("change line %q, want %q", m[8], want)
 	}
 	if out := w.submit(t); out.Status != deployment.NeedsApproval {
 		t.Fatalf("with a rule for another directory: %s, want approval_required", out.Status)
@@ -262,7 +262,7 @@ func TestSetDeployPolicy_ExpectRevisionAndDryRun(t *testing.T) {
 	file := w.fileRule(t, w.secret, w.runner.String(), "/var/lib/partner/ext")
 
 	dry := w.run(t, "--org-id", w.org.String(), "--policy-file", file, "--dry-run")
-	if m := setPolicyStdout.FindStringSubmatch(dry.stdout); dry.code != 0 || m == nil || m[2] != "1" || m[6] != " dry_run=true" {
+	if m := setPolicyStdout.FindStringSubmatch(dry.stdout); dry.code != 0 || m == nil || m[2] != "1" || m[7] != " dry_run=true" {
 		t.Fatalf("dry run: exit %d stdout %q stderr %q, want the would-be revision 1 and dry_run=true", dry.code, dry.stdout, dry.stderr)
 	}
 	if rev, n := w.revision(t), len(w.policyAudit(t)); rev != 0 || n != 0 {

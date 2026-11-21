@@ -7,7 +7,7 @@ other than the requester. This page is for operators of a Keep server.
 
 ## What a rule admits
 
-A policy is a JSON object with two lists:
+A policy is a JSON object with three independent lists:
 
 ```json
 {
@@ -25,6 +25,15 @@ A policy is a JSON object with two lists:
       "template_id": "<exec template id>",
       "labels": {"environment": "staging"}
     }
+  ],
+  "adoption_rules": [
+    {
+      "secret_id": "<secret uuid>",
+      "runner_id": "<runner uuid>",
+      "kind": "yaml-scalar",
+      "path": "/srv/app/config.yaml",
+      "field": "service.token"
+    }
   ]
 }
 ```
@@ -33,15 +42,22 @@ A policy is a JSON object with two lists:
   `path_prefix` (the target path must be below it, not equal to it).
 - `exec_rules[]` admits one command template (`template_id`) with one secret. A template that
   declares network access always waits for a person.
-- Each rule names its hosts by `runner_id`, by `labels` (`environment`:
+- `adoption_rules[]` admits one read-only YAML adoption by the exact
+  `secret_id`, `runner_id`, `kind`, `path` and `field`. It has no prefix or
+  label selector. Deployment and exec rules do not grant adoption.
+- Deployment and exec rules name their hosts by `runner_id`, by `labels` (`environment`:
   `development|staging|production`, `platform`: `linux|darwin`), or both; both
   must then match. A rule with neither is refused.
 - `secret_id` is always required: there is no organization-wide wildcard.
 - A `prod` secret still needs a person the first time it is deployed to a
   target and for every exec, and is never delivered to a host that shares a
   uid or has unknown attributes, whatever the policy says.
+- Every `prod` adoption requires a fresh human approval and the same host
+  restrictions. An unlisted adoption also needs approval. The runner must
+  independently permit that exact path/field in `adoption_targets` and allow
+  reading it in `targets`; see [YAML adoption](yaml-carrier-adoption.md).
 
-At most 128 rules and 128 exec rules.
+At most 128 entries in each list. YAML has no deployment or rotation writer.
 
 ## Setting the policy
 
@@ -67,12 +83,13 @@ KEEP_DATABASE_URL=... keep-server set-deploy-policy --org-id <org_id> --policy-f
 stdout is two lines:
 
 ```
-org_id=<uuid> revision=<n> rules=<k> exec_rules=<e> max_deploys_per_hour=<m>
+org_id=<uuid> revision=<n> rules=<k> exec_rules=<e> adoption_rules=<a> max_deploys_per_hour=<m>
 change: revision=<a>-><b> max_per_hour=<x>-><y> +<added rule> -<removed rule> …
 ```
 
 A rule is shown by its key, `secret_id/runner_id|labels/kind/path_prefix`
-(exec rules: `exec:secret_id/runner_id|labels/template_id`). A long change is
+(exec rules: `exec:secret_id/runner_id|labels/template_id`; adoption rules:
+`adopt:secret_id/runner_id/kind/path/field`). A long change is
 cut with a count of the rules not shown.
 
 Each stored change writes one journal record `deploy.policy_set` in the same
@@ -88,4 +105,4 @@ and exits non-zero; nothing is written:
 | `conflict` | `--expect-revision` does not match the stored revision |
 | `not_found` | no such organization |
 
-Needs the schema at version 42 or later (`keep-server migrate up`).
+Needs the schema at version 59 or later (`keep-server migrate up`).

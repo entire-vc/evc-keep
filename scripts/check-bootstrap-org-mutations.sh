@@ -23,24 +23,17 @@ if ! mutation_apply_only && [ -z "${KEEP_DATABASE_URL:-}" ]; then
 fi
 
 fail=0
-# edit FROM TO: $src with the first literal occurrence of FROM replaced.
-edit() {
-	awk -v from="$1" -v to="$2" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }'
-}
 
-# mutate NAME FROM TO WITNESS [FROM2 TO2]: replace the first literal occurrence
+# mutate NAME FROM TO WITNESS [FROM2 TO2]: replace the only or explicitly named literal occurrence
 # of FROM (and of FROM2) in $src with TO (TO2); WITNESS in $pkg must fail.
 mutate() {
+	mutation_take_occurrences
 	name=$1 from=$2 to=$3 witness=$4
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	# No pipe: its status would be the last edit's only, hiding a first
 	# FROM that no longer matches.
-	if ! edit "$from" "$to" <"$root/$src" >"$work/edit1" ||
-		! if [ -n "${5:-}" ]; then edit "$5" "$6" <"$work/edit1"; else cat "$work/edit1"; fi >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/edit1" ||
+		! if [ -n "${5:-}" ]; then mutation_edit "$work/edit1" "$5" "$6" "${mutation_occurrence2:-}"; else cat "$work/edit1"; fi >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -68,7 +61,9 @@ full=TestBootstrapOrg_CreatesOrgCAAdminAndJournal
 mutate token-in-stdout ', org.ID, dest)' ', org.ID, dest+identity.Reveal(issued.Token))' $leak
 mutate audit-wrong-action 'Action: audit.ActionOrgBootstrap,' 'Action: audit.ActionTokenIssue,' $full
 mutate audit-failed-status 'Result: audit.Result{Status: audit.StatusOK},' 'Result: audit.Result{Status: audit.StatusFailed},' $full
-mutate audit-dropped 'journal.Append(ctx, audit.Record{' 'bootstrapNoop(ctx, journal, audit.Record{' $full 'func bootstrapFail(' 'func bootstrapNoop(_ context.Context, _ *audit.Journal, r audit.Record) (audit.Record, error) { return r, nil }\n\nfunc bootstrapFail('
+mutate audit-dropped 'journal.Append(ctx, audit.Record{' 'bootstrapNoop(ctx, journal, audit.Record{' $full 'func bootstrapFail(' 'func bootstrapNoop(_ context.Context, _ *audit.Journal, r audit.Record) (audit.Record, error) { return r, nil }
+
+func bootstrapFail('
 
 mutate existing-file-precheck 'if _, err := os.Lstat(dest); err == nil {' 'if false {' TestBootstrapOrg_ExistingTokenFileKeptAndNoOrg
 mutate relative-path 'if !filepath.IsAbs(*tokenFile) {' 'if false {' TestBootstrapOrg_RelativeTokenFileRefused
@@ -103,10 +98,14 @@ issueleak=TestIssueAdminToken_TokenOnlyInFile
 issuefull=TestIssueAdminToken_IssuesForTheAdminAndJournals
 issuerefuse=TestIssueAdminToken_Refusals
 mutate issue-token-in-stdout 'expiresAt.Format(time.RFC3339), dest)' 'expiresAt.Format(time.RFC3339), dest+identity.Reveal(issued.Token))' $issueleak
-mutate issue-audit-dropped 'if err := issueAppend(ctx, pool, logger, audit.Record{' 'if err := issueNoop(ctx, pool, logger, audit.Record{' $issuefull 'func issueAdminTokenFail(' 'func issueNoop(_ context.Context, _ *pgxpool.Pool, _ *slog.Logger, _ audit.Record) error { return nil }\n\nfunc issueAdminTokenFail('
-mutate issue-audit-error-ignored 'if err := issueAppend(ctx, pool, logger, audit.Record{' 'if err := issueAppendIgnored(ctx, pool, logger, audit.Record{' TestIssueAdminToken_JournalFailureIssuesNothing 'func issueAdminTokenFail(' 'func issueAppendIgnored(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r audit.Record) error { _ = issueAppend(ctx, pool, logger, r); return nil }\n\nfunc issueAdminTokenFail('
+mutate issue-audit-dropped 'if err := issueAppend(ctx, pool, logger, audit.Record{' 'if err := issueNoop(ctx, pool, logger, audit.Record{' $issuefull 'func issueAdminTokenFail(' 'func issueNoop(_ context.Context, _ *pgxpool.Pool, _ *slog.Logger, _ audit.Record) error { return nil }
+
+func issueAdminTokenFail('
+mutate issue-audit-error-ignored 'if err := issueAppend(ctx, pool, logger, audit.Record{' 'if err := issueAppendIgnored(ctx, pool, logger, audit.Record{' TestIssueAdminToken_JournalFailureIssuesNothing 'func issueAdminTokenFail(' 'func issueAppendIgnored(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r audit.Record) error { _ = issueAppend(ctx, pool, logger, r); return nil }
+
+func issueAdminTokenFail('
 mutate issue-token-scope-empty 'Scope: scope.String(), ExpiresAt' 'Scope: "", ExpiresAt' $issuefull
-mutate issue-actor-type 'Actor:  audit.Actor{Type: audit.ActorSystem, ID: "keep-server-issue-admin-token", Via: audit.ViaCLI},' 'Actor:  audit.Actor{Type: audit.ActorUser, ID: "keep-server-issue-admin-token", Via: audit.ViaCLI},' $issuefull
+MUTATION_OCCURRENCE=1 mutate issue-actor-type 'Actor:  audit.Actor{Type: audit.ActorSystem, ID: "keep-server-issue-admin-token", Via: audit.ViaCLI},' 'Actor:  audit.Actor{Type: audit.ActorUser, ID: "keep-server-issue-admin-token", Via: audit.ViaCLI},' $issuefull
 mutate issue-dir-probe 'probe, err := os.CreateTemp(filepath.Dir(dest), ".keep-issue-*")' 'probe, err := os.CreateTemp(os.TempDir(), ".keep-issue-*")' TestIssueAdminToken_UnwritableDirectoryRefused
 mutate issue-audit-wrong-action 'Action: audit.ActionTokenIssue,' 'Action: audit.ActionTokenRevoke,' $issuefull
 mutate issue-token-id-not-journaled 'TokenID: tokenID,' '' $issuefull
@@ -120,7 +119,9 @@ mutate issue-ttl-missing-accepted 'ttl <= 0 || ' '' TestIssueAdminToken_TTLRequi
 mutate issue-ttl-over-limit-accepted 'ttl > bootstrapMaxTTL' 'ttl > 100*bootstrapMaxTTL' TestIssueAdminToken_TTLRequiredAndBounded
 mutate issue-ttl-malformed-accepted 'if err != nil || ttl <= 0' 'if ttl < 0' TestIssueAdminToken_TTLRequiredAndBounded
 mutate issue-undelivered-not-revoked 'if ids.Revoke(context.WithoutCancel(ctx), identity.Principal{OrgID: orgID}, issued.TokenID) != nil {' 'if false {' TestIssueAdminToken_UndeliveredTokenRevoked
-mutate issue-revoke-audit-error-ignored 'if err := issueAppend(context.WithoutCancel(ctx), pool, logger, audit.Record{' 'if err := issueAppendIgnored(context.WithoutCancel(ctx), pool, logger, audit.Record{' TestIssueAdminToken_UndeliveredRevocationJournalFailureReported 'func issueAdminTokenFail(' 'func issueAppendIgnored(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r audit.Record) error { _ = issueAppend(ctx, pool, logger, r); return nil }\n\nfunc issueAdminTokenFail('
+mutate issue-revoke-audit-error-ignored 'if err := issueAppend(context.WithoutCancel(ctx), pool, logger, audit.Record{' 'if err := issueAppendIgnored(context.WithoutCancel(ctx), pool, logger, audit.Record{' TestIssueAdminToken_UndeliveredRevocationJournalFailureReported 'func issueAdminTokenFail(' 'func issueAppendIgnored(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, r audit.Record) error { _ = issueAppend(ctx, pool, logger, r); return nil }
+
+func issueAdminTokenFail('
 src=cmd/keep-server/app/bootstrap.go
 
 # the default store: bootstrap-org binds one, bind-default-store does the same
@@ -129,7 +130,9 @@ src=cmd/keep-server/app/bootstrap.go
 src=cmd/keep-server/app/bootstrap.go
 mutate no-default-store 'if _, _, err := catalog.New(d.pool).EnsureDefaultBuiltinStore(ctx, org.ID); err != nil {' 'if _ = catalog.New; false {' TestBootstrapOrg_FirstSecretCreatable
 src=cmd/keep-server/app/binddefault.go
-mutate bind-audit-dropped 'journal.Append(ctx, audit.Record{' 'bindNoop(ctx, journal, audit.Record{' TestBindDefaultStore_ExistingOrgThenRepeat 'func bindDefaultStoreFail(' 'func bindNoop(_ context.Context, _ *audit.Journal, r audit.Record) (audit.Record, error) { return r, nil }\n\nfunc bindDefaultStoreFail('
+mutate bind-audit-dropped 'journal.Append(ctx, audit.Record{' 'bindNoop(ctx, journal, audit.Record{' TestBindDefaultStore_ExistingOrgThenRepeat 'func bindDefaultStoreFail(' 'func bindNoop(_ context.Context, _ *audit.Journal, r audit.Record) (audit.Record, error) { return r, nil }
+
+func bindDefaultStoreFail('
 mutate bind-reports-created 'binding := "exists"' 'binding := "created"' TestBindDefaultStore_ExistingOrgThenRepeat
 src=internal/catalog/store.go
 pkg=internal/catalog
@@ -137,7 +140,7 @@ mutate binding-dropped '`INSERT INTO store_bindings (id, org_id, scope_level, sc
 mutate store-outside-tx 'insertStoreTx(ctx, tx, id, org,' 'insertStoreTx(ctx, c.pool, id, org,' TestEnsureDefaultBuiltinStore_StoreAndBindingAtomic
 mutate no-org-lock 'FROM organizations WHERE id = $1 FOR NO KEY UPDATE`' 'FROM organizations WHERE id = $1`' TestEnsureDefaultBuiltinStore_ConcurrentCallsSerialized
 mutate existing-binding-ignored 'return bound, false, nil' '_ = bound' TestEnsureDefaultBuiltinStore_KeepsExistingBinding
-mutate created-not-reported 'return storeID, true, nil' 'return storeID, false, nil' TestEnsureDefaultBuiltinStore_BindsOnceAndIsIdempotent
+MUTATION_OCCURRENCE=1 mutate created-not-reported 'return storeID, true, nil' 'return storeID, false, nil' TestEnsureDefaultBuiltinStore_BindsOnceAndIsIdempotent
 mutate disabled-store-bound 'requireUsableStore(ctx, tx, org, []tenancy.Scope{scope}, storeID); err != nil' 'error(nil); err != nil' TestEnsureDefaultBuiltinStore_BindsExistingDefault
 mutate unknown-org-unclassified 'apperr.New(apperr.ClassNotFound, "organization not found")' 'fmt.Errorf("catalog: organization")' TestEnsureDefaultBuiltinStore_UnknownOrg
 pkg=cmd/keep-server/app
@@ -155,7 +158,9 @@ mutate policy-foreign-runner 'return policyErr("%s.runner_id is not a runner of 
 mutate policy-nil-secret 'if rule.SecretID == uuid.Nil {' 'if false && rule.SecretID == uuid.Nil {' $refusals
 mutate policy-expect-ignored 'if c.ExpectRevision >= 0 && c.ExpectRevision != res.PrevRevision {' 'if false {' TestSetDeployPolicy_ExpectRevisionAndDryRun
 mutate policy-dry-run-writes 'if c.DryRun {' 'if false {' TestSetDeployPolicy_ExpectRevisionAndDryRun
-mutate policy-audit-dropped 'rec, err := r.journal.AppendTx(ctx, tx, audit.Record{' 'rec, err := policyNoop(ctx, tx, audit.Record{' $policy '// checkPolicyRefs requires every' 'func policyNoop(_ context.Context, _ pgx.Tx, r audit.Record) (audit.Record, error) { return r, nil }\n\n// checkPolicyRefs requires every'
+mutate policy-audit-dropped 'rec, err := r.journal.AppendTx(ctx, tx, audit.Record{' 'rec, err := policyNoop(ctx, tx, audit.Record{' $policy '// checkPolicyRefs requires every' 'func policyNoop(_ context.Context, _ pgx.Tx, r audit.Record) (audit.Record, error) { return r, nil }
+
+// checkPolicyRefs requires every'
 mutate policy-audit-wrong-action 'Action: audit.ActionDeployPolicySet,' 'Action: audit.ActionStoreBindDefault,' $policy
 mutate policy-unknown-field 'dec.DisallowUnknownFields()' '_ = dec' $refusals
 pkg=internal/deployment

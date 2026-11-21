@@ -10,6 +10,7 @@ require (
 	github.com/pressly/goose/v3 v3.27.0
 	github.com/quasilyte/go-ruleguard/dsl v0.3.23
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.41.0
 )

@@ -14,7 +14,6 @@ temp_workspace
 fail=0
 tree=$work/tree
 fresh() {
-	rm -rf "$tree"
 	mutation_snapshot "$tree"
 }
 # expect_red NAME: the guard must fail and name FORBIDDEN or the missing caller.
@@ -24,7 +23,8 @@ expect_red() {
 		fail=1
 	elif ! grep -q -e 'ResolveSecret' "$work/out"; then
 		echo "FAIL $1: guard failed for another reason"
-		cat "$work/out"
+		"$root/scripts/test-result-names.sh" --resolve-callers "$tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "ok   $1: guard went red"
@@ -35,20 +35,20 @@ expect_green() {
 		echo "ok   $1: guard stayed green"
 	else
 		echo "FAIL $1: guard refused a permitted tree"
-		cat "$work/out"
+		"$root/scripts/test-result-names.sh" --resolve-callers "$tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	fi
 }
 
-# The one probe that edits real source; the rest plant new files. It renames
-# the declaration in FILE and refuses (exit 1) unless exactly one line starts
-# with the original declaration: sed matching nothing, a source already renamed
-# or a reformatted signature with either name in a comment would otherwise
-# leave the guard nothing to catch while the probe reported it applied.
-handler_decl='func (m \*meshRoutes) handleResolveSecret(w http.ResponseWriter'
+# The one probe that edits real source; the rest plant new files. Include the
+# leading newline in the literal anchor so a declaration in a comment cannot
+# satisfy the edit. Duplicate declarations require an explicit occurrence.
+handler_decl='
+func (m *meshRoutes) handleResolveSecret(w http.ResponseWriter'
 rename_handler() {
-	[ "$(grep -c "^$handler_decl" "$1")" = 1 ] || return 1
-	sed "s/^$handler_decl/func (m *meshRoutes) handleResolveSecretRenamed(w http.ResponseWriter/" "$1" >"$1.new"
+	name=handler-renamed mutation_edit "$1" "$handler_decl" '
+func (m *meshRoutes) handleResolveSecretRenamed(w http.ResponseWriter' >"$1.new" || return 1
 	mv "$1.new" "$1"
 }
 
@@ -60,7 +60,7 @@ decl='func (m *meshRoutes) handleResolveSecret(w http.ResponseWriter, r *http.Re
 renamed='func (m *meshRoutes) handleResolveSecretRenamed(w http.ResponseWriter, r *http.Request) {'
 spaced='func (m *meshRoutes) handleResolveSecret( w http.ResponseWriter, r *http.Request) {'
 refuse_rename() {
-	if rename_handler "$work/stale.go"; then
+	if rename_handler "$work/stale.go" 2>"$work/refusal"; then
 		echo "FAIL rename-check $1: an unapplied rename counted as applied"
 		exit 1
 	fi

@@ -1,14 +1,17 @@
 package builtin
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"testing"
 
+	"github.com/entire-vc/evc-keep/internal/dispatch"
 	"github.com/entire-vc/evc-keep/pkg/fingerprint"
 	"github.com/entire-vc/evc-keep/pkg/runnerproto"
+	"github.com/google/uuid"
 )
 
 func discoverJobOf(j runnerproto.Job) runnerproto.Job {
@@ -140,5 +143,77 @@ func TestOpenDiscoverKeyRefusesTamperedAndMalformedPayloads(t *testing.T) {
 		if _, err := OpenDiscoverKey(dj, recipient, runnerproto.ValueEnvelope{JobID: dj.JobID, SealedFingerprintKey: sealed}); err == nil {
 			t.Errorf("malformed payload %q opened", name)
 		}
+	}
+}
+
+// The server path: SealMaterial of a discover job reads the store's own key,
+// resolves no secret, and refuses a store that is gone, disabled or not builtin.
+func TestLocalSealMaterialDiscoverIssuesTheStoreKeyOnly(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal("generate root")
+	}
+	local, err := NewLocal(pool, "discover-root", raw, nil, nopAudit)
+	if err != nil {
+		t.Fatal("local backend")
+	}
+	org, st := uuid.New(), uuid.New()
+	j, v, _, _, _, c := deliveryFixture(t)
+	j.OrgID, j.Secret.StoreID = org.String(), st.String()
+	if _, err := pool.Exec(ctx, `INSERT INTO organizations(id,name) VALUES($1,'discover')`, org); err != nil {
+		t.Fatal("seed org")
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO stores(id,org_id,provider,name,owner_scope_level,owner_scope_id) VALUES($1,$2,'builtin','discover','org',$2)`, st, org); err != nil {
+		t.Fatal("seed store")
+	}
+	p := local.Provider(org.String(), "", "", "")
+	if _, err := p.Write(ctx, providerRef("builtin://synthetic-discover-"+uuid.NewString()), v); err != nil { // creates the scope's key
+		t.Fatal("write synthetic value")
+	}
+	k, err := p.FingerprintKey(ctx)
+	if err != nil {
+		t.Fatal("fingerprint key")
+	}
+	defer k.Wipe()
+	recipient, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dj := discoverJobOf(j)
+	env, err := local.SealMaterial(ctx, dispatch.Snapshot{Job: dj}, recipient.PublicKey().Bytes())
+	if err != nil {
+		t.Fatalf("discover key: %v", err)
+	}
+	if len(env.Sealed) != 0 {
+		t.Fatal("a discover envelope must carry no value")
+	}
+	opened, err := OpenDiscoverKey(dj, recipient, env)
+	if err != nil {
+		t.Fatal("runner could not open the discover key")
+	}
+	defer opened.Wipe()
+	if opened.ID() != k.ID() {
+		t.Fatalf("the store's own key id was not delivered: %q != %q", opened.ID(), k.ID())
+	}
+	if b, _ := json.Marshal(env); c.In(string(b)) {
+		t.Fatal("value escaped the envelope")
+	}
+	for name, change := range map[string]func(*runnerproto.Job){
+		"another store": func(x *runnerproto.Job) { x.Secret.StoreID = uuid.NewString() },
+		"another org":   func(x *runnerproto.Job) { x.OrgID = uuid.NewString() },
+	} {
+		bad := dj
+		change(&bad)
+		if _, err := local.SealMaterial(ctx, dispatch.Snapshot{Job: bad}, recipient.PublicKey().Bytes()); err == nil {
+			t.Fatalf("a discover key was issued for %s", name)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE stores SET status='disabled' WHERE id=$1`, st); err != nil {
+		t.Fatal("disable store")
+	}
+	if _, err := local.SealMaterial(ctx, dispatch.Snapshot{Job: dj}, recipient.PublicKey().Bytes()); err == nil {
+		t.Fatal("a disabled store's key was issued")
 	}
 }

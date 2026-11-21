@@ -548,7 +548,7 @@ func TestCheckNotSuperuser(t *testing.T) {
 	// ROLE, not through privilege inheritance — the membership below is
 	// granted WITH INHERIT FALSE on purpose. has_parameter_privilege
 	// already resolves a plain (inherited) membership on its own, verified
-	// live against keep-goku-pg before writing this test: with INHERIT
+	// live against a local PostgreSQL before writing this test: with INHERIT
 	// TRUE, has_parameter_privilege(session_user, ...) alone already
 	// returns true for the member role, no SET ROLE traversal needed. Only
 	// NOINHERIT exposes the gap this test guards: the grant never applies

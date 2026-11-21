@@ -271,11 +271,39 @@ func (e *Engine) step(ctx context.Context, run runRow, opts Options) (State, err
 		return e.verify(ctx, run, opts)
 	case StateRevokingOld:
 		return e.revoke(ctx, run)
+	case StateRollingBack:
+		return e.rollback(ctx, run, opts)
 	}
 	return run.State, nil
 }
 
+// rollsBack: the failure classes of a layout or a verification. A run that
+// failed for any other reason (no carriers, a newer version replaced it) put
+// nothing on a carrier that needs undoing.
+func rollsBack(c Class) bool {
+	switch c {
+	case ClassDeployFailed, ClassVerifyFailed, ClassUnhealthy, ClassFingerprintMismatch:
+		return true
+	}
+	return false
+}
+
 func (e *Engine) fail(ctx context.Context, run runRow, c Class) (State, error) {
+	// A DualKey run that failed while laying out or verifying has carriers on
+	// the new key and an old key that still works: put them back first. The
+	// state is stored before anything is undone, so a run that dies in the middle
+	// is resumed into the same rollback.
+	if (run.State == StateDeploying || run.State == StateVerifying) && run.OldVersion != "" && rollsBack(c) {
+		// Whether this run can be rolled back is decided in the rollback step,
+		// not here: a capability check that fails for a moment must not end the
+		// run with the issued key alive and no way back.
+		if _, ok := e.versions.(Rollbacker); ok {
+			if err := e.store.setState(ctx, run.ID, run.State, StateRollingBack, c); err != nil {
+				return "", err
+			}
+			return StateRollingBack, nil
+		}
+	}
 	if err := e.store.setState(ctx, run.ID, run.State, StateFailed, c); err != nil {
 		return "", err
 	}
@@ -507,6 +535,194 @@ func (e *Engine) revoke(ctx context.Context, run runRow) (State, error) {
 		return "", err
 	}
 	return StateDone, nil
+}
+
+// rollback puts every carrier that took the new version back on the old one,
+// confirms each by reading it back, and only then ends the new key. A step that
+// is not confirmed leaves the new key alone (a live service may hold it) and
+// opens an incident naming the carriers. The run ends failed with the class of
+// the failure either way. Every step is repeatable, so a resumed run starts it
+// over.
+func (e *Engine) rollback(ctx context.Context, run runRow, opts Options) (State, error) {
+	rb, ok := e.versions.(Rollbacker)
+	if !ok {
+		return e.rollbackUnconfirmed(ctx, run, nil)
+	}
+	// A definite no (forward-only provider, a key that is not the run's own)
+	// ends the run as it ended before. An error is not an answer: the run stays
+	// in rolling_back and Resume asks again, or gives up with an incident.
+	can, err := rb.CanRollback(ctx, run.Ref, run.ID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", ErrRevoke
+	}
+	if !can {
+		if err := e.store.setState(ctx, run.ID, StateRollingBack, StateFailed, run.Class); err != nil {
+			return "", err
+		}
+		return StateFailed, nil
+	}
+	steps, err := e.store.steps(ctx, run.ID)
+	if err != nil {
+		return "", err
+	}
+	var todo []stepRow
+	var required []string
+	for _, s := range steps {
+		switch s.Deploy {
+		case "ok":
+			todo = append(todo, s)
+			required = append(required, s.CarrierID)
+		case "failed", "pending":
+			// Refused, or not recorded: the layout may have left a part behind, or
+			// reached the carrier before the run lost its place (a step stays
+			// pending then). Put the old version back if possible; it does not
+			// decide the key, and a carrier that was never touched just gets the old
+			// version again.
+			todo = append(todo, s)
+		}
+	}
+	var mu sync.Mutex
+	putBack := map[string]bool{}
+	confirmed := map[string]bool{}
+	var lost atomic.Bool
+	// Two phases, as going forward: the one verification of the run is made of
+	// every carrier's line, so no carrier is read until all are put back.
+	err = e.forEach(ctx, todo, opts.Concurrency, func(ctx context.Context, s stepRow) bool {
+		sctx, stop, ferr := e.fence(withRollback(ctx), run.ID)
+		if ferr != nil {
+			lost.Store(true)
+			return true
+		}
+		defer stop()
+		if e.afterFence != nil {
+			e.afterFence("rollback_deploy")
+		}
+		derr := e.deployer.Deploy(sctx, run.Ref, run.ID, Carrier{ID: s.CarrierID}, run.OldVersion)
+		if ctx.Err() != nil {
+			return true
+		}
+		if errors.Is(context.Cause(sctx), ErrLeaseLost) { // cut by the end of the lease: not a verdict on the carrier
+			lost.Store(true)
+			return true
+		}
+		if derr == nil {
+			mu.Lock()
+			putBack[s.CarrierID] = true
+			mu.Unlock()
+		}
+		return true
+	})
+	if err != nil {
+		return "", err
+	}
+	if lost.Load() {
+		return "", ErrLeaseLost
+	}
+	var toRead []stepRow
+	for _, s := range todo {
+		if s.Deploy == "ok" && putBack[s.CarrierID] {
+			toRead = append(toRead, s)
+		}
+	}
+	vctx := withRollback(ctx)
+	err = e.forEach(ctx, toRead, opts.Concurrency, func(ctx context.Context, s stepRow) bool {
+		sctx, stop, ferr := e.fence(vctx, run.ID)
+		if ferr != nil {
+			lost.Store(true)
+			return true
+		}
+		defer stop()
+		if e.afterFence != nil {
+			e.afterFence("rollback_verify")
+		}
+		rep, verr := e.verifier.Verify(sctx, run.Ref, Carrier{ID: s.CarrierID}, run.OldVersion)
+		if ctx.Err() != nil {
+			return true
+		}
+		if errors.Is(context.Cause(sctx), ErrLeaseLost) {
+			lost.Store(true)
+			return true
+		}
+		// The old version reads back healthy with a valid fingerprint that is not
+		// the new one's (a carrier still on the new key reports that one).
+		if verr != nil || !rep.Healthy || !fingerprint.Valid(rep.Fingerprint) || rep.Fingerprint == run.ExpectedFP {
+			return true // the others are read all the same: the incident names only those that failed
+		}
+		mu.Lock()
+		confirmed[s.CarrierID] = true
+		mu.Unlock()
+		return true
+	})
+	if err != nil {
+		return "", err
+	}
+	if lost.Load() {
+		return "", ErrLeaseLost
+	}
+	var unconfirmed []string
+	for _, id := range required {
+		if !confirmed[id] {
+			unconfirmed = append(unconfirmed, id)
+		}
+	}
+	if len(unconfirmed) > 0 {
+		return e.rollbackUnconfirmed(ctx, run, unconfirmed)
+	}
+	sctx, stop, err := e.fence(ctx, run.ID)
+	if err != nil {
+		return "", err
+	}
+	defer stop()
+	if e.afterFence != nil {
+		e.afterFence("rollback_revoke")
+	}
+	if rerr := rb.RollbackNew(sctx, run.Ref, run.ID); rerr != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if errors.Is(context.Cause(sctx), ErrLeaseLost) {
+			return "", ErrLeaseLost
+		}
+		return e.rollbackUnconfirmed(ctx, run, nil)
+	}
+	if err := e.store.setState(ctx, run.ID, StateRollingBack, StateFailed, run.Class); err != nil {
+		return "", err
+	}
+	return StateFailed, nil
+}
+
+// rollbackUnconfirmed ends the run failed without touching the new key and
+// opens the incident that says what could not be confirmed. The incident is
+// recorded on the run, so the plain failure incident does not replace it.
+func (e *Engine) rollbackUnconfirmed(ctx context.Context, run runRow, carriers []string) (State, error) {
+	ictx, istop, err := e.fence(ctx, run.ID)
+	if err != nil {
+		return "", err
+	}
+	defer istop()
+	if e.afterFence != nil {
+		e.afterFence("incident")
+	}
+	if err := e.incident.Open(ictx, IncidentRecord{Ref: run.Ref, RunID: run.ID, Class: ClassRollbackUnconfirmed, Carriers: carriers}); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if ok, herr := e.store.holds(ctx, run.ID, leaseOf(ctx), e.now()); herr == nil && !ok {
+			return "", ErrLeaseLost
+		}
+		return "", ErrIncident
+	}
+	if err := e.store.markIncident(ctx, run.ID); err != nil {
+		return "", err
+	}
+	final := run.Class // the failure that started the rollback, not the incident's class
+	if err := e.store.setState(ctx, run.ID, StateRollingBack, StateFailed, final); err != nil {
+		return "", err
+	}
+	return StateFailed, nil
 }
 
 func (e *Engine) resolveIncident(sctx, ctx context.Context, run runRow) error {

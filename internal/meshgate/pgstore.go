@@ -82,6 +82,13 @@ func (p *PG) WorkspacesOfTx(ctx context.Context, tx pgx.Tx, org uuid.UUID) ([]uu
 	return out, rows.Err()
 }
 
+// ApprovalsViaMeshTx implements TxStore.
+func (p *PG) ApprovalsViaMeshTx(ctx context.Context, tx pgx.Tx, workspace uuid.UUID) (bool, error) {
+	var on bool
+	err := tx.QueryRow(ctx, `SELECT COALESCE(approvals_via_mesh, true) FROM mesh_installations WHERE workspace_id=$1`, workspace).Scan(&on)
+	return on, err
+}
+
 // InsertTx implements TxStore.
 func (p *PG) InsertTx(ctx context.Context, tx pgx.Tx, g Gate) error {
 	_, err := tx.Exec(ctx, `INSERT INTO mesh_gate_requests (`+gateColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,

@@ -13,25 +13,19 @@ temp_workspace
 
 fail=0
 # mutate <name> <file> <package> <test> <from> <to> [<from2> <to2>]
-# <from> must occur in <file>; the first occurrence is replaced. The optional
-# second pair is applied the same way, for a mutation that needs an import.
+# <from> must be unique in <file>, or MUTATION_OCCURRENCE must name its ordinal.
+# The optional second pair uses MUTATION_OCCURRENCE2 when it is ambiguous.
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$2 pkg=$3 test=$4 from=$5 to=$6 from2=${7:-} to2=${8:-}
-	rm -rf "${work:?}/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$file" >"$work/tree/$file"; then
+	if ! mutation_edit "$root/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$file"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
 	fi
 	if [ -n "$from2" ]; then
-		if ! awk -v from="$from2" -v to="$to2" '
-			!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-			{ print }
-			END { exit !done }' "$work/tree/$file" >"$work/second" || ! cp "$work/second" "$work/tree/$file"; then
+		if ! mutation_edit "$work/tree/$file" "$from2" "$to2" "${mutation_occurrence2:-}" >"$work/second" || ! cp "$work/second" "$work/tree/$file"; then
 			echo "FAIL $name: second mutation did not apply — update this script"
 			fail=1
 			return
@@ -68,7 +62,7 @@ mutate exec-deps-missing-allowed $L/loop.go $LP TestExecRefusalsAreOneClassAndBe
 	'if r.Exec == nil {' 'if false && r.Exec == nil {' 
 mutate exec-prepare-skipped $L/loop.go $LP TestExecRefusalsAreOneClassAndBeforeFetch \
 	'if plan, err = execrun.Prepare(j, r.Policy); err != nil {' 'if plan, err = execrun.Prepare(j, r.Policy); false && err != nil {'
-mutate exec-refusal-class-leaks $L/loop.go $LP TestExecRefusalsAreOneClassAndBeforeFetch \
+MUTATION_OCCURRENCE=1 MUTATION_OCCURRENCE2=1 mutate exec-refusal-class-leaks $L/loop.go $LP TestExecRefusalsAreOneClassAndBeforeFetch \
 	'return fail(runnerproto.ErrClassPolicyDenied)' 'return fail(runnerproto.ErrClassInvalidJob)' \
 	'return fail(runnerproto.ErrClassPolicyDenied)' 'return fail(runnerproto.ErrClassInvalidJob)'
 mutate exec-fingerprint-unchecked $L/loop.go $LP TestExecWrongValueNeverRuns \
@@ -81,7 +75,7 @@ mutate exec-class-dropped $L/loop.go $LP TestExecHostWithoutIsolationRefuses \
 	'if class != "" {' 'if false {'
 # Identity and window come from VerifyJob; a rejected job is reported, not run.
 mutate rejected-job-unreported $L/loop.go $LP TestIdentityAndWindowRejectedBeforeFetch \
-	'if err := r.Outbox.CloseIfAbsent(j.JobID, runnerproto.Result{ErrorClass: class}); errors.Is(err, os.ErrExist) {' 'if err := error(nil); errors.Is(err, os.ErrExist) {'
+	'closeErr = r.Outbox.CloseIfAbsent(j.JobID, runnerproto.Result{ErrorClass: class})' 'closeErr = nil'
 # A late re-served job must not overwrite the Result of the run that executed it.
 mutate reject-overwrites-result $L/outbox.go $LP TestLateReservedJobKeepsTheRealResult \
 	'if exclusive {' 'if false {'
@@ -97,7 +91,7 @@ mutate outbox-not-flushed-before-poll $L/loop.go $LP TestRestartSendsOutboxBefor
 mutate refusal-retried-forever $L/loop.go $LP TestServerRefusalDropsTheEntry \
 	'case errors.Is(err, ErrRefused):' 'case false:'
 mutate result-acked-unsent $L/loop.go $LP TestNetworkFailureRepeatsOnlyTheResult \
-	'switch err := r.Transport.SendResult(ctx, p.JobID, p.Result); {' 'switch err := error(nil); {'
+	'send := func() error { return r.Transport.SendResult(ctx, p.JobID, p.Result) }' 'send := func() error { return nil }'
 mutate no-backoff $L/loop.go $LP TestRunBacksOffOnPollFailure \
 	'if d *= 2; d > maxBackoff {' 'if d *= 1; d > maxBackoff {'
 
@@ -116,7 +110,8 @@ mutate outbox-unknown-fields-accepted $L/outbox.go $LP TestOutboxRefusesDamagedE
 	'dec.DisallowUnknownFields()' ''
 mutate outbox-dir-mode-unchecked $L/outbox.go $LP TestOutboxDirectoryMustBePrivate \
 	'fi.Mode().Perm() != 0o700 ||' 'false ||'
-mutate outbox-result-unvalidated $L/outbox.go $LP TestOutboxRefusesResultOutsideContract \
+MUTATION_OCCURRENCE=2 mutate outbox-result-unvalidated $L/outbox.go $LP TestOutboxRefusesResultOutsideContract \
+	'if err := r.Validate(); err != nil {' 'if err := error(nil); err != nil {' \
 	'if err := r.Validate(); err != nil {' 'if err := error(nil); err != nil {'
 
 # 4. Transport: closed schema, no body echo, no redirect, https only.
@@ -141,13 +136,13 @@ mutate transport-job-id-unchecked $L/transport.go $LP TestHTTPTransportRefusesOp
 mutate value-in-log $L/loop.go $LP TestCanaryNeverLeavesTheTargetFile \
 	'defer v.Wipe()' 'defer v.Wipe(); secret.Expose(v, func(b []byte) { r.Log.Info("runner.job", "status", string(b)) })'
 
-mutate delivery-key-in-log $L/loop.go $LP TestMismatchBranchLeaksNothing \
+MUTATION_OCCURRENCE=1 mutate delivery-key-in-log $L/loop.go $LP TestMismatchBranchLeaksNothing \
 	'return fail(runnerproto.ErrClassFingerprintMismatch)' 'r.Log.Info("runner.job", "status", fmt.Sprintf("%v", r.Delivery.Bytes())); return fail(runnerproto.ErrClassFingerprintMismatch)'
 
 mutate once-hides-send-failure $L/loop.go $LP TestOnceReportsAResultThatCouldNotBeSent \
 	'return true, r.flush(ctx)' '_ = r.flush(ctx); return true, nil'
 mutate begin-skipped-before-claim $L/loop.go $LP TestCrashBeforeTheClaimIsReportedAfterRestart \
-	'if err := b.r.Outbox.Begin(jobID); err != nil {' 'if err := error(nil); err != nil {'
+	'begin := b.r.Outbox.Begin' 'begin := func(string) error { return nil }'
 mutate refused-claim-keeps-entry $L/loop.go $LP TestReplayedJobDoesNothingTwice \
 	'if err := b.r.Journal.Claim(jobID, notAfter, now); err != nil {' 'if err := b.r.Journal.Claim(jobID, notAfter, now); err != nil { return err'
 
@@ -170,9 +165,9 @@ mutate open-value-info-weakened $B/delivery.go $B TestOpenRunnerMaterialRoundTri
 # 7. CLI: no refusal reflects an argument.
 C=cmd/keep-runner
 mutate cli-reflects-command $C/main.go $C TestRunCommandNeverReflectsArguments \
-	'unknown command\\n", version.String())' 'unknown command %q\\n", version.String(), args[0])'
+	'unknown command\n", version.String())' 'unknown command %q\n", version.String(), args[0])'
 mutate cli-reflects-policy-path $C/run.go $C TestRunCommandNeverReflectsArguments \
-	'fmt.Fprintf(os.Stderr, "keep-runner run: %s\\n", what)' 'fmt.Fprintf(os.Stderr, "keep-runner run: %s %s\\n", what, *policyPath)'
+	'fmt.Fprintf(os.Stderr, "keep-runner run: %s\n", what)' 'fmt.Fprintf(os.Stderr, "keep-runner run: %s %s\n", what, *policyPath)'
 mutate cli-identity-unchecked $C/run.go $C TestRunOnceEndToEnd \
 	'cred.SignKeyID: ed25519.PublicKey(cred.SignPubKey)' 'cred.SignKeyID: ed25519.PublicKey(make([]byte, 32))'
 
@@ -227,20 +222,41 @@ mutate verify-compare-always-match $L/loop.go $LP TestVerifyMismatchNamesTheObse
 	'case !targets.SameFingerprint(got, j.ExpectedFingerprint):' 'case false:'
 mutate verify-absent-fetches-key $L/loop.go $LP TestVerifyAbsentCarrierIsAMismatchWithoutFingerprintAndWithoutKey \
 	'case !exists:' 'case !exists && false:'
-mutate verify-key-opens-a-value $B/delivery.go $B TestOpenRunnerKeyRefusesAValueAndOtherJobs \
+MUTATION_OCCURRENCE=1 mutate verify-key-opens-a-value $B/delivery.go $B TestOpenRunnerKeyRefusesAValueAndOtherJobs \
 	' || len(env.Sealed) != 0 {' ' {'
 mutate verify-key-not-job-bound $B/delivery.go $B TestOpenRunnerKeyRefusesAValueAndOtherJobs \
-	'openRunnerBytes(recipient, runnerproto.VerifyKeyInfo(j), env.SealedFingerprintKey)' 'openRunnerBytes(recipient, runnerproto.Info(j), env.SealedFingerprintKey)'
+	'openRunnerBytes(recipient, info, env.SealedFingerprintKey)' 'openRunnerBytes(recipient, runnerproto.Info(j), env.SealedFingerprintKey)'
 mutate verify-key-for-any-job $B/delivery.go $B TestVerifyKeyIsSealedOnlyForVerifyJobs \
-	'if j.Validate() != nil || j.Action != runnerproto.ActionVerify {' 'if j.Validate() != nil {'
+	'if j.Validate() != nil || info == nil {' 'if j.Validate() != nil {'
 mutate verify-key-sealed-under-value-info $B/delivery.go $B TestVerifyKeyEnvelopeCarriesTheKeyAndNoValue \
-	'sealRunnerBytes(recipient, runnerproto.VerifyKeyInfo(j), raw)' 'sealRunnerBytes(recipient, runnerproto.Info(j), raw)'
+	'sealRunnerBytes(recipient, info, raw)' 'sealRunnerBytes(recipient, runnerproto.Info(j), raw)'
 
 # Host policy prefixes through a symlink: check refuses, run warns.
 mutate check-prefix-unchecked $C/check.go $C TestCheckRefusesSymlinkPrefixEndToEnd \
 	'runnerproto.CheckPrefixesOnHost(pol)' 'runnerproto.CheckPrefixesOnHost(runnerproto.HostPolicy{Version: pol.Version})'
 mutate run-prefix-unwarned $C/run.go $C TestRunWarnsOnSymlinkPrefix \
 	'runnerproto.CheckPrefixesOnHost(policy)' 'runnerproto.CheckPrefixesOnHost(runnerproto.HostPolicy{})'
+
+# 9. Discovery on the runner: policy and cap before the key, one class and no
+# findings on failure, the discover entry kind, an absolute reported path.
+mutate discover-policy-skipped $L/discover.go $LP TestDiscoverIsRefusedWithoutAPolicySection \
+	'if err := runnerproto.Check(j, r.Policy); err != nil {' 'if err := error(nil); err != nil {'
+mutate discover-rate-unchecked $L/discover.go $LP TestDiscoverRateLimitStopsBeforeTheKeyIsFetched \
+	'|| r.Discover.Allow(r.now()) != nil {' '|| false {'
+mutate discover-scan-error-ignored $L/discover.go $LP TestDiscoverFailureHasNoFindingsAndOneClass \
+	'found, err := discover.Scan(ctx, scanPolicy(root), key)' 'found, _ := discover.Scan(ctx, scanPolicy(root), key); var err error'
+mutate discover-path-relative $L/discover.go $LP TestDiscoverReportsFingerprintAndLengthNeverTheValue \
+	'Path: filepath.Join(root.Root, f.Path),' 'Path: filepath.Join("", f.Path),'
+mutate discover-roots-overwritten $L/discover.go $LP TestDiscoverReportsEveryRoot \
+	'out = append(out, runnerproto.DiscoverFinding{' 'out = append(out[:0], runnerproto.DiscoverFinding{'
+mutate discover-reject-overwrites $L/loop.go $LP TestLateReservedDiscoverJobKeepsTheRealReport \
+	'closeErr = r.Outbox.CloseDiscoverIfAbsent(j.JobID, discoverClass(class))' 'closeErr = r.Outbox.CloseDiscover(j.JobID, discoverClass(class))'
+MUTATION_OCCURRENCE=1 mutate discover-recover-as-deploy $L/loop.go $LP TestDiscoverCrashLeavesAFailedDiscoverReport \
+	'if p.IsDiscover {' 'if false {'
+mutate discover-begin-as-deploy $L/loop.go $LP TestDiscoverEntryIsBegunAsDiscover \
+	'begin = b.r.Outbox.BeginDiscover' 'begin = b.r.Outbox.Begin'
+mutate discover-reject-as-deploy $L/loop.go $LP TestRejectedDiscoverJobGetsADiscoverReport \
+	'closeErr = r.Outbox.CloseDiscoverIfAbsent(j.JobID, discoverClass(class))' 'closeErr = r.Outbox.CloseIfAbsent(j.JobID, runnerproto.Result{ErrorClass: class})'
 
 if mutation_apply_only; then
 	:

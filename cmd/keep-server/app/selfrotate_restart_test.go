@@ -32,7 +32,7 @@ func TestSelfRotateRestartsQueueCarriesNoTokenValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := &selfRotateRestarts{
-		queue: restart.NewRepo(pool), org: org, lane: "Hugh", store: store,
+		queue: restart.NewRepo(pool, "worker"), org: org, lane: "worker", store: store,
 		fpKey: func(context.Context) (fingerprint.Key, error) { return fingerprint.GenerateKey("testkey") },
 	}
 	id, err := q.Enqueue(context.Background(), "key-9")
@@ -50,7 +50,7 @@ func TestSelfRotateRestartsQueueCarriesNoTokenValue(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT lane, key_version, fingerprint FROM restart_requests WHERE request_id = $1 AND org_id = $2`, id, org).Scan(&lane, &version, &fp); err != nil {
 		t.Fatal(err)
 	}
-	if lane != "Hugh" || version != "key-9" || !fingerprint.Valid(fp) {
+	if lane != "worker" || version != "key-9" || !fingerprint.Valid(fp) {
 		t.Fatalf("row: lane=%q version=%q fingerprint=%q", lane, version, fp)
 	}
 	applied, final, err := q.Outcome(context.Background(), id)
@@ -58,7 +58,7 @@ func TestSelfRotateRestartsQueueCarriesNoTokenValue(t *testing.T) {
 		t.Fatalf("open request: applied=%v final=%v err=%v", applied, final, err)
 	}
 	// Another organization's id is unknown to this binding.
-	other := &selfRotateRestarts{queue: q.queue, org: uuid.New(), lane: "Hugh", store: store, fpKey: q.fpKey}
+	other := &selfRotateRestarts{queue: q.queue, org: uuid.New(), lane: "worker", store: store, fpKey: q.fpKey}
 	if _, _, err := other.Outcome(context.Background(), id); err == nil {
 		t.Fatal("a request of another organization was readable")
 	}

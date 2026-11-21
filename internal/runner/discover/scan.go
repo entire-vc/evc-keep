@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/entire-vc/evc-keep/pkg/fingerprint"
+	"github.com/entire-vc/evc-keep/pkg/runnerproto"
 	"github.com/entire-vc/evc-keep/pkg/secret"
 )
 
@@ -99,7 +100,7 @@ func validatePolicy(p Policy) error {
 			return ErrPolicy
 		}
 		switch r.Kind {
-		case EnvFile, LaunchdPlist, SystemdUnit, MCPConfig:
+		case EnvFile, LaunchdPlist, SystemdUnit, MCPConfig, YAMLScalar:
 		case Credential:
 			if len(r.Names) != 1 {
 				return ErrPolicy
@@ -109,7 +110,11 @@ func validatePolicy(p Policy) error {
 		}
 		seen := map[string]bool{}
 		for _, name := range r.Names {
-			if !validName(name) || seen[name] {
+			valid := validName(name)
+			if r.Kind == YAMLScalar {
+				valid = validYAMLField(name)
+			}
+			if !valid || seen[name] {
 				return ErrPolicy
 			}
 			seen[name] = true
@@ -149,6 +154,10 @@ func validName(name string) bool {
 		}
 	}
 	return true
+}
+
+func validYAMLField(field string) bool {
+	return (runnerproto.Target{Kind: runnerproto.TargetYAMLScalar, Path: "/yaml", Field: field, Mode: 0o600}).Validate() == nil
 }
 
 // appendWiped clears an old backing array before growing a value buffer.
@@ -206,7 +215,7 @@ func Compare(key fingerprint.Key, findings []Finding, known []KnownCarrier) ([]O
 	}
 	for _, k := range known {
 		id := k.Path + "\x00" + k.Name
-		if !safeRelative(k.Path) || !validName(k.Name) || !check(k.Fingerprint) {
+		if !safeRelative(k.Path) || (!validName(k.Name) && !validYAMLField(k.Name)) || !check(k.Fingerprint) {
 			return nil, ErrFingerprint
 		}
 		if _, ok := byID[id]; ok {
@@ -216,7 +225,7 @@ func Compare(key fingerprint.Key, findings []Finding, known []KnownCarrier) ([]O
 	}
 	for _, f := range findings {
 		id := f.Path + "\x00" + f.Name
-		if !safeRelative(f.Path) || !validName(f.Name) || f.Len < 0 || !check(f.Fingerprint) {
+		if !safeRelative(f.Path) || (!validName(f.Name) && !validYAMLField(f.Name)) || f.Len < 0 || !check(f.Fingerprint) {
 			return nil, ErrFingerprint
 		}
 		if seen[id] {

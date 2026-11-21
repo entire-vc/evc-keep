@@ -68,7 +68,7 @@ func claimed(t *testing.T, r *Repo, org uuid.UUID) []Request {
 
 func newRepo(t *testing.T) (*Repo, uuid.UUID, *clock) {
 	db := testDB(t)
-	r := NewRepo(db)
+	r := NewRepo(db, "worker", "other")
 	c := &clock{t: time.Now().UTC().Truncate(time.Millisecond)}
 	r.now = c.now
 	return r, seedOrg(t, db), c
@@ -77,12 +77,12 @@ func newRepo(t *testing.T) (*Repo, uuid.UUID, *clock) {
 func TestClaimGivesARequestOnce(t *testing.T) {
 	r, org, _ := newRepo(t)
 	ctx := context.Background()
-	id, err := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, err := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := r.Claim(ctx, org, 10)
-	if err != nil || len(got) != 1 || got[0].RequestID != id || got[0].Lane != "Hugh" || got[0].KeyVersion != "key-1" || got[0].Fingerprint != testFP {
+	if err != nil || len(got) != 1 || got[0].RequestID != id || got[0].Lane != "worker" || got[0].KeyVersion != "key-1" || got[0].Fingerprint != testFP {
 		t.Fatalf("first claim: %+v, %v", got, err)
 	}
 	again, err := r.Claim(ctx, org, 10)
@@ -94,7 +94,7 @@ func TestClaimGivesARequestOnce(t *testing.T) {
 func TestExpiredLeaseReturnsToPending(t *testing.T) {
 	r, org, c := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Test", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "other", "key-1", testFP)
 	if got := claimed(t, r, org); len(got) != 1 {
 		t.Fatal("no first claim")
 	}
@@ -112,7 +112,7 @@ func TestExpiredLeaseReturnsToPending(t *testing.T) {
 func TestPendingExpiresAfterTTL(t *testing.T) {
 	r, org, c := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	c.add(PendingTTL + time.Second)
 	if got := claimed(t, r, org); len(got) != 0 {
 		t.Fatalf("an expired request was handed out: %+v", got)
@@ -133,7 +133,7 @@ func TestPendingExpiresAfterTTL(t *testing.T) {
 func TestLeaseReturnedPastTTLExpires(t *testing.T) {
 	r, org, c := newRepo(t)
 	ctx := context.Background()
-	_, _ = r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	_, _ = r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	if got := claimed(t, r, org); len(got) != 1 {
 		t.Fatal("no first claim")
 	}
@@ -146,7 +146,7 @@ func TestLeaseReturnedPastTTLExpires(t *testing.T) {
 func TestAckIdempotentAndFinal(t *testing.T) {
 	r, org, _ := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	if err := r.Ack(ctx, org, id, strings.Repeat("ab", tokenBytes), ResultOK); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ack before claim: %v, want ErrNotFound", err)
 	}
@@ -171,7 +171,7 @@ func TestOutcomeByResult(t *testing.T) {
 	r, org, _ := newRepo(t)
 	ctx := context.Background()
 	for res, want := range map[Result]bool{ResultOK: true, ResultNothingRunning: true, ResultFailed: false} {
-		id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+		id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 		tok := claimed(t, r, org)[0].ClaimToken
 		if err := r.Ack(ctx, org, id, tok, res); err != nil {
 			t.Fatal(err)
@@ -184,7 +184,7 @@ func TestOutcomeByResult(t *testing.T) {
 
 func TestLaneOutsideAllowlistRefused(t *testing.T) {
 	r, org, _ := newRepo(t)
-	for _, lane := range []string{"Calvin", "hugh", "", "Hugh ", "Hugh;x"} {
+	for _, lane := range []string{"stranger", "Worker", "", "worker ", "worker;x"} {
 		if _, err := r.Enqueue(context.Background(), org, lane, "key-1", testFP); !errors.Is(err, ErrLane) {
 			t.Fatalf("lane %q: %v, want ErrLane", lane, err)
 		}
@@ -199,7 +199,7 @@ func TestOtherOrganizationSeesNothing(t *testing.T) {
 	r, org, _ := newRepo(t)
 	ctx := context.Background()
 	other := seedOrg(t, r.db)
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	if got := claimed(t, r, other); len(got) != 0 {
 		t.Fatalf("foreign claim got %+v", got)
 	}
@@ -216,7 +216,7 @@ func TestConcurrentClaimsNeverShareARequest(t *testing.T) {
 	r, org, _ := newRepo(t)
 	ctx := context.Background()
 	for i := 0; i < 6; i++ {
-		_, _ = r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+		_, _ = r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	}
 	var mu sync.Mutex
 	seen := map[uuid.UUID]int{}
@@ -259,8 +259,8 @@ func TestInvalidInputNeverEchoed(t *testing.T) {
 	}
 	for _, in := range [][3]string{
 		{c.Value(1), "key-1", testFP},
-		{"Hugh", c.Value(1) + "!", testFP},
-		{"Hugh", "key-1", "kfp1:k1:" + c.Value(1)},
+		{"worker", c.Value(1) + "!", testFP},
+		{"worker", "key-1", "kfp1:k1:" + c.Value(1)},
 	} {
 		_, err := r.Enqueue(ctx, org, in[0], in[1], in[2])
 		if err != nil && c.In(err.Error()) {
@@ -272,7 +272,7 @@ func TestInvalidInputNeverEchoed(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, x := range got {
-		if x.Lane != "Hugh" || x.Fingerprint != testFP {
+		if x.Lane != "worker" || x.Fingerprint != testFP {
 			t.Fatalf("an invalid request got through: %+v", x)
 		}
 	}
@@ -283,7 +283,7 @@ func TestInvalidInputNeverEchoed(t *testing.T) {
 // this a weakened check here would go unseen. No database: a refusal returns
 // before any query.
 func TestEnqueueRefusesBadShapesBeforeTheDatabase(t *testing.T) {
-	r := NewRepo(nil)
+	r := NewRepo(nil, "worker")
 	org := uuid.New()
 	for _, c := range []struct{ version, fp string }{
 		{"", testFP},
@@ -294,7 +294,7 @@ func TestEnqueueRefusesBadShapesBeforeTheDatabase(t *testing.T) {
 		{"key-1", "kfp1:k1:abc"},
 		{"key-1", "KFP1:k1:abcdefghijklmnop"},
 	} {
-		if _, err := r.Enqueue(context.Background(), org, "Hugh", c.version, c.fp); !errors.Is(err, ErrInvalid) {
+		if _, err := r.Enqueue(context.Background(), org, "worker", c.version, c.fp); !errors.Is(err, ErrInvalid) {
 			t.Errorf("version %q fingerprint %q: %v, want ErrInvalid", c.version, c.fp, err)
 		}
 	}
@@ -306,7 +306,7 @@ func TestEnqueueRefusesBadShapesBeforeTheDatabase(t *testing.T) {
 func TestAbandonedClaimSettlesWithoutAnotherPoll(t *testing.T) {
 	r, org, c := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	if got := claimed(t, r, org); len(got) != 1 {
 		t.Fatal("no claim")
 	}
@@ -325,7 +325,7 @@ func TestAbandonedClaimSettlesWithoutAnotherPoll(t *testing.T) {
 func TestLiveLeaseKeepsRequestOpenPastTTL(t *testing.T) {
 	r, org, c := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	c.add(PendingTTL - time.Minute)
 	tok := claimed(t, r, org)[0].ClaimToken
 	c.add(2 * time.Minute)
@@ -343,7 +343,7 @@ func TestLiveLeaseKeepsRequestOpenPastTTL(t *testing.T) {
 func TestAckAfterLeaseLapseIsRefused(t *testing.T) {
 	r, org, c := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	a := claimed(t, r, org)[0].ClaimToken
 	c.add(Lease)
 	if err := r.Ack(ctx, org, id, a, ResultOK); !errors.Is(err, ErrNotFound) {
@@ -383,7 +383,7 @@ func TestAckAfterLeaseLapseIsRefused(t *testing.T) {
 func TestStaleHolderCannotCloseAReissuedClaim(t *testing.T) {
 	r, org, c := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	a := claimed(t, r, org)[0].ClaimToken
 	c.add(Lease + time.Second)
 	b := claimed(t, r, org)
@@ -411,7 +411,7 @@ func TestStaleHolderCannotCloseAReissuedClaim(t *testing.T) {
 func TestClaimTokenIsStoredAsADigest(t *testing.T) {
 	r, org, _ := newRepo(t)
 	ctx := context.Background()
-	id, _ := r.Enqueue(ctx, org, "Hugh", "key-1", testFP)
+	id, _ := r.Enqueue(ctx, org, "worker", "key-1", testFP)
 	tok := claimed(t, r, org)[0].ClaimToken
 	var stored []byte
 	if err := r.db.QueryRow(ctx, `SELECT claim_token FROM restart_requests WHERE request_id = $1`, id).Scan(&stored); err != nil {

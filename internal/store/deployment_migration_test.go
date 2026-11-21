@@ -21,6 +21,11 @@ func TestDeploymentMigrationDowngradeAndUpgrade(t *testing.T) {
 	if _, err := provider.Up(pgscratch.Context(t)); err != nil {
 		t.Fatal("migrate up")
 	}
+	// Isolate migration 16: later migrations may legitimately add columns to
+	// these tables and remove them in their own Down sections.
+	if _, err := provider.DownTo(pgscratch.Context(t), 16); err != nil {
+		t.Fatal("downgrade to deployment migration")
+	}
 	// A deployment rollback must preserve the runner trust and intake schema
 	// supplied by earlier migrations, including the adjacent carrier registry.
 	const neighborColumns = `SELECT count(*) FROM information_schema.columns

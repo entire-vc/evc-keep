@@ -125,8 +125,8 @@ func setDeployPolicy(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logge
 	} else {
 		logger.InfoContext(ctx, "deploy_policy_set", "org_id", org.String())
 	}
-	_, _ = fmt.Fprintf(stdout, "org_id=%s revision=%d rules=%d exec_rules=%d max_deploys_per_hour=%d%s\n",
-		org, res.Revision, res.Rules, res.ExecRules, res.MaxPerHour, mode)
+	_, _ = fmt.Fprintf(stdout, "org_id=%s revision=%d rules=%d exec_rules=%d adoption_rules=%d max_deploys_per_hour=%d%s\n",
+		org, res.Revision, res.Rules, res.ExecRules, res.AdoptionRules, res.MaxPerHour, mode)
 	_, _ = fmt.Fprintf(stdout, "change: %s\n", deployment.PolicyChangeReason(res))
 	return 0
 }

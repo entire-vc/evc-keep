@@ -156,6 +156,9 @@ func (c *Catalog) CreateRef(ctx context.Context, in CreateRefInput) (tenancy.Sec
 		id, in.Org, string(in.Scope.Level), in.Scope.ID, in.Name, in.Class, in.Type, storeID, in.ProviderRef, descPtr,
 	).Scan(&s.ID, &s.OrgID, &s.Name, &s.Class, &s.Type, &s.StoreID, &s.ProviderRef, &s.Description, &s.Status, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
+		if providerRefViolation(err) {
+			return tenancy.SecretRef{}, providerRefInUseError()
+		}
 		if uniqueViolation(err) {
 			return tenancy.SecretRef{}, duplicateNameError()
 		}

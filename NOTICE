@@ -1,0 +1,19 @@
+evc-keep
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles third-party fonts, served by the Mesh screen
+(/mesh/ui/fonts/*.woff2) and embedded in the server binary. They are licensed
+under the SIL Open Font License, Version 1.1, not under Apache-2.0:
+
+  Inter (subsets latin, latin-ext, cyrillic; weights 400, 500, 600, 700)
+  Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)
+  Files: internal/api/meshui_fonts/inter-*.woff2
+  License: internal/api/meshui_fonts/LICENSE-Inter.txt
+
+  JetBrains Mono (subsets latin, latin-ext, cyrillic; weight 400)
+  Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+  Files: internal/api/meshui_fonts/jetbrains-mono-*.woff2
+  License: internal/api/meshui_fonts/LICENSE-JetBrains-Mono.txt
+
+The woff2 files are the unmodified builds of the Fontsource packages
+@fontsource/inter 5.3.0 and @fontsource/jetbrains-mono 5.3.0.

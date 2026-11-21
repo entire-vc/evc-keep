@@ -112,7 +112,7 @@ func TestCreateRef_OverrideLockRace(t *testing.T) {
 
 			refInput := CreateRefInput{
 				Org: f.org.ID, Scope: projScope, Name: "SECRET", Class: class,
-				Type: "generic", ProviderRef: "x", StoreID: nonConforming.ID,
+				Type: "generic", ProviderRef: fmt.Sprintf("x/%d", round), StoreID: nonConforming.ID,
 			}
 
 			reached := make(chan struct{})

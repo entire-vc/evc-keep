@@ -16,6 +16,9 @@ const (
 	PermRotate        Permission = "rotate"
 	PermCreateRef     Permission = "create_ref"
 	PermManageRunners Permission = "manage_runners"
+	// Adoption reads a pre-existing secret carrier and registers its attested
+	// metadata. It is never implied by deploy or a default agent grant.
+	PermAdoptCarrier Permission = "adopt_carrier"
 	// PermApprove decides deployment approvals. Only a human admin is ever
 	// allowed to use it: the handler refuses any non-user principal itself,
 	// whatever grants an agent holds.
@@ -38,7 +41,7 @@ const (
 var rolePermissions = map[Role]map[Permission]bool{
 	RoleViewer: {PermReadMetadata: true},
 	RoleMember: {PermReadMetadata: true, PermDeploy: true},
-	RoleAdmin:  {PermReadMetadata: true, PermDeploy: true, PermRotate: true, PermCreateRef: true, PermManageRunners: true, PermApprove: true},
+	RoleAdmin:  {PermReadMetadata: true, PermDeploy: true, PermRotate: true, PermCreateRef: true, PermManageRunners: true, PermAdoptCarrier: true, PermApprove: true},
 }
 
 // PermissionsForRole returns the permissions r grants, as a fresh map the

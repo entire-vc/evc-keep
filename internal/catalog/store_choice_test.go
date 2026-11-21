@@ -64,7 +64,7 @@ func TestCreateRef_ExplicitStore(t *testing.T) {
 
 	create := func(scope tenancy.Scope, name string, storeID uuid.UUID) error {
 		_, err := cat.CreateRef(ctx, CreateRefInput{
-			Org: org.ID, Scope: scope, Name: name, Class: "dev", Type: "generic", ProviderRef: "x", StoreID: storeID,
+			Org: org.ID, Scope: scope, Name: name, Class: "dev", Type: "generic", ProviderRef: "x/" + name, StoreID: storeID,
 		})
 		return err
 	}

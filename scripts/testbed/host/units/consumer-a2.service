@@ -1,0 +1,10 @@
+[Unit]
+Description=Stand consumer consumer-a2
+[Service]
+User=svc
+Type=notify
+NotifyAccess=main
+Restart=no
+# Stand-only: the carrier as this start reads it, kept for the leak scan's needles.
+ExecStartPre=+/usr/local/sbin/testbed-seen.sh a2 /srv/app/a2/mcp.json
+ExecStart=/usr/local/bin/consumer -name a2 -source mcp-config -key mcpServers.gateway.env.GATEWAY_TOKEN -path /srv/app/a2/mcp.json -listen 127.0.0.1:19102

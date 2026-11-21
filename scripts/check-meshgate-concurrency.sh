@@ -6,7 +6,8 @@
 #  2. with exactly-once switched off the test goes red in time, also under
 #     -cpu 1 -count=20, never at the process timeout;
 #  3. unmutated, -race -count=50 stays green with no skip.
-# Prints only test names, outcomes, durations and code frames.
+# Prints only declared test names, outcomes, counts and code frames, never a
+# line of go test output (scripts/test-result-names.sh).
 # Needs a real PostgreSQL: KEEP_DATABASE_URL.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -37,8 +38,13 @@ PY
 }
 
 fresh_tree() {
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
+}
+
+# shown N MAX: a count taken from the log, printed no larger than MAX
+# ("MAX+"), so the number of forged lines carries no more than the bound.
+shown() {
+	if [ "$1" -gt "$2" ]; then echo "$2+"; else echo "$1"; fi
 }
 
 # 1. Slot bound off: the waiting answers take every connection and the holder
@@ -55,23 +61,17 @@ if (cd "$work/tree" && go test -count=1 -p 1 -timeout 12s -run "^$test\$" "$pkg"
 	fail=1
 elif ! grep -q 'panic: test timed out' "$work/dump"; then
 	echo "FAIL dump: no hang without the slot bound"
-	grep -E -- '^(--- |FAIL|ok)' "$work/dump" || true
+	"$root/scripts/test-result-names.sh" "$work/tree" <"$work/dump" ||
+		echo "FAIL diagnostics: test-result-names.sh exited $?"
 	fail=1
 else
 	holder=$(grep -c 'pgxpool.(\*Pool).Acquire' "$work/dump" || true)
 	settle=$(grep -c 'meshgate.(\*PG).Settle' "$work/dump" || true)
-	echo "dump: panic: test timed out; goroutines in pgxpool.(*Pool).Acquire=$holder, frames of meshgate.(*PG).Settle=$settle"
-	# Code frames only: function and file:line of this repo and of pgx; no
-	# argument words, no strings.
-	awk '
-		/^goroutine [0-9]+ \[/ { hdr = $0; shown = 0; next }
-		/^[a-zA-Z].*\(/ && /(evc-keep\/internal|pgxpool|pgconn\.\(\*PgConn\)|pgx\/v5\.\(\*Conn\))/ {
-			fn = $0; sub(/\([^()]*\)$/, "(...)", fn)
-			if (!shown) { print hdr; shown = 1 }
-			print "  " fn
-			if ((getline line) > 0) { sub(/ \+0x[0-9a-f]+$/, "", line); sub(/^.*\/evc-keep\//, "\t", line); sub(/^.*\/tree\//, "\t", line); sub(/^.*\/pkg\/mod\//, "\t", line); print "  " line }
-		}
-	' "$work/dump" | head -120
+	echo "dump: panic: test timed out; goroutines in pgxpool.(*Pool).Acquire=$(shown "$holder" 40), frames of meshgate.(*PG).Settle=$(shown "$settle" 40)"
+	# Code frames only: function and file:line of this repo (under the tree)
+	# and of pgx (in the module cache); no header text, no arguments.
+	"$root/scripts/test-result-names.sh" --goroutines "$work/tree" <"$work/dump" ||
+		echo "FAIL diagnostics: test-result-names.sh exited $?"
 	if [ "$holder" -lt 1 ] || [ "$settle" -lt 1 ]; then
 		echo "FAIL dump: the hang is not where the fix says (Acquire under Settle)"
 		fail=1
@@ -89,14 +89,17 @@ if (cd "$work/tree" && go test -v -count=20 -cpu 1 -p 1 -timeout 240s -run "^$te
 	echo "FAIL exactly-once-off: $test stayed green"
 	fail=1
 fi
-grep -E -- "^(--- (FAIL|PASS|SKIP): $test|FAIL|ok)" "$work/mutant" || true
+"$root/scripts/test-result-names.sh" "$work/tree" <"$work/mutant" ||
+	echo "FAIL diagnostics: test-result-names.sh exited $?"
 if mutation_infrastructure_failed "$work/mutant"; then
 	fail=1
 fi
 reds=$(grep -c -- "^--- FAIL: $test " "$work/mutant" || true)
 slow=$(sed -n "s/^--- FAIL: $test (\([0-9.]*\)s)\$/\1/p" "$work/mutant" | awk -v l="$limit" '$1 > l' | wc -l | tr -d ' ')
-max=$(sed -n "s/^--- FAIL: $test (\([0-9.]*\)s)\$/\1/p" "$work/mutant" | sort -n | tail -1)
-echo "exactly-once-off -cpu 1 -count=20: red=$reds/20 max=${max:-none}s over_${limit}s=$slow"
+# The longest red run, recomputed and bounded: never a field copied from the log.
+max=$(sed -n "s/^--- FAIL: $test (\([0-9.]*\)s)\$/\1/p" "$work/mutant" |
+	awk 'BEGIN { m = -1 } { if ($1 + 0 > m) m = $1 + 0 } END { if (m < 0) print "none"; else if (m > 999) print ">999"; else printf "%.2f", m }')
+echo "exactly-once-off -cpu 1 -count=20: red=$(shown "$reds" 20)/20 max=${max}s over_${limit}s=$(shown "$slow" 20)"
 if [ "$reds" -ne 20 ] || [ "$slow" -ne 0 ]; then
 	echo "FAIL exactly-once-off: want 20 red runs each within ${limit}s"
 	fail=1
@@ -105,13 +108,15 @@ fi
 # 3. Unmutated: fifty green runs under the race detector, no skip.
 if ! (cd "$root" && go test -race -v -count=50 -p 1 -timeout 600s -run "^$test\$" "$pkg" >"$work/race" 2>&1); then
 	echo "FAIL race: $test went red unmutated"
-	grep -E -- "^(--- (FAIL|SKIP)|FAIL|panic)" "$work/race" | head -20 || true
+	"$root/scripts/test-result-names.sh" "$root" <"$work/race" ||
+		echo "FAIL diagnostics: test-result-names.sh exited $?"
 	fail=1
 fi
 pass=$(grep -c -- "^--- PASS: $test " "$work/race" || true)
 skip=$(grep -c -- "^--- SKIP" "$work/race" || true)
-grep -E -- "^(ok|FAIL)[[:space:]]" "$work/race" || true
-echo "race -count=50: pass=$pass/50 skip=$skip"
+"$root/scripts/test-result-names.sh" "$root" <"$work/race" ||
+	echo "FAIL diagnostics: test-result-names.sh exited $?"
+echo "race -count=50: pass=$(shown "$pass" 50)/50 skip=$(shown "$skip" 40)"
 if [ "$pass" -ne 50 ] || [ "$skip" -ne 0 ]; then
 	echo "FAIL race: want 50 passes and no skip"
 	fail=1

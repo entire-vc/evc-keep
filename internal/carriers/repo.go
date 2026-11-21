@@ -59,7 +59,8 @@ func (r *Repository) Register(ctx context.Context, org uuid.UUID, in Registratio
  ON CONFLICT (org_id,secret_id,host,target_kind,target_path,target_field)
  DO UPDATE SET version=EXCLUDED.version, consumer=EXCLUDED.consumer,
  healthcheck_ref=EXCLUDED.healthcheck_ref, last_fp=EXCLUDED.last_fp,
- state='registered', updated_at=now(), last_verified_at=now()
+ state='registered', updated_at=now(), last_verified_at=now(),
+ provenance='deployment',adoption_runner_id=NULL,attestation_job_id=NULL
  RETURNING `+columns,
 		org, id, in.SecretID, version, in.Host, in.TargetKind, in.TargetPath, in.TargetField, in.Consumer, in.HealthcheckRef, in.LastFP))
 	if err != nil {
@@ -71,11 +72,11 @@ func (r *Repository) Register(ctx context.Context, org uuid.UUID, in Registratio
 	return c, nil
 }
 
-const columns = `id,org_id,secret_id,version,host,target_kind,target_path,target_field,consumer,healthcheck_ref,last_fp,state,created_at,updated_at,last_verified_at`
+const columns = `id,org_id,secret_id,version,host,target_kind,target_path,target_field,consumer,healthcheck_ref,last_fp,state,created_at,updated_at,last_verified_at,provenance,COALESCE(adoption_runner_id,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE(attestation_job_id,'00000000-0000-0000-0000-000000000000'::uuid)`
 
 func scanCarrier(row pgx.Row) (Carrier, error) {
 	var c Carrier
-	err := row.Scan(&c.ID, &c.OrgID, &c.SecretID, &c.Version, &c.Host, &c.TargetKind, &c.TargetPath, &c.TargetField, &c.Consumer, &c.HealthcheckRef, &c.LastFP, &c.State, &c.CreatedAt, &c.UpdatedAt, &c.LastVerifiedAt)
+	err := row.Scan(&c.ID, &c.OrgID, &c.SecretID, &c.Version, &c.Host, &c.TargetKind, &c.TargetPath, &c.TargetField, &c.Consumer, &c.HealthcheckRef, &c.LastFP, &c.State, &c.CreatedAt, &c.UpdatedAt, &c.LastVerifiedAt, &c.Provenance, &c.RunnerID, &c.AttestationJobID)
 	return c, err
 }
 

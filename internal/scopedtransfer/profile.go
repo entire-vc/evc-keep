@@ -35,18 +35,18 @@ const ProfileVersionStoreMode = 2
 // This pin does not prove an actual database matches the expected catalog;
 // the trusted reader must still verify columns, constraints, functions,
 // triggers, roles and applied migrations before constructing the inventory.
-const MigrationSetID = "sha256:c576311f7ffd61ca49401c6a682c17247c331e242fdb6968adc5dcc34fdf06ea"
+const MigrationSetID = "sha256:e22415e8194690898437c8e7394b6dc1aa26cc2905c3c46f06c4c223ae161c78"
 
 // CatalogID pins the live schema catalog (columns, constraints, indexes,
 // triggers, functions, row-level security) that the supported migrations
 // produce on PostgreSQL 17. A reader recomputes it from the database itself
 // on the source and on the target; a hand-altered column or constraint under
 // an unchanged migration history changes it and is refused.
-const CatalogID = "sha256:4970ab77559d94fe8fd6d125eb114e401aceb2ced4a12feaff0c4420550f5ed4"
+const CatalogID = "sha256:425a59d7899a9a034cf45b6d21957989aa8a2f4dc9a0c19f95e6e75aae1bf568"
 
 const (
 	// SchemaVersion is the only migration version classified by this registry.
-	SchemaVersion int64 = 51
+	SchemaVersion int64 = 69
 	// MaxTableRows and MaxSnapshotRows bound the metadata plan. The transport
 	// must independently bound bytes, allocations and serialized row sizes.
 	MaxTableRows    int64 = 1_000_000
@@ -110,6 +110,7 @@ var tablePolicies = [...]TablePolicy{
 	{"runners", RequireEmpty},
 	{"intake_links", RequireEmpty},
 	{"carriers", RequireEmpty},
+	{"carrier_adoption_receipts", RequireEmpty},
 	{"deployment_policies", RequireEmpty},
 	{"deployment_requests", RequireEmpty},
 	{"approval_requests", RequireEmpty},
@@ -121,6 +122,8 @@ var tablePolicies = [...]TablePolicy{
 	{"rotation_secret_epochs", RequireEmpty},
 	{"carrier_verifications", RequireEmpty},
 	{"carrier_verification_items", RequireEmpty},
+	{"discovery_jobs", RequireEmpty},
+	{"discovery_observations", RequireEmpty},
 	{"rotation_keys", RequireEmpty},
 	{"rotation_intents", RequireEmpty},
 	{"intake_rotation_links", RequireEmpty},

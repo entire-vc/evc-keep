@@ -128,6 +128,7 @@ func runRun(args []string) int {
 		Policy:    policy,
 		Journal:   journal,
 		Limiter:   runnerproto.NewLimiter(policy),
+		Discover:  runnerproto.NewDiscoverLimiter(policy),
 		Delivery:  cred.DeliveryKey,
 		Outbox:    outbox,
 		Log:       log,

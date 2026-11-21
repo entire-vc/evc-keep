@@ -28,6 +28,9 @@ type Transport interface {
 	// SendResult reports the closed Result. ErrRefused means the server will
 	// never accept it.
 	SendResult(ctx context.Context, jobID string, r runnerproto.Result) error
+	// SendDiscoverResult reports a discover job's closed DiscoverResult to the
+	// same route; the server reads the body by the job's action.
+	SendDiscoverResult(ctx context.Context, jobID string, r runnerproto.DiscoverResult) error
 }
 
 // ErrRefused is the server's job-level refusal (404): retrying cannot help.
@@ -171,6 +174,22 @@ func (t *HTTPTransport) SendResult(ctx context.Context, jobID string, r runnerpr
 	if err != nil {
 		return ErrTransport
 	}
+	return t.postResult(ctx, jobID, body)
+}
+
+// SendDiscoverResult implements Transport.
+func (t *HTTPTransport) SendDiscoverResult(ctx context.Context, jobID string, r runnerproto.DiscoverResult) error {
+	if !jobIDRe.MatchString(jobID) || r.Validate() != nil {
+		return ErrRefused
+	}
+	body, err := json.Marshal(r)
+	if err != nil {
+		return ErrTransport
+	}
+	return t.postResult(ctx, jobID, body)
+}
+
+func (t *HTTPTransport) postResult(ctx context.Context, jobID string, body []byte) error {
 	resp, cancel, err := t.do(ctx, requestTimeout, http.MethodPost, "/runners/jobs/"+jobID+"/result", body)
 	if err != nil {
 		return err

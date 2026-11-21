@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"github.com/entire-vc/evc-keep/internal/dispatch"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,9 +21,10 @@ import (
 )
 
 type fakeJobs struct {
-	err   error
-	calls int
-	peer  mtls.Principal
+	bodies int // result bodies that reached the service, valid or not
+	err    error
+	calls  int
+	peer   mtls.Principal
 }
 
 func (f *fakeJobs) Poll(_ context.Context, p mtls.Principal) (runnerproto.SignedJob, bool, error) {
@@ -35,7 +37,14 @@ func (f *fakeJobs) Material(_ context.Context, p mtls.Principal, id string) (run
 	f.peer = p
 	return runnerproto.ValueEnvelope{JobID: id, Sealed: []byte("ciphertext"), SealedFingerprintKey: []byte("key-ciphertext")}, f.err
 }
-func (f *fakeJobs) Result(_ context.Context, p mtls.Principal, _ string, _ runnerproto.Result) error {
+
+// ResultBody decodes as the real service does for a deploy job: a body outside
+// the closed schema never counts as a call and is the service's invalid-body error.
+func (f *fakeJobs) ResultBody(_ context.Context, p mtls.Principal, _ string, body []byte) error {
+	f.bodies++
+	if _, err := runnerproto.DecodeResult(body); err != nil {
+		return dispatch.ErrInvalidBody
+	}
 	f.calls++
 	f.peer = p
 	return f.err
@@ -126,5 +135,39 @@ func TestRunnerJobHTTPClosedRequestsAndErrorLeak(t *testing.T) {
 	rec := doJSON(t, h, "POST", "/runners/jobs/value", runnerproto.ValueRequest{JobID: id.String()}, "", cert)
 	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal("ciphertext response or cache policy incorrect")
+	}
+}
+
+// A discover report may be large, a deploy result may not: the route caps at
+// the largest report, and the service refuses anything too big for its job.
+func TestRunnerJobResultBodyIsCappedAtTheLargestReport(t *testing.T) {
+	f := &fakeJobs{}
+	h, cert, _ := jobRouter(t, f)
+	id, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal("job id")
+	}
+	big := bytes.Repeat([]byte(" "), dispatch.MaxDiscoverBody+1)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, tlsRequest(httptest.NewRequest("POST", "/runners/jobs/"+id.String()+"/result", bytes.NewReader(big)), cert))
+	if rec.Code != http.StatusBadRequest || f.calls != 0 || f.bodies != 0 {
+		t.Fatalf("a body past the report cap reached the service: %d, %d calls", rec.Code, f.calls)
+	}
+}
+
+// A body between the old 1 MiB cap and the report cap reaches the service,
+// which alone decides by job action whether it is too big.
+func TestRunnerJobResultAdmitsALargeDiscoverReportBody(t *testing.T) {
+	f := &fakeJobs{}
+	h, cert, _ := jobRouter(t, f)
+	id, err := uuid.NewV7()
+	if err != nil {
+		t.Fatal("job id")
+	}
+	big := bytes.Repeat([]byte(" "), 8<<20)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, tlsRequest(httptest.NewRequest("POST", "/runners/jobs/"+id.String()+"/result", bytes.NewReader(big)), cert))
+	if f.bodies != 1 {
+		t.Fatalf("an 8 MiB body did not reach the service: %d, %d bodies", rec.Code, f.bodies)
 	}
 }

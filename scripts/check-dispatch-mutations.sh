@@ -17,6 +17,9 @@ import subprocess
 import sys
 
 root, work = map(Path, sys.argv[1:])
+import sys
+sys.path.insert(0, str(root / 'scripts/lib'))
+from mutation_edit import named_edit as mutation_edit
 mutations = [
     ('poll-claim', 'internal/dispatch/dispatch.go', 'internal/dispatch', 'TestPollClaimsOnceAndHonorsCancellation', "AND status='queued' AND expires_at", "AND expires_at"),
     ('poll-cancellation', 'internal/dispatch/dispatch.go', 'internal/dispatch', 'TestPollClaimsOnceAndHonorsCancellation', 'if err := ctx.Err(); err != nil {', 'if err := ctx.Err(); false && err != nil {'),
@@ -61,12 +64,15 @@ def events(output):
         try: result.append(json.loads(line))
         except ValueError: pass
     return result
+# Preserve the former replace-all mutants with explicit descending occurrences.
+mutation_occurrences = {'key-liveness': (3, 2, 1), 'job-expiry': (2, 1)}
 for name, filename, directory, test, before, after in mutations:
     source=(root/filename).read_text()
     target=work/'tree'/filename
-    if before not in source:
-        raise SystemExit('FAIL '+name+': mutation target missing')
-    target.write_text(source.replace(before,after))
+    changed = source
+    for occurrence in mutation_occurrences.get(name, (None,)):
+        changed = mutation_edit(name, changed, before, after, occurrence, filename)
+    target.write_text(changed)
     try:
         if apply_only:
             print('ok   '+name+': applies',flush=True)

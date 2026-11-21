@@ -10,7 +10,9 @@ cd "$root"
 temp_workspace
 mutation_apply_only || test -n "${KEEP_DATABASE_URL:-}" || { echo 'FAIL metadata: PostgreSQL is required'; exit 2; }
 python3 - <<'PY'
-import json, os, pathlib, re, shutil, subprocess, tempfile
+import json, os, pathlib, re, shutil, subprocess, tempfile, sys
+sys.path.insert(0, str(pathlib.Path.cwd() / "scripts/lib"))
+from mutation_edit import named_edit as mutation_edit
 
 def catalog_diagnostic(code, out, test, marker, timed_out=False):
     # Numeric predicates only; child text may contain metadata/privacy canaries.
@@ -36,9 +38,7 @@ mutations = []
 
 def add(name, file, before, after, test=ref_test, marker=ref_marker, pkg='./internal/catalog'):
     source = (root / file).read_text()
-    if source.count(before) != 1:
-        raise SystemExit('FAIL '+name+': mutation target is not unique')
-    mutations.append((name, file, source.replace(before, after, 1), pkg, test, marker))
+    mutations.append((name, file, mutation_edit(name, source, before, after, src=file), pkg, test, marker))
 
 # Delete the whole validator including its dependencies, preserving public constants.
 source = (root / validation).read_text()
@@ -66,13 +66,13 @@ for field, limit in [('name', 'NameLimit'), ('description', 'DescriptionLimit'),
 
 guard = 'if err := metatext.Validate("name", name, metatext.NameLimit); err != nil {'
 add('metadata-store-name', 'internal/catalog/store.go', guard, guard[:-1]+' && false {', test='TestOtherMetadataWritersValidation')
-for method in ['CreateOrganization', 'CreateWorkspace', 'CreateProject', 'CreateAgent', 'CreateService']:
+for method, occurrence in [('CreateOrganization', 1), ('CreateWorkspace', 2),
+                           ('CreateProject', 3), ('CreateAgent', 4), ('CreateService', 5)]:
     file = 'internal/tenancy/repo.go'
     source = (root/file).read_text()
-    start = source.index('func (r *Repo) '+method+'(')
-    position = source.index(guard, start)
-    mutated = source[:position] + source[position:].replace(guard, guard[:-1]+' && false {', 1)
-    mutations.append(('metadata-'+method, file, mutated, './internal/catalog', 'TestOtherMetadataWritersValidation', ref_marker))
+    name = 'metadata-'+method
+    mutated = mutation_edit(name, source, guard, guard[:-1]+' && false {', occurrence, file)
+    mutations.append((name, file, mutated, './internal/catalog', 'TestOtherMetadataWritersValidation', ref_marker))
 add('metadata-api-utf8', 'internal/api/secrets.go', '!utf8.Valid(raw)', 'false',
     pkg='./internal/api', test='TestCreateRefMetadataInvalidUTF8', marker='API accepted invalid UTF-8 metadata')
 surrogate_test = 'TestCreateRefMetadataSurrogateEscapes'
@@ -80,10 +80,12 @@ surrogate_marker = 'API accepted unpaired surrogate metadata'
 add('metadata-api-surrogates-call', 'internal/api/secrets.go', '!validSurrogateEscapes(raw)', 'false', pkg='./internal/api', test=surrogate_test, marker=surrogate_marker)
 file = 'internal/api/metadata_json.go'
 source = (root/file).read_text()
+for boundary in ('func validSurrogateEscapes(', '// metadataWireField'):
+    mutation_edit('metadata-api-surrogates-noop', source, boundary, boundary, src=file)
 start = source.index('func validSurrogateEscapes(')
 end = source.index('// metadataWireField', start)
-mutated = source[:start] + 'func validSurrogateEscapes(raw []byte) bool { return true }\n\n' + source[end:]
-mutated = mutated.replace('\t"strconv"\n', '')
+mutated = mutation_edit('metadata-api-surrogates-noop', source, source[start:end], 'func validSurrogateEscapes(raw []byte) bool { return true }\n\n', src=file)
+mutated = mutation_edit('metadata-api-surrogates-noop', mutated, '\t"strconv"\n', '', src=file)
 mutations.append(('metadata-api-surrogates-noop', file, mutated, './internal/api', surrogate_test, surrogate_marker))
 for name, before, after in [
     ('high', 'n >= 0xd800 && n <= 0xdbff', 'false'),
@@ -104,20 +106,21 @@ for field in ['name', 'description', 'class', 'type']:
         '"'+field+'"', '"other"', pkg='./internal/api', test=wire_test, marker=wire_marker)
 file = 'internal/api/metadata_json.go'
 source = (root/file).read_text()
+mutation_edit('metadata-wire-field-noop', source, '// metadataWireField', '// metadataWireField', src=file)
 start = source.index('// metadataWireField')
-mutated = source[:start] + 'func metadataWireField(raw []byte, valid func([]byte) bool) string { return "request body" }\n'
+mutated = mutation_edit('metadata-wire-field-noop', source, source[start:], 'func metadataWireField(raw []byte, valid func([]byte) bool) string { return "request body" }\n', src=file)
 for dependency in ['bytes', 'encoding/json', 'strings']:
-    mutated = mutated.replace('\t"'+dependency+'"\n', '')
+    mutated = mutation_edit('metadata-wire-field-noop', mutated, '\t"'+dependency+'"\n', '', src=file)
 mutations.append(('metadata-wire-field-noop', file, mutated, './internal/api', wire_test, wire_marker))
 # Last-value-wins loses only the invalid duplicate followed by a good value.
 # Escaped keys and nonduplicate values retain their existing behavior.
 duplicate_helper = 'func metadataWireField(raw []byte, valid func([]byte) bool) string {\n var collapsed map[string]json.RawMessage\n if err := json.Unmarshal(raw, &collapsed); err != nil { return "request body" }\n for field, value := range collapsed {\n  if valid(value) { continue }\n  for _, allowed := range []string{"name", "description", "class", "type"} {\n   if strings.EqualFold(field, allowed) { return allowed }\n  }\n }\n return "request body"\n}\n'
-mutated = (source[:start] + duplicate_helper).replace('\t"bytes"\n', '')
+mutated = mutation_edit('metadata-wire-field-duplicates', mutation_edit('metadata-wire-field-duplicates', source, source[start:], duplicate_helper, src=file), '\t"bytes"\n', '', src=file)
 mutations.append(('metadata-wire-field-duplicates', file, mutated, './internal/api', wire_test, wire_marker))
 add('metadata-wire-field-casefold', 'internal/api/metadata_json.go', 'strings.EqualFold(field, allowed)', 'field == allowed',
     pkg='./internal/api', test=wire_test, marker=wire_marker)
 name, file, mutated, pkg, test, marker = mutations[-1]
-mutations[-1] = (name, file, mutated.replace('\t"strings"\n', ''), pkg, test, marker)
+mutations[-1] = (name, file, mutation_edit(name, mutated, '\t"strings"\n', '', src=file), pkg, test, marker)
 
 if os.environ.get('MUTATION_APPLY_ONLY') == '1':
     # Apply-only (scripts/mutation-helpers.sh): every anchor was found above;

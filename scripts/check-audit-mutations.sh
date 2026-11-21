@@ -68,7 +68,7 @@ fail=0
 
 # mutate NAME FILE FROM TO WANT: FILE is repo-root-relative (not pkg-relative
 # — unlike the other check-*-mutations.sh scripts, this one's mutations span
-# internal/audit AND internal/store/migrations). Replaces the first literal
+# internal/audit AND internal/store/migrations). Replaces the only or explicitly named literal
 # occurrence of FROM with TO and requires the test(s) named by WANT (an
 # anchored `go test -run` regexp) to go red. Naming the test is the point:
 # a mutant that turns some unrelated test red proves nothing about the guard
@@ -76,13 +76,10 @@ fail=0
 # seconds instead of a full package run. A WANT that matches nothing, or
 # whose test SKIPs, is a failure too, not a pass.
 mutate() {
+	mutation_take_occurrences
 	name=$1 src=$2 from=$3 to=$4 want=$5 pkg=${6:-./internal/audit/...}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -116,7 +113,7 @@ migration=internal/store/migrations/00005_audit.sql
 # any mutation made only to that earlier migration's copy. Point the action-
 # CHECK mutations at whichever migration is currently last to touch it; when
 # a future migration adds another action, this must move again.
-migration_action=internal/store/migrations/00051_transfer_imported_audit.sql
+migration_action=internal/store/migrations/00064_mesh_approvals_channel.sql
 # The downgrade test goes down to version 37, so the Down CHECK it exercises
 # last is 00038's: a mutation of a later migration's Down is healed by it.
 migration_action_down=internal/store/migrations/00038_audit_key_level_requested.sql
@@ -167,7 +164,7 @@ mutate append-set-local-role internal/audit/journal.go 'tx.Exec(ctx, "SET LOCAL 
 # organization's rows — "OR true" (rather than dropping the clause outright)
 # keeps the query's own parameter count intact, so the mutant fails on the
 # actual property instead of on an unrelated "expected N arguments" error.
-mutate org-scope "$verify" 'WHERE org_id = $1' 'WHERE org_id = $1 OR true' '^TestVerify_OrgFilterIsEnforced$'
+MUTATION_OCCURRENCE=1 mutate org-scope "$verify" 'WHERE org_id = $1' 'WHERE org_id = $1 OR true' '^TestVerify_OrgFilterIsEnforced$'
 
 # 4. Record.validate — every closed field's refusal, one mutant each. The
 # field name is the argument of invalidField, so the FROM string is unique.
@@ -196,7 +193,7 @@ mutate check-result_fingerprint "$migration" "CHECK (result_fingerprint = ''" "C
 mutate check-request_id         "$migration" 'CHECK (request_id ='         'CHECK (true OR request_id =' '^TestAuditRecordsRejectFreeTextInClosedColumns$'
 mutate check-result_length      "$migration" 'CHECK (result_length >= 0)'  'CHECK (true OR result_length >= 0)' '^TestAuditRecordsRejectOutOfBoundsValues$'
 mutate check-intent_reason      "$migration" 'CHECK (char_length(intent_reason) <= 200)' 'CHECK (true OR char_length(intent_reason) <= 200)' '^TestAuditRecordsRejectOutOfBoundsValues$'
-mutate check-action             "$migration_action" 'CHECK (action IN'             'CHECK (true OR action IN' '^TestAuditRecordsRejectFreeTextInClosedColumns$'
+MUTATION_OCCURRENCE=1 mutate check-action             "$migration_action" 'CHECK (action IN'             'CHECK (true OR action IN' '^TestAuditRecordsRejectFreeTextInClosedColumns$'
 
 # 4b. Action registry. The Go check accepts any non-empty name, then the
 # validate call is switched off; the migration's CHECK is widened to any
@@ -206,21 +203,27 @@ mutate check-action             "$migration_action" 'CHECK (action IN'          
 # refuses them.
 mutate action-registry-open        "$record" 'if a == k {' 'if a == k || len(a) > 0 {' '^TestAppend_ActionOutsideRegistryIsRefused$'
 mutate action-registry-not-checked "$record" 'return invalidField("action")' 'return nil' '^TestAppend_ActionOutsideRegistryIsRefused$'
-mutate check-action-shape-only     "$migration_action" 'CHECK (action IN' "CHECK (action LIKE '%.%' OR action IN" '^TestAuditRecordsRejectActionOutsideRegistry$'
-mutate check-action-vacuous        "$migration_action" 'CHECK (action IN' 'CHECK (true OR action IN' '^TestAuditRecordsRejectActionOutsideRegistry$'
-mutate action-list-drift-database  "$migration_action" "'kek.purge'" "'kek.purge_x'" '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate check-action-shape-only     "$migration_action" 'CHECK (action IN' "CHECK (action LIKE '%.%' OR action IN" '^TestAuditRecordsRejectActionOutsideRegistry$'
+MUTATION_OCCURRENCE=1 mutate check-action-vacuous        "$migration_action" 'CHECK (action IN' 'CHECK (true OR action IN' '^TestAuditRecordsRejectActionOutsideRegistry$'
+MUTATION_OCCURRENCE=1 mutate action-list-drift-database  "$migration_action" "'kek.purge'" "'kek.purge_x'" '^TestActionRegistryMatchesMigrationCheck$'
 mutate action-list-drift-go        "$record" 'ActionKEKPurge,' 'ActionKEKPurge, "kek.extra",' '^TestActionRegistryMatchesMigrationCheck$'
 # The Mesh secret actions must survive in the last migration's Up CHECK (the
 # registry test sees the drift) and in its Down CHECK (the downgrade test
 # inserts both after the downgrade; that test lives in internal/store).
-mutate action-mesh-put-dropped-up   "$migration_action" "'secret.rotate','mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'secret.rotate','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-mesh-resolve-dropped-up "$migration_action" "'mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'mesh.secret.put','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-mesh-pending-dropped-up "$migration_action" "'org.bootstrap','mesh.install.pending'," "'org.bootstrap'," '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-store-bind-default-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-deploy-policy-set-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'store.bind_default','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-mesh-token-dropped-up "$migration_action" "'store.bind_default','deploy.policy_set','mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'store.bind_default','deploy.policy_set','mesh.uninstall'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-mesh-uninstall-dropped-up "$migration_action" "'mesh.token','mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'mesh.token','mesh.secret.metadata','transfer.imported'));" '^TestActionRegistryMatchesMigrationCheck$'
-mutate action-transfer-imported-dropped-up "$migration_action" "'mesh.uninstall','mesh.secret.metadata','transfer.imported'));" "'mesh.uninstall','mesh.secret.metadata'));" '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-mesh-put-dropped-up   "$migration_action" "'secret.rotate','mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'secret.rotate','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-mesh-resolve-dropped-up "$migration_action" "'mesh.secret.put','mesh.secret.resolve','org.bootstrap','mesh.install.pending'," "'mesh.secret.put','org.bootstrap','mesh.install.pending'," '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-mesh-pending-dropped-up "$migration_action" "'org.bootstrap','mesh.install.pending'," "'org.bootstrap'," '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-store-bind-default-dropped-up "$migration_action" "'store.bind_default'," "" '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-deploy-policy-set-dropped-up "$migration_action" "'deploy.policy_set'," "" '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-mesh-token-dropped-up "$migration_action" "'mesh.token'," "" '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-mesh-uninstall-dropped-up "$migration_action" "'mesh.uninstall'," "" '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-transfer-imported-dropped-up "$migration_action" "'transfer.imported'," "" '^TestActionRegistryMatchesMigrationCheck$'
+MUTATION_OCCURRENCE=1 mutate action-carrier-discover-dropped-up "$migration_action" "'carrier.discover'," "" '^TestActionRegistryMatchesMigrationCheck$'
+mutate action-mesh-approvals-channel-dropped-up "$migration_action" "'carrier.adopt.result','mesh.approvals_channel'));" "'carrier.adopt.result'));" '^TestActionRegistryMatchesMigrationCheck$'
+# 00064's own Down: the restored list keeps the previous actions and drops the
+# new one. Its downgrade test goes down to 59 only, so no older Down heals it.
+mutate action-approvals-channel-down-loses-previous "$migration_action" "'carrier.adopt.policy_decision','carrier.adopt.result')) NOT VALID;" "'carrier.adopt.policy_decision')) NOT VALID;" '^TestMeshApprovalsChannelMigration_DowngradeShown$' ./internal/store/...
+mutate action-approvals-channel-down-keeps-new "$migration_action" "'carrier.adopt.result')) NOT VALID;" "'carrier.adopt.result','mesh.approvals_channel')) NOT VALID;" '^TestMeshApprovalsChannelMigration_DowngradeShown$' ./internal/store/...
 # The import must call the approval check: without the call a bundle holder can
 # fabricate the source's final approval. Only the end-to-end test reaches the
 # call site, so the mutation is run here, where a real database is present.

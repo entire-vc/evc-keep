@@ -34,6 +34,7 @@ var consoleTemplates = template.Must(template.New("console").Parse(`
 <p class="st-{{.Status}}">Status: <strong>{{.StatusText}}</strong></p>
 {{if .Note}}<p class="note">{{.Note}}</p>{{end}}
 <dl>
+{{if .Operation}}<dt>Operation</dt><dd>{{.Operation}}</dd>{{end}}
 <dt>Requested by</dt><dd>{{.Requester}}</dd>
 {{if .Sponsor}}<dt>Agent's sponsor</dt><dd>{{.Sponsor}}</dd>{{end}}
 <dt>Secret</dt><dd>{{.Secret}} ({{.Class}})</dd>
@@ -53,7 +54,7 @@ var consoleTemplates = template.Must(template.New("console").Parse(`
 {{if .CanDecide}}<form method="post" action="/console/approvals/{{.ID}}/decision">
 <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="binding" value="{{.Hash}}">
 <label>Reason (required to reject)<input type="text" name="reason" maxlength="200"></label>
-<div class="actions"><button type="submit" name="decision" value="approve">Approve</button>
+<div class="actions"><button type="submit" name="decision" value="approve">{{.ApproveLabel}}</button>
 <button type="submit" name="decision" value="reject" class="danger">Reject</button></div></form>{{end}}
 {{template "foot" .}}{{end}}
 `))

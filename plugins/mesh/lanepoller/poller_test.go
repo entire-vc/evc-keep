@@ -105,7 +105,7 @@ func (r *runs) run(_ context.Context, script, lane string) (string, int, error) 
 func newPoller(t *testing.T, s *stub, r *runs, token string, buf *bytes.Buffer, allow ...string) *lanepoller.Poller {
 	t.Helper()
 	if len(allow) == 0 {
-		allow = []string{"Hugh", "Test"}
+		allow = []string{"worker", "other"}
 	}
 	p, err := lanepoller.New(lanepoller.Config{
 		BaseURL: s.srv.URL, Token: token, Script: "/abs/keep-lane-restart.sh", Allow: allow,
@@ -132,12 +132,12 @@ func TestClaimRunAck(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s, r := newStub(t), &runs{out: c.out, code: c.code}
-			id := s.push("Test", "")
+			id := s.push("other", "")
 			var buf bytes.Buffer
 			if err := newPoller(t, s, r, "tok", &buf).Once(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if len(r.lanes) != 1 || r.lanes[0] != "Test" {
+			if len(r.lanes) != 1 || r.lanes[0] != "other" {
 				t.Fatalf("wrapper runs = %v, want exactly [Test]", r.lanes)
 			}
 			if len(s.acks) != 1 || s.acks[0] != (ack{id, c.want, "ct-" + id}) {
@@ -152,7 +152,7 @@ func TestClaimRunAck(t *testing.T) {
 
 func TestRunnerCannotStartAcksFailed(t *testing.T) {
 	s, r := newStub(t), &runs{err: errors.New("boom")}
-	id := s.push("Hugh", "")
+	id := s.push("worker", "")
 	if err := newPoller(t, s, r, "tok", &bytes.Buffer{}).Once(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +163,8 @@ func TestRunnerCannotStartAcksFailed(t *testing.T) {
 
 func TestLaneOutsideAllowlistNeverRunsWrapper(t *testing.T) {
 	s, r := newStub(t), &runs{}
-	id := s.push("Calvin", "")
-	s.push("../Test", "")
+	id := s.push("stranger", "")
+	s.push("../other", "")
 	if err := newPoller(t, s, r, "tok", &bytes.Buffer{}).Once(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestLaneOutsideAllowlistNeverRunsWrapper(t *testing.T) {
 
 func TestBadRequestIDIsIgnored(t *testing.T) {
 	s, r := newStub(t), &runs{}
-	s.queue = []map[string]any{{"request_id": "../../x", "lane": "Test"}}
+	s.queue = []map[string]any{{"request_id": "../../x", "lane": "other"}}
 	if err := newPoller(t, s, r, "tok", &bytes.Buffer{}).Once(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestServerDownPollerStaysAliveAndRetries(t *testing.T) {
 	s, r := newStub(t), &runs{out: "Test: no session mr-Test (nothing running)\n"}
 	s.fail = 2
 	s.body = "down"
-	id := s.push("Test", "")
+	id := s.push("other", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -232,7 +232,7 @@ func TestServerDownPollerStaysAliveAndRetries(t *testing.T) {
 func TestCanaryDoesNotSurface(t *testing.T) {
 	c := canary.New()
 	s, r := newStub(t), &runs{out: c.Value(3) + " (nothing running)\n"}
-	s.push("Test", c.Value(1))
+	s.push("other", c.Value(1))
 	s.push("Evil", c.Value(1))
 	var buf bytes.Buffer
 	p := newPoller(t, s, r, c.Value(0), &buf)
@@ -256,7 +256,7 @@ func TestCanaryDoesNotSurface(t *testing.T) {
 }
 
 func TestNewRefusesBadConfig(t *testing.T) {
-	ok := lanepoller.Config{BaseURL: "https://k.example", Token: "t", Script: "/a", Allow: []string{"Test"}}
+	ok := lanepoller.Config{BaseURL: "https://k.example", Token: "t", Script: "/a", Allow: []string{"other"}}
 	if _, err := lanepoller.New(ok); err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestNewRefusesBadConfig(t *testing.T) {
 		"empty allow":     func(c *lanepoller.Config) { c.Allow = nil },
 		"bad url":         func(c *lanepoller.Config) { c.BaseURL = "ftp://x" },
 		"plain http":      func(c *lanepoller.Config) { c.BaseURL = "http://k.example" },
-		"empty lane":      func(c *lanepoller.Config) { c.Allow = []string{"Test", ""} },
+		"empty lane":      func(c *lanepoller.Config) { c.Allow = []string{"other", ""} },
 		"dash lane":       func(c *lanepoller.Config) { c.Allow = []string{"-x"} },
 		"unclean script":  func(c *lanepoller.Config) { c.Script = "/a/../b" },
 	} {
@@ -286,14 +286,14 @@ func TestExecRunnerPassesLaneAndEmptyEnv(t *testing.T) {
 	if err := os.WriteFile(sh, []byte(script), 0o600); err != nil || os.Chmod(sh, 0o700) != nil { //nolint:gosec // test script must be executable
 		t.Fatal(err)
 	}
-	out, code, err := lanepoller.ExecRunner(context.Background(), sh, "Test")
-	if err != nil || code != 0 || strings.TrimSpace(out) != "lane=Test env=unset" {
+	out, code, err := lanepoller.ExecRunner(context.Background(), sh, "other")
+	if err != nil || code != 0 || strings.TrimSpace(out) != "lane=other env=unset" {
 		t.Fatalf("out %q code %d err %v", out, code, err)
 	}
 	if err := os.WriteFile(sh, []byte("#!/bin/sh\nexit 2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, code, _ := lanepoller.ExecRunner(context.Background(), sh, "Test"); code != 2 {
+	if _, code, _ := lanepoller.ExecRunner(context.Background(), sh, "other"); code != 2 {
 		t.Fatalf("code %d", code)
 	}
 }
@@ -307,7 +307,7 @@ func TestExecRunnerReturnsWhenChildHoldsStdout(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	_, _, _ = lanepoller.ExecRunner(context.Background(), sh, "Test")
+	_, _, _ = lanepoller.ExecRunner(context.Background(), sh, "other")
 	if d := time.Since(start); d > 10*time.Second {
 		t.Fatalf("ExecRunner blocked %s on a lingering child", d)
 	}
@@ -316,7 +316,7 @@ func TestExecRunnerReturnsWhenChildHoldsStdout(t *testing.T) {
 func TestServerFieldsAreLoggedOnlyWhenShaped(t *testing.T) {
 	c := canary.New()
 	s, r := newStub(t), &runs{out: "Test: session mr-Test closed\n"}
-	s.queue = []map[string]any{{"request_id": uuid.NewString(), "lane": "Test",
+	s.queue = []map[string]any{{"request_id": uuid.NewString(), "lane": "other",
 		"key_version": c.Value(1), "fingerprint": c.Value(2), "claim_token": "ct-1"}}
 	var buf bytes.Buffer
 	if err := newPoller(t, s, r, "tok", &buf).Once(context.Background()); err != nil {
@@ -336,7 +336,7 @@ func TestServerShapedFieldsAreLogged(t *testing.T) {
 		t.Fatalf("fixture is not in the server's shape: %q %q", ver, fp)
 	}
 	s, r := newStub(t), &runs{out: "Test: no session mr-Test (nothing running)\n"}
-	s.queue = []map[string]any{{"request_id": uuid.NewString(), "lane": "Test",
+	s.queue = []map[string]any{{"request_id": uuid.NewString(), "lane": "other",
 		"key_version": ver, "fingerprint": fp, "claim_token": "ct-1"}}
 	var buf bytes.Buffer
 	if err := newPoller(t, s, r, "tok", &buf).Once(context.Background()); err != nil {
@@ -354,7 +354,7 @@ func TestServerShapedFieldsAreLogged(t *testing.T) {
 func TestLaneIsLoggedOnlyWhenShaped(t *testing.T) {
 	c := canary.New()
 	s, r := newStub(t), &runs{out: "(nothing running)\n"}
-	s.push("Test", "")
+	s.push("other", "")
 	s.queue[0]["lane"] = c.Value(3)
 	var buf bytes.Buffer
 	if err := newPoller(t, s, r, "tok", &buf).Once(context.Background()); err != nil {
@@ -369,7 +369,7 @@ func TestLaneIsLoggedOnlyWhenShaped(t *testing.T) {
 func TestBadRequestIDIsNotRunNorAcked(t *testing.T) {
 	for _, id := range []any{nil, "", "not-a-uuid", "../claim"} {
 		s, r := newStub(t), &runs{out: "(nothing running)\n"}
-		s.push("Test", "")
+		s.push("other", "")
 		if id == nil {
 			delete(s.queue[0], "request_id")
 		} else {
@@ -386,7 +386,7 @@ func TestBadRequestIDIsNotRunNorAcked(t *testing.T) {
 
 func TestUnrecognisedOutputIsNotOK(t *testing.T) {
 	s, r := newStub(t), &runs{out: "something else\n"}
-	s.push("Test", "")
+	s.push("other", "")
 	if err := newPoller(t, s, r, "tok", &bytes.Buffer{}).Once(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +407,7 @@ func TestMalformedRedirectLocationDoesNotLeakIntoErrors(t *testing.T) {
 				bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 				if path == "ack" && strings.HasSuffix(r.URL.Path, "/claim") && !claimed {
 					claimed = true
-					_ = json.NewEncoder(w).Encode([]map[string]any{{"request_id": uuid.NewString(), "lane": "Test", "claim_token": c.Value(5)}})
+					_ = json.NewEncoder(w).Encode([]map[string]any{{"request_id": uuid.NewString(), "lane": "other", "claim_token": c.Value(5)}})
 					return
 				}
 				w.Header().Set("Location", "http://["+bearer+"/"+c.Value(5))
@@ -416,7 +416,7 @@ func TestMalformedRedirectLocationDoesNotLeakIntoErrors(t *testing.T) {
 			t.Cleanup(srv.Close)
 			var buf bytes.Buffer
 			p, err := lanepoller.New(lanepoller.Config{
-				BaseURL: srv.URL, Token: c.Value(0), Script: "/abs/keep-lane-restart.sh", Allow: []string{"Test"},
+				BaseURL: srv.URL, Token: c.Value(0), Script: "/abs/keep-lane-restart.sh", Allow: []string{"other"},
 				Run: (&runs{out: "(nothing running)\n"}).run,
 				Log: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			})
@@ -438,7 +438,7 @@ func TestMalformedRedirectLocationDoesNotLeakIntoErrors(t *testing.T) {
 func TestAckCarriesClaimTokenWithoutLeakingIt(t *testing.T) {
 	c := canary.New()
 	s, r := newStub(t), &runs{out: "(nothing running)\n"}
-	id := s.push("Test", "")
+	id := s.push("other", "")
 	s.queue[0]["claim_token"] = c.Value(4)
 	var buf bytes.Buffer
 	p := newPoller(t, s, r, "tok", &buf)
@@ -456,7 +456,7 @@ func TestAckCarriesClaimTokenWithoutLeakingIt(t *testing.T) {
 func TestClaimWithoutUsableTokenIsNotRunNorAcked(t *testing.T) {
 	for _, tok := range []any{nil, "", "has space", strings.Repeat("a", 513)} {
 		s, r := newStub(t), &runs{out: "(nothing running)\n"}
-		s.push("Test", "")
+		s.push("other", "")
 		if tok == nil {
 			delete(s.queue[0], "claim_token")
 		} else {
@@ -500,7 +500,7 @@ func TestSuppliedClientCannotForwardSecrets(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if mode != "claim" && strings.HasSuffix(r.URL.Path, "/claim") && !claimed {
 					claimed = true
-					_ = json.NewEncoder(w).Encode([]map[string]any{{"request_id": uuid.NewString(), "lane": "Test", "claim_token": c.Value(5)}})
+					_ = json.NewEncoder(w).Encode([]map[string]any{{"request_id": uuid.NewString(), "lane": "other", "claim_token": c.Value(5)}})
 					return
 				}
 				http.Redirect(w, r, dest+"/sink", http.StatusTemporaryRedirect)
@@ -509,7 +509,7 @@ func TestSuppliedClientCannotForwardSecrets(t *testing.T) {
 			var buf bytes.Buffer
 			client := &http.Client{Timeout: time.Second}
 			p, err := lanepoller.New(lanepoller.Config{
-				BaseURL: srv.URL, Token: c.Value(0), Script: "/abs/keep-lane-restart.sh", Allow: []string{"Test"},
+				BaseURL: srv.URL, Token: c.Value(0), Script: "/abs/keep-lane-restart.sh", Allow: []string{"other"},
 				HTTP: client, Run: (&runs{out: "(nothing running)\n"}).run,
 				Log: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			})

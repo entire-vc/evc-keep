@@ -11,16 +11,8 @@ dir=pkg/provider/providertest
 fail=0
 mutate() {
 	name=$1 test=$2 from=$3 to=$4
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! python3 - "$work/tree/$dir/providertest.go" "$from" "$to" <<'PY'
-import pathlib, sys
-p = pathlib.Path(sys.argv[1])
-s = p.read_text()
-if s.count(sys.argv[2]) != 1:
-    raise SystemExit("mutation source must match exactly once")
-p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
-PY
+	if ! { mutation_edit "$work/tree/$dir/providertest.go" "$from" "$to" >"$work/edited" && mv "$work/edited" "$work/tree/$dir/providertest.go"; }
 	then
 		echo "FAIL $name: mutation did not apply - the source changed, update this script"
 		fail=1

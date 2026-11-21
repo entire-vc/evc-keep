@@ -321,7 +321,7 @@ func TestRunSelfRotateChecksPendingRestartSoon(t *testing.T) {
 // A lane outside the queue's allowlist, or an organization that is not a UUID,
 // stops the start; no lane means no queue at all.
 func TestBindRestartsRefusals(t *testing.T) {
-	queue := restart.NewRepo(nil)
+	queue := restart.NewRepo(nil, "worker")
 	org := uuid.NewString()
 	for name, tc := range map[string]struct {
 		sr      config.MeshSelfRotate
@@ -329,9 +329,9 @@ func TestBindRestartsRefusals(t *testing.T) {
 		wantNil bool
 	}{
 		"no lane":                 {config.MeshSelfRotate{OrgID: org}, false, true},
-		"allowed lane":            {config.MeshSelfRotate{OrgID: org, RestartLane: "Hugh"}, false, false},
+		"allowed lane":            {config.MeshSelfRotate{OrgID: org, RestartLane: "worker"}, false, false},
 		"lane not allowed":        {config.MeshSelfRotate{OrgID: org, RestartLane: "elsewhere"}, true, true},
-		"organization not a UUID": {config.MeshSelfRotate{OrgID: "acme", RestartLane: "Hugh"}, true, true},
+		"organization not a UUID": {config.MeshSelfRotate{OrgID: "acme", RestartLane: "worker"}, true, true},
 	} {
 		got, err := bindRestarts(tc.sr, queue, nil, nil)
 		if (err != nil) != tc.wantErr || (got == nil) != tc.wantNil {

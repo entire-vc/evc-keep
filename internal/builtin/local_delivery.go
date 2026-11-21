@@ -8,6 +8,7 @@ import (
 	"github.com/entire-vc/evc-keep/pkg/fingerprint"
 	"github.com/entire-vc/evc-keep/pkg/provider"
 	"github.com/entire-vc/evc-keep/pkg/runnerproto"
+	"github.com/jackc/pgx/v5"
 )
 
 // SealMaterial resolves only a frozen builtin reference still active in the
@@ -21,6 +22,9 @@ func (l *Local) SealMaterial(ctx context.Context, s dispatch.Snapshot, recipient
 		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if s.Job.Action == runnerproto.ActionDiscover {
+		return l.sealDiscoverKey(ctx, tx, s.Job, recipient)
+	}
 	var owner, scope tenancy.Scope
 	err = tx.QueryRow(ctx, `SELECT st.owner_scope_level,st.owner_scope_id,s.scope_level,s.scope_id
 	 FROM secrets s JOIN stores st ON st.org_id=s.org_id AND st.id=s.store_id
@@ -61,7 +65,7 @@ func (l *Local) SealMaterial(ctx context.Context, s dispatch.Snapshot, recipient
 		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
 	}
 	if s.Job.NeedsFingerprintKey() {
-		// A verify job gets the key that produced the frozen fingerprint and
+		// A verify or adoption job gets the key that produced the frozen fingerprint and
 		// nothing else: the value is never resolved, let alone sealed.
 		k, err := frozenFingerprintKey(ctx, p)
 		if err != nil {
@@ -98,4 +102,43 @@ func frozenFingerprintKey(ctx context.Context, p *Provider) (fingerprint.Key, er
 		return fingerprint.Key{}, ErrDeliveryMaterial
 	}
 	return k, nil
+}
+
+// sealDiscoverKey seals the store's fingerprint key for a discover job, under
+// the discover job's own HPKE domain: a verify envelope cannot stand in for it.
+// No secret is resolved, so no value is opened at all.
+func (l *Local) sealDiscoverKey(ctx context.Context, tx pgx.Tx, j runnerproto.Job, recipient []byte) (runnerproto.ValueEnvelope, error) {
+	var owner tenancy.Scope
+	err := tx.QueryRow(ctx, `SELECT owner_scope_level,owner_scope_id FROM stores
+	 WHERE org_id=$1 AND id=$2 AND provider='builtin' AND status='active' FOR SHARE`, j.OrgID, j.Secret.StoreID).Scan(&owner.Level, &owner.ID)
+	if err != nil {
+		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+	}
+	var workspace, project, user string
+	switch owner.Level {
+	case tenancy.LevelOrg:
+		if owner.ID.String() != j.OrgID {
+			return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+		}
+	case tenancy.LevelWorkspace:
+		workspace = owner.ID.String()
+	case tenancy.LevelProject:
+		project = owner.ID.String()
+		if err := tx.QueryRow(ctx, `SELECT workspace_id::text FROM projects WHERE org_id=$1 AND id=$2`, j.OrgID, owner.ID).Scan(&workspace); err != nil {
+			return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+		}
+	case tenancy.LevelUser:
+		user = owner.ID.String()
+	default:
+		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
+	}
+	p := l.Provider(j.OrgID, workspace, project, user)
+	p.db = p.db.withTx(tx)
+	p.seal = p.seal.WithStore(p.db)
+	k, err := frozenFingerprintKey(ctx, p)
+	if err != nil {
+		return runnerproto.ValueEnvelope{}, err
+	}
+	defer k.Wipe()
+	return SealDiscoverKey(j, recipient, k)
 }

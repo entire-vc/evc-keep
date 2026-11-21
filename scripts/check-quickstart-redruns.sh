@@ -79,10 +79,13 @@ PY
 		echo "NOT RED  $name: the check passed on a page with a deliberate defect"
 		failed=1
 	elif grep -q -- "$want" "$log"; then
-		echo "RED ok   $name: $(grep -m1 -- "$want" "$log" | sed 's/^[[:space:]]*//')"
+		echo "RED ok   $name: $want"
 	else
-		echo "WRONG    $name: failed, but without \"$want\"; tail follows"
-		tail -15 "$log"
+		# Even fail() and extraction errors can contain page IDs or paths.
+		# The name and expected message above are constants of this driver;
+		# never copy a line from the check's log into CI output.
+		echo "WRONG    $name: failed, but without \"$want\"; the check said:"
+		echo "(unexpected quickstart failure; raw diagnostics suppressed)"
 		failed=1
 	fi
 }

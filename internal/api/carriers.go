@@ -26,12 +26,16 @@ type CarrierService interface {
 	List(ctx context.Context, org, secret uuid.UUID) ([]carriers.Carrier, error)
 }
 
-// Carrier is the §4.3 Carrier row. It carries no fingerprint text and no
-// version: fingerprint_match only says whether the destination still holds
-// the secret's current version.
+// Carrier is the §4.3 Carrier row. It carries no fingerprint text:
+// fingerprint_match only says whether the destination still
+// holds the secret's current version. Provenance names its registration proof.
 type Carrier struct {
 	ID               string        `json:"id"`
+	OrgID            string        `json:"org_id"`
 	SecretID         string        `json:"secret_id"`
+	Version          string        `json:"version"`
+	Provenance       string        `json:"provenance"`
+	AttestationJobID string        `json:"attestation_job_id,omitempty"`
 	Host             string        `json:"host"`
 	RunnerID         string        `json:"runner_id,omitempty"`
 	Target           CarrierTarget `json:"target"`
@@ -139,8 +143,15 @@ func newCarrier(c carriers.Carrier, current string) Carrier {
 	if c.RunnerID != uuid.Nil {
 		runner = c.RunnerID.String()
 	}
-	return Carrier{ID: c.ID.String(), SecretID: c.SecretID.String(), Host: c.Host, RunnerID: runner,
-		Target: CarrierTarget{Kind: string(c.TargetKind), Path: c.TargetPath}, Consumer: c.Consumer, Healthcheck: c.HealthcheckRef,
+	job, provenance := "", c.Provenance
+	if c.AttestationJobID != uuid.Nil {
+		job = c.AttestationJobID.String()
+	}
+	if provenance == "" {
+		provenance = "deployment"
+	}
+	return Carrier{ID: c.ID.String(), OrgID: c.OrgID.String(), SecretID: c.SecretID.String(), Version: c.Version, Provenance: provenance, AttestationJobID: job, Host: c.Host, RunnerID: runner,
+		Target: carrierTargetDTO(c.TargetKind, c.TargetPath, c.TargetField), Consumer: c.Consumer, Healthcheck: c.HealthcheckRef,
 		Status: string(c.State), LastVerifiedAt: c.LastVerifiedAt, FingerprintMatch: current != "" && c.LastFP == current}
 }
 

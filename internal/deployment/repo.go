@@ -85,6 +85,12 @@ type Request struct {
 	RequestID string
 	Target    runnerproto.Target
 	Actor     audit.Actor
+	// Rollback marks the layout that puts a secret back on its previous version
+	// after a failed rotation. It is not part of the request hash. It gets
+	// headroom above the hourly limit, never an exemption: the forward layout of
+	// the same run already used part of it, and a rollback refused by the limit
+	// leaves the new key alive.
+	Rollback bool
 }
 
 type Status string
@@ -123,7 +129,7 @@ func (r *Repo) Submit(ctx context.Context, in Request) (Outcome, error) {
 		return Outcome{}, ErrUnavailable
 	}
 	if in.OrgID == uuid.Nil || in.SecretID == uuid.Nil || in.VersionID == uuid.Nil || in.RunnerID == uuid.Nil ||
-		in.Scope.ID == uuid.Nil || !reqid.Valid(in.RequestID) || in.Target.Validate() != nil || networkTarget(in.Target) ||
+		in.Scope.ID == uuid.Nil || !reqid.Valid(in.RequestID) || in.Target.Validate() != nil || !in.Target.Kind.SupportsAction(runnerproto.ActionDeploy) || networkTarget(in.Target) ||
 		in.Actor.ID == "" || !knownActor(in.Actor) {
 		return Outcome{}, ErrInvalidArgument
 	}
@@ -204,7 +210,7 @@ func (r *Repo) Submit(ctx context.Context, in Request) (Outcome, error) {
 	}
 	if status == Queued {
 		var limited bool
-		if limited, err = rateLimited(ctx, tx, in.OrgID, in.SecretID, in.RunnerID, limit); err != nil {
+		if limited, err = rateLimited(ctx, tx, in.OrgID, in.SecretID, in.RunnerID, rollbackAllowance(limit, in.Rollback)); err != nil {
 			return Outcome{}, err
 		}
 		if limited {
@@ -236,6 +242,7 @@ type finishInput struct {
 	targetKey   [32]byte
 	targetJSON  []byte
 	execJSON    []byte // nil for a deployment
+	adoption    bool
 	job         func(requestRow uuid.UUID) (uuid.UUID, error)
 }
 
@@ -249,8 +256,8 @@ func (r *Repo) finish(ctx context.Context, tx pgx.Tx, f finishInput) (Outcome, e
 	}
 	out := Outcome{ID: id, Status: status, Created: true}
 	var approvalExpires time.Time
-	_, err = tx.Exec(ctx, `INSERT INTO deployment_requests(id,org_id,request_id,request_hash,target_key,secret_id,version_id,runner_id,secret_scope_level,secret_scope_id,target,exec,decision,created_at)
-	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,clock_timestamp())`, id, in.OrgID, in.RequestID, requestHash[:], f.targetKey[:], in.SecretID, in.VersionID, in.RunnerID, f.secret.secretScopeLevel, f.secret.secretScopeID, f.targetJSON, f.execJSON, string(status))
+	_, err = tx.Exec(ctx, `INSERT INTO deployment_requests(id,org_id,request_id,request_hash,target_key,secret_id,version_id,runner_id,secret_scope_level,secret_scope_id,target,exec,adoption,decision,created_at)
+	 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,clock_timestamp())`, id, in.OrgID, in.RequestID, requestHash[:], f.targetKey[:], in.SecretID, in.VersionID, in.RunnerID, f.secret.secretScopeLevel, f.secret.secretScopeID, f.targetJSON, f.execJSON, f.adoption, string(status))
 	if err != nil {
 		return Outcome{}, ErrUnavailable
 	}
@@ -287,11 +294,18 @@ func (r *Repo) finish(ctx context.Context, tx pgx.Tx, f finishInput) (Outcome, e
 		Secret: audit.SecretRef{ID: in.SecretID.String(), Version: in.VersionID.String()}, Target: audit.Target{RunnerID: in.RunnerID.String(), Kind: targetKind(f.execJSON)},
 		Policy: audit.Policy{Decision: policyDecision}, Result: audit.Result{Status: statusResult, ErrorClass: errClass}}
 	base.Action = audit.ActionDeployRequested
+	if f.adoption {
+		base.Action = audit.ActionCarrierAdoptRequested
+		base.Target.Kind = "adopt"
+	}
 	first, err := r.journal.AppendTx(ctx, tx, base)
 	if err != nil {
 		return Outcome{}, ErrUnavailable
 	}
 	base.Action = audit.ActionDeployPolicyDecision
+	if f.adoption {
+		base.Action = audit.ActionCarrierAdoptPolicyDecision
+	}
 	if out.ApprovalID != uuid.Nil {
 		base.Approval.ID = out.ApprovalID.String()
 	}
@@ -312,6 +326,9 @@ func (r *Repo) finish(ctx context.Context, tx pgx.Tx, f finishInput) (Outcome, e
 		kind := "deploy"
 		if f.execJSON != nil {
 			kind = "exec"
+		}
+		if f.adoption {
+			kind = "adopt"
 		}
 		// Last before the commit: a card that cannot be made rolls everything back.
 		if undo, err = r.confirm.Confirm(ctx, tx, Confirmation{OrgID: in.OrgID, ApprovalID: out.ApprovalID, Kind: kind, SecretName: f.secret.name,
@@ -420,6 +437,15 @@ func loadSecret(ctx context.Context, tx pgx.Tx, in Request) (frozenSecret, error
 
 // ApprovalTTL is how long a human has to decide an approval request.
 const ApprovalTTL = 24 * time.Hour
+
+// rollbackAllowance is the hourly count a request may reach: the limit, and
+// twice that for a rollback layout.
+func rollbackAllowance(limit int, rollback bool) int {
+	if rollback {
+		return 2 * limit
+	}
+	return limit
+}
 
 // rateLimited reports whether the (secret, runner) pair already used its
 // hourly allowance. The caller holds the organization lock.

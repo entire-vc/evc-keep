@@ -5,7 +5,22 @@
 # a link nothing tests. Exits 0 only if every cut is caught and the real tree
 # is green. (Not named check-*-mutations.sh: that name is a mutation check
 # the selector itself would have to select.)
+#
+# REDRUN_SHARD=k/n (default 1/1) runs cut number i only when (i-1) % n = k-1,
+# so n jobs split the cuts with nothing run twice and nothing left out; every
+# shard runs the baseline. REDRUN_LIST=1 prints the shard's cuts, runs nothing.
 set -eu
+
+shard=${REDRUN_SHARD:-1/1}
+case $shard in
+[1-9]*/[1-9]*) k=${shard%%/*}; n=${shard#*/} ;;
+*) k=; n= ;;
+esac
+case $k$n in
+'' | *[!0-9]*) echo "refuse: REDRUN_SHARD=$shard is not k/n" >&2; exit 2 ;;
+esac
+[ "$k" -le "$n" ] || { echo "refuse: REDRUN_SHARD=$shard: k is above n" >&2; exit 2; }
+list=${REDRUN_LIST:-}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 test -f "$root/go.mod" || { echo "refuse: $root does not look like the repo root" >&2; exit 2; }
@@ -24,13 +39,20 @@ fresh() {
 }
 suite() { (cd "$scratch/t" && python3 scripts/test_mutation_select.py "$@" >"$scratch/out" 2>&1); }
 
-fresh
-suite || { cat "$scratch/out" >&2; echo "FAIL: the selector tests are red on the real tree" >&2; exit 1; }
-echo "baseline green"
+if [ "$list" != 1 ]; then
+	fresh
+	suite || { cat "$scratch/out" >&2; echo "FAIL: the selector tests are red on the real tree" >&2; exit 1; }
+	echo "baseline green"
+fi
 
 fail=0
+cuts=0 ran=0
 # cut <file> <perl substitution> <what it removes>
 cut() {
+	cuts=$((cuts + 1))
+	[ $(((cuts - 1) % n)) -eq $((k - 1)) ] || return 0
+	ran=$((ran + 1))
+	if [ "$list" = 1 ]; then echo "cut $cuts: $3"; return; fi
 	fresh
 	before=$(cksum <"$scratch/t/$1")
 	(cd "$scratch/t" && perl -0pi -e "$2" "$1")
@@ -125,5 +147,9 @@ cut $G 's#mutation-receipt-\{name\}-\{digest\}-#mutation-receipt-{name}-#' "gene
 cut $G 's#"none" if batch else "interruptible"#"interruptible"#' "generator: the batch child can be cancelled by a newer commit"
 cut $G 's#    if digest is not None:\n        with_receipt#    if False:\n        with_receipt#' "generator: no job carries a receipt"
 cut $G 's#out\["before_script"\] = \[receipt_check\(name, digest\)\] \+ as_list#out["before_script"] = as_list#' "generator: the receipt is written but never checked"
+echo "cuts run: $ran of $cuts (shard $k/$n)"
+# A shard that may hold a cut and holds none: the split lost cuts.
+if [ "$ran" -eq 0 ] && [ "$n" -le "$cuts" ]; then echo "FAIL: shard $k/$n ran no cut" >&2; exit 1; fi
+[ "$list" = 1 ] && exit 0
 [ "$fail" = 0 ] || { echo "red run FAILED" >&2; exit 1; }
 echo "red run ok: every cut is caught"

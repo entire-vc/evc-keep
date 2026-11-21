@@ -106,6 +106,9 @@ type MeshDeps struct {
 	// KeyLevels backs the key-level page of the Mesh screen; nil hides it. When
 	// it also implements KeyLevelChanger an organization admin can change the level.
 	KeyLevels KeyLevelService
+	// Rotations backs the rotation screens of the Mesh iframe (the runs of a
+	// secret and one run with its carriers); nil hides them.
+	Rotations MeshUIRotations
 	// Gates applies task.gate.decided answers of confirmation cards. Nil: the
 	// event is recorded and acknowledged like any other, and decides nothing.
 	Gates MeshGates

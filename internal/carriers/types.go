@@ -69,14 +69,15 @@ type Carrier struct {
 	Version  string
 	Metadata
 	LastFP string
-	// RunnerID is the runner that laid this version at this destination,
-	// read from the deployment record when the carrier is served; it is not
-	// stored. Nil when no such record is left.
-	RunnerID       uuid.UUID
-	State          State
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	LastVerifiedAt *time.Time
+	// Adoption stores its enrolled runner and one-use receipt. Deployment
+	// provenance derives RunnerID from the completed deployment as before.
+	Provenance       string
+	AttestationJobID uuid.UUID
+	RunnerID         uuid.UUID
+	State            State
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	LastVerifiedAt   *time.Time
 }
 
 // DeploymentHook is invoked by the orchestrator only after an authenticated

@@ -66,8 +66,14 @@ type uiFixture struct {
 
 func newUIFixture(t *testing.T) *uiFixture {
 	t.Helper()
+	return newUIFixtureInput(t, "")
+}
+
+// newUIFixtureInput is newUIFixture with input links served at inputOrigin.
+func newUIFixtureInput(t *testing.T, inputOrigin string) *uiFixture {
+	t.Helper()
 	kl := &fakeKeyLevels{level: "user", by: "actor-before", changed: time.Now().Add(-time.Hour)}
-	f := newMeshFixtureOn(t, testPool(t), true, func(d *api.MeshDeps) { d.KeyLevels = kl })
+	f := newMeshFixtureInput(t, testPool(t), true, inputOrigin, func(d *api.MeshDeps) { d.KeyLevels = kl })
 	m := meshfake.New(meshfake.NewKey("k1"))
 	t.Cleanup(m.Close)
 	ws := uuid.New()
@@ -288,7 +294,7 @@ func TestMeshUIAbsentWhenExtensionOffOrPlainHTTP(t *testing.T) {
 		t.Fatalf("plain HTTP served the screen: %d", rec.Code)
 	}
 	off := newMeshFixture(t, false)
-	for _, p := range []string{"/mesh/ui/secrets", "/mesh/ui/settings", "/mesh/ui/app.js", "/mesh/ui/app.css"} {
+	for _, p := range []string{"/mesh/ui/secrets", "/mesh/ui/settings", "/mesh/ui/app.js", "/mesh/ui/app.css", "/mesh/ui/fonts/inter-latin-400-normal.woff2"} {
 		if rec := (&uiFixture{sessionFixture: &sessionFixture{meshFixture: off}}).get(p, "", nil, true); rec.Code != http.StatusNotFound {
 			t.Fatalf("%s exists with the extension off: %d", p, rec.Code)
 		}
@@ -296,8 +302,8 @@ func TestMeshUIAbsentWhenExtensionOffOrPlainHTTP(t *testing.T) {
 }
 
 // seedSecret registers a secret whose value really sits sealed in the store,
-// so a leak has something to leak.
-func (f *uiFixture) seedSecret(name string, value string) {
+// so a leak has something to leak. It returns the catalog id and the version.
+func (f *uiFixture) seedSecret(name string, value string) (uuid.UUID, string) {
 	f.t.Helper()
 	ctx := context.Background()
 	local := f.local
@@ -323,6 +329,17 @@ func (f *uiFixture) seedSecret(name string, value string) {
 		f.t.Fatal(err)
 	}
 	if _, err := cat.AddVersion(ctx, f.org.ID, ref.ID, meta.Version, "kfp1:k1:ABCDEFGHIJKLMNOP", len(value)); err != nil {
+		f.t.Fatal(err)
+	}
+	return ref.ID, meta.Version
+}
+
+// seedCarrier records that host holds version of the secret at path, in
+// state (registered, stale or unknown), as a runner's report would.
+func (f *uiFixture) seedCarrier(id uuid.UUID, version, host, path, state string) {
+	f.t.Helper()
+	if _, err := f.pool.Exec(context.Background(), `INSERT INTO carriers(org_id,id,secret_id,version,host,target_kind,target_path,consumer,last_fp,state,last_verified_at)
+ VALUES($1,$2,$3,$4,$5,'file',$6,'api.service',$7,$8,now())`, f.org.ID, uuid.New(), id, version, host, path, "kfp1:k1:abcdefghijklmnop", state); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -391,6 +408,155 @@ func TestMeshUIListsOnlyTheClosedFieldsAndNeverTheValue(t *testing.T) {
 	var n int
 	if err := f.pool.QueryRow(context.Background(), `SELECT count(*) FROM console_sessions t WHERE row_to_json(t)::text LIKE '%'||$1||'%'`, ck).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("session handle stored in the clear (%v, %d)", err, n)
+	}
+}
+
+// The Secrets list and the page of one secret on the real store: values sealed
+// by the builtin provider, carriers in their table. No value reaches a page,
+// a header or the log, and a secret of another organization, an unknown id and
+// a secret the person holds no role for give one and the same 404.
+func TestMeshUISecretPageLeakOnRealStore(t *testing.T) {
+	f := newUIFixture(t)
+	cn := canary.New()
+	if !cn.In("x"+cn.Value(1)) || !cn.In(strings.ToUpper(cn.Value(2))) {
+		t.Fatal("canary detector is blind")
+	}
+	token, tokenV := f.seedSecret("deploy-token", cn.Value(1))
+	db, dbV := f.seedSecret("db-password", cn.Value(2))
+	f.seedCarrier(token, tokenV, "web-1.example.test", "/etc/app/token", "registered")
+	f.seedCarrier(token, tokenV, "web-2.example.test", "/etc/app/token", "unknown")
+	f.seedCarrier(db, dbV, "db-1.example.test", "/etc/app/db.env", "stale")
+
+	// A secret of another organization, by id.
+	ctx := context.Background()
+	other, err := tenancy.New(f.pool).CreateOrganization(ctx, t.Name()+"-other", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat := catalog.New(f.pool)
+	st, err := cat.CreateStore(ctx, other.ID, "builtin", "other-store", tenancy.Org(other.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.CreateStoreBinding(ctx, other.ID, tenancy.Org(other.ID), st.ID); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := cat.CreateRef(ctx, catalog.CreateRefInput{Org: other.ID, Scope: tenancy.Org(other.ID), Name: "foreign-token", Class: "api_token", Type: "token", ProviderRef: "builtin://default/foreign-token", StoreID: st.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A personal secret of another person in the same organization.
+	otherUser, err := tenancy.New(f.pool).CreateUser(ctx, f.org.ID, "other@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	personal := tenancy.Scope{Level: tenancy.LevelUser, ID: otherUser.ID}
+	pst, err := cat.CreateStore(ctx, f.org.ID, "builtin", "other-personal", personal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cat.CreateStoreBinding(ctx, f.org.ID, personal, pst.ID); err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := cat.CreateRef(ctx, catalog.CreateRefInput{Org: f.org.ID, Scope: personal, Name: "their-token", Class: "api_token", Type: "token", ProviderRef: "builtin://default/their-token", StoreID: pst.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nobody := f.login("nobody", "nobody@example.test")
+	ck := f.login("viewer", "viewer@example.test")
+	f.grant("viewer", identity.RoleViewer)
+
+	surfaces := map[string]*httptest.ResponseRecorder{}
+	for name, p := range map[string]string{
+		"list": "/mesh/ui/secrets", "attention": "/mesh/ui/secrets?state=attention", "by-state": "/mesh/ui/secrets?sort=state",
+		"token": "/mesh/ui/secrets/" + token.String(), "db": "/mesh/ui/secrets/" + db.String(),
+	} {
+		surfaces[name] = f.get(p, ck, nil, true)
+		if surfaces[name].Code != http.StatusOK {
+			t.Fatalf("%s: %d", name, surfaces[name].Code)
+		}
+	}
+	missing := map[string]*httptest.ResponseRecorder{
+		"unknown":    f.get("/mesh/ui/secrets/"+uuid.NewString(), ck, nil, true),
+		"foreign":    f.get("/mesh/ui/secrets/"+foreign.ID.String(), ck, nil, true),
+		"other-user": f.get("/mesh/ui/secrets/"+theirs.ID.String(), ck, nil, true),
+		"malformed":  f.get("/mesh/ui/secrets/not-an-id", ck, nil, true),
+		"no-role":    f.get("/mesh/ui/secrets/"+token.String(), nobody, nil, true),
+	}
+	for name, rec := range missing {
+		if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "Secret not found") {
+			t.Fatalf("%s: %d, want the not-found page", name, rec.Code)
+		}
+		if rec.Body.String() != missing["unknown"].Body.String() {
+			t.Fatalf("%s: the 404 differs from the one for an unknown id", name)
+		}
+		for _, hdr := range []string{"Content-Security-Policy", "Content-Type", "Cache-Control"} {
+			if rec.Header().Get(hdr) != missing["unknown"].Header().Get(hdr) {
+				t.Fatalf("%s: header %s differs from the one for an unknown id", name, hdr)
+			}
+		}
+		surfaces["404-"+name] = rec
+	}
+	for name, rec := range missing {
+		if strings.Contains(rec.Body.String(), "foreign-token") || strings.Contains(rec.Body.String(), "their-token") {
+			t.Fatalf("the %s 404 names a secret", name)
+		}
+	}
+	// Positive control: the viewer does read an org secret, so the 404s above
+	// are about the id, not a broken session.
+	if !strings.Contains(surfaces["token"].Body.String(), "deploy") {
+		t.Fatal("the viewer cannot read an org secret; the 404 checks prove nothing")
+	}
+
+	list := surfaces["list"].Body.String()
+	for _, w := range []string{"deploy-token", "db-password", "1 / 2", "0 / 1", "/mesh/ui/secrets/" + token.String(), "Need attention"} {
+		if !strings.Contains(list, w) {
+			t.Fatalf("list lacks %q", w)
+		}
+	}
+	// Names, hosts and paths carry <wbr> break points; the text is read without them.
+	page := strings.ReplaceAll(surfaces["token"].Body.String(), "<wbr>", "")
+	for _, w := range []string{"<h1>deploy-token</h1>", "web-1.example.test", "web-2.example.test", "/etc/app/token", "In sync", "Not verified",
+		"kfp1:k1:ABCDEFGHIJKLMNOP", tokenV, "ui-store"} {
+		if !strings.Contains(page, w) {
+			t.Fatalf("secret page lacks %q", w)
+		}
+	}
+	dbPage := strings.ReplaceAll(surfaces["db"].Body.String(), "<wbr>", "")
+	// The db carrier is registered at the current version and its last check
+	// saw a fingerprint of no version: drift, never an old version it holds.
+	cur := dbV // drawn as the page draws a version: a bare number gets a v
+	if strings.Trim(dbV, "0123456789") == "" {
+		cur = "v" + dbV
+	}
+	for _, w := range []string{"Drift · not " + cur, "1 of 1 carriers are not on the current version (" + cur + ").",
+		"no longer matches " + cur + " by fingerprint.", "keep deploy db-password"} {
+		if !strings.Contains(dbPage, w) {
+			t.Fatalf("drifted secret page lacks %q", w)
+		}
+	}
+	if strings.Contains(dbPage, "old version") || strings.Contains(dbPage, "holds "+cur) {
+		t.Fatal("drifted secret page names a version the carrier does not hold")
+	}
+	for name, rec := range surfaces {
+		all := rec.Body.String()
+		for k, v := range rec.Header() {
+			all += "\n" + k + ": " + strings.Join(v, ",")
+		}
+		if cn.In(all) {
+			t.Fatalf("canary on the %s surface", name)
+		}
+		if strings.Contains(all, "<script>") {
+			t.Fatalf("inline script on %s", name)
+		}
+	}
+	if f.logbuf.Len() == 0 {
+		t.Fatal("logger captured nothing; the log check proves nothing")
+	}
+	if cn.In(f.logbuf.String()) {
+		t.Fatal("canary in the log")
 	}
 }
 

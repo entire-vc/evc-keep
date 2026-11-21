@@ -17,10 +17,11 @@ PACKAGE = "github.com/entire-vc/evc-keep/internal/carriers"
 class CarrierDriver(unittest.TestCase):
     def run_driver(self, mode="good", shard=None):
         script = (ROOT / "scripts/check-carriers-mutations.sh").read_text()
+        inventory = re.sub(r"^MUTATION_OCCURRENCE=\d+ ", "", script, flags=re.M)
         calls = [shlex.split(match.replace("\\\n", "")) for match in
                  re.findall(r"^mutate [^\n]*(?:\n[^\n]*)*?\n(?=mutate |\n|#)",
-                            script, re.MULTILINE)]
-        self.assertEqual(len(calls), 55)
+                            inventory, re.MULTILINE)]
+        self.assertEqual(len(calls), 61)
         sources = {call[2] for call in calls}
         witnesses = sorted({w for call in calls for w in call[5].split()})
         with tempfile.TemporaryDirectory() as tmp:
@@ -28,7 +29,7 @@ class CarrierDriver(unittest.TestCase):
             root.mkdir()
             for name in sources | {"go.mod", "scripts/check-carriers-mutations.sh",
                                    "scripts/lib/gocache.sh", "scripts/temp-workspace.sh",
-                                   "scripts/mutation-helpers.sh"}:
+                                   "scripts/mutation-helpers.sh", "scripts/lib/mutation_edit.py", "scripts/lib/mutation_snapshot.py"}:
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, target)
@@ -87,7 +88,7 @@ class CarrierDriver(unittest.TestCase):
     def test_complete_named_reds_and_baseline(self):
         run = self.run_driver()
         self.assertEqual(run.returncode, 0, run.stdout)
-        self.assertEqual(run.stdout.count("tests went red"), 55)
+        self.assertEqual(run.stdout.count("tests went red"), 61)
         self.assertIn("confirmed on: TestMetadataCanary TestMetadataSerializationRefused", run.stdout)
         self.assertIn("baseline: tests green on the real code (0 SKIP)", run.stdout)
 
@@ -112,7 +113,7 @@ class CarrierDriver(unittest.TestCase):
     def test_product_deadline_red_is_valid(self):
         run = self.run_driver("context-deadline", shard=(4, 4))
         self.assertEqual(run.returncode, 0, run.stdout)
-        self.assertEqual(run.stdout.count("tests went red"), 13)
+        self.assertEqual(run.stdout.count("tests went red"), 15)
 
     def test_setup_failure_cannot_count_as_red(self):
         run = self.run_driver("setup", shard=(4, 4))
@@ -122,7 +123,7 @@ class CarrierDriver(unittest.TestCase):
     def test_product_constraint_red_is_valid(self):
         run = self.run_driver("constraint", shard=(4, 4))
         self.assertEqual(run.returncode, 0, run.stdout)
-        self.assertEqual(run.stdout.count("tests went red"), 13)
+        self.assertEqual(run.stdout.count("tests went red"), 15)
 
     def test_all_shards_cover_the_inventory_and_baseline(self):
         total = 0
@@ -131,7 +132,7 @@ class CarrierDriver(unittest.TestCase):
             run = self.run_driver(shard=(index, 4))
             self.assertEqual(run.returncode, 0, run.stdout)
             count = run.stdout.count("tests went red")
-            expected = 14 if index <= 3 else 13
+            expected = 16 if index == 1 else 15
             self.assertEqual(count, expected)
             self.assertIn(f"shard {index}/4: {expected} selected mutants", run.stdout)
             self.assertIn("baseline: tests green on the real code (0 SKIP)", run.stdout)
@@ -139,8 +140,8 @@ class CarrierDriver(unittest.TestCase):
             self.assertFalse(selected & names)
             selected.update(names)
             total += count
-        self.assertEqual(total, 55)
-        self.assertEqual(len(selected), 55)
+        self.assertEqual(total, 61)
+        self.assertEqual(len(selected), 61)
 
 
 if __name__ == "__main__":

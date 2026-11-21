@@ -26,13 +26,9 @@ if ! mutation_apply_only && [ -z "${KEEP_DATABASE_URL:-}" ]; then
 fi
 
 fail=0
-# edit SRC FROM TO: print SRC with the first literal occurrence of FROM
-# replaced by TO; exit 1 if FROM is not there.
+# edit SRC FROM TO [OCCURRENCE]: refuse absent or ambiguous anchors.
 edit() {
-	awk -v from="$2" -v to="$3" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$1"
+	mutation_edit "$1" "$2" "$3" "${4:-}"
 }
 
 pkgs="./internal/carriers/"
@@ -53,13 +49,13 @@ carrier_database_failed() {
 # line) proves nothing about the property WANT names. Mirrors the
 # `--- FAIL: WANT` check in check-identity-attack-mutations.sh.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 src=$2 from=$3 to=$4 want=${5:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	if [ "$from" = "@remove-file" ]; then
 		printf '%s\n' 'package carriers' >"$work/tree/$src"
-	elif ! edit "$root/$src" "$from" "$to" >"$work/tree/$src"; then
+	elif ! edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -112,7 +108,7 @@ mutate list-any-org internal/carriers/repo.go \
 mutate remove-any-org internal/carriers/repo.go \
  'DELETE FROM carriers WHERE org_id=$1 AND id=$2' \
  'DELETE FROM carriers WHERE $1::uuid IS NOT NULL AND id=$2' 'TestTenantIsolation'
-mutate unknown-any-org internal/carriers/repo.go \
+MUTATION_OCCURRENCE=1 mutate unknown-any-org internal/carriers/repo.go \
  'WHERE org_id=$1 AND id=$2`, org, id)' \
  'WHERE $1::uuid IS NOT NULL AND id=$2`, org, id)' 'TestTenantIsolation'
 mutate register-not-idempotent internal/carriers/repo.go \
@@ -201,7 +197,7 @@ mutate metadata-text-decode-accepted internal/carriers/format.go \
 # foreign-organization cases and positive controls.
 mutate svc-policy-skipped internal/carriers/deploy.go \
  'if !ok {' 'if !ok && false {' 'TestServiceRefusesAnUnapprovedHostBeforeLookingForADeployment'
-mutate svc-deployment-skipped internal/carriers/deploy.go \
+MUTATION_OCCURRENCE=1 mutate svc-deployment-skipped internal/carriers/deploy.go \
  'return Carrier{}, err' 'fp = md.Host' 'TestServiceRefusesWithoutAConfirmedDeployment'
 mutate svc-job-version-unmatched internal/carriers/deploy.go \
  'if j.version == version && j.result.Version == version {' 'if j.result.Version == version {' 'TestServiceRefusesWithoutAConfirmedDeployment/job_of_another_version_reporting_this_one'
@@ -240,12 +236,25 @@ mutate svc-target-filter-after-limit internal/carriers/deploy.go \
 mutate svc-runner-not-named internal/carriers/deploy.go \
  'c.RunnerID = j.runner' '_ = j' 'TestServiceRegistersOnlyWhatWasDeployed'
 
+# Summary counts against the latest enabled version and never crosses organizations.
+mutate summary-disabled-current internal/carriers/summary.go \
+ 'AND NOT v.disabled' '' TestSummaryCountsCarriersAgainstTheCurrentVersion
+mutate summary-oldest-current internal/carriers/summary.go \
+ 'ORDER BY v.seal_seq DESC LIMIT 1' 'ORDER BY v.seal_seq ASC LIMIT 1' TestSummaryCountsCarriersAgainstTheCurrentVersion
+mutate summary-any-version-in-sync internal/carriers/summary.go \
+ 'c.version = cur.v' 'true' TestSummaryCountsCarriersAgainstTheCurrentVersion
+mutate summary-old-version-not-stale internal/carriers/summary.go \
+ 'c.version IS DISTINCT FROM cur.v' 'false' TestSummaryCountsCarriersAgainstTheCurrentVersion
+mutate summary-unknown-omitted internal/carriers/summary.go \
+ "WHERE c.state='unknown'" 'WHERE false' TestSummaryCountsCarriersAgainstTheCurrentVersion
+mutate summary-any-org internal/carriers/summary.go \
+ 'WHERE c.org_id=$1' 'WHERE ($1::uuid IS NOT NULL)' TestSummaryCountsCarriersAgainstTheCurrentVersion
+
 # The unmutated tree is green: a script whose baseline is red proves nothing.
 if mutation_apply_only; then
 	mutation_shard_finish
 	exit "$fail"
 fi
-rm -rf "$work/tree"
 mutation_snapshot "$work/tree"
 # shellcheck disable=SC2086
 if (cd "$work/tree" && timeout -k 10s 180s go test -timeout 90s -count=1 -p 1 -v $pkgs >"$work/out" 2>&1); then

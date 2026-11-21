@@ -44,7 +44,7 @@ func TestCanaryDoesNotSurface(t *testing.T) {
 	ctx := context.Background()
 
 	var errTexts []string
-	iss, err := p.Issue(ctx, rotation.IssueRequest{Subject: "sage", RunID: uuid.New()})
+	iss, err := p.Issue(ctx, rotation.IssueRequest{Subject: "alpha", RunID: uuid.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,15 +59,18 @@ func TestCanaryDoesNotSurface(t *testing.T) {
 	}
 
 	// Failure bodies that echo the canary.
-	for _, code := range []int{400, 401, 403, 404, 429, 500, 502} {
+	for _, code := range []int{400, 401, 403, 404, 409, 429, 500, 502} {
 		s.mu.Lock()
-		s.fail, s.failTxt = code, `{"error":"`+c.Value(1)+`","key":"`+c.Value(0)+`"}`
+		s.fail, s.failTxt = code, `{"error":"`+c.Value(1)+`","api_key":"`+c.Value(0)+`"}`
 		s.mu.Unlock()
-		_, e1 := p.Issue(ctx, rotation.IssueRequest{Subject: "sage", RunID: uuid.New()})
+		_, e1 := p.Issue(ctx, rotation.IssueRequest{Subject: "alpha", RunID: uuid.New()})
 		_, e2 := p.Check(ctx, uuid.NewString())
 		e3 := p.Revoke(ctx, uuid.NewString())
-		_, _, e4 := p.Current(ctx, "sage")
-		for _, e := range []error{e1, e2, e3, e4} {
+		_, _, e4 := p.Current(ctx, "alpha")
+		// The original key under its alias: DELETE and list of "primary".
+		e5 := p.Revoke(ctx, mesh.PrimaryAlias(agent))
+		_, e6 := p.Check(ctx, mesh.PrimaryAlias(agent))
+		for _, e := range []error{e1, e2, e3, e4, e5, e6} {
 			if e == nil {
 				continue
 			}
@@ -221,7 +224,7 @@ func TestJournalSurvivesObsLogger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Issue(context.Background(), rotation.IssueRequest{Subject: "sage", RunID: uuid.New()}); err != nil {
+	if _, err := p.Issue(context.Background(), rotation.IssueRequest{Subject: "alpha", RunID: uuid.New()}); err != nil {
 		t.Fatal(err)
 	}
 	var issue map[string]any

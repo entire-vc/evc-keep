@@ -353,24 +353,26 @@ var orgCACols = []string{"org_id", "ca_cert_der", "ca_kek_id", "ca_wrapped_dek",
 
 // MeshInstallationRow is one row of mesh_installations in the scoped-transfer snapshot.
 type MeshInstallationRow struct {
-	WorkspaceID   uuid.UUID `json:"workspace_id"`
-	OrgID         uuid.UUID `json:"org_id"`
-	MeshURL       string    `json:"mesh_url"`
-	InstalledBy   uuid.UUID `json:"installed_by"`
-	InstalledAt   time.Time `json:"installed_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
-	TokenSignedAt *int64    `json:"token_signed_at"`
-	Mode          string    `json:"mode"`
+	WorkspaceID      uuid.UUID `json:"workspace_id"`
+	OrgID            uuid.UUID `json:"org_id"`
+	MeshURL          string    `json:"mesh_url"`
+	InstalledBy      uuid.UUID `json:"installed_by"`
+	InstalledAt      time.Time `json:"installed_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	TokenSignedAt    *int64    `json:"token_signed_at"`
+	Mode             string    `json:"mode"`
+	ApprovalsViaMesh *bool     `json:"approvals_via_mesh"`
+	SettingsSignedAt *int64    `json:"settings_signed_at"`
 }
 
 func (r *MeshInstallationRow) scanDest() []any {
-	return []any{&r.WorkspaceID, &r.OrgID, &r.MeshURL, &r.InstalledBy, &r.InstalledAt, &r.UpdatedAt, &r.TokenSignedAt, &r.Mode}
+	return []any{&r.WorkspaceID, &r.OrgID, &r.MeshURL, &r.InstalledBy, &r.InstalledAt, &r.UpdatedAt, &r.TokenSignedAt, &r.Mode, &r.ApprovalsViaMesh, &r.SettingsSignedAt}
 }
 func (r MeshInstallationRow) args() []any {
-	return []any{r.WorkspaceID, r.OrgID, r.MeshURL, r.InstalledBy, r.InstalledAt, r.UpdatedAt, r.TokenSignedAt, r.Mode}
+	return []any{r.WorkspaceID, r.OrgID, r.MeshURL, r.InstalledBy, r.InstalledAt, r.UpdatedAt, r.TokenSignedAt, r.Mode, r.ApprovalsViaMesh, r.SettingsSignedAt}
 }
 
-var meshInstallationCols = []string{"workspace_id", "org_id", "mesh_url", "installed_by", "installed_at", "updated_at", "token_signed_at", "mode"}
+var meshInstallationCols = []string{"workspace_id", "org_id", "mesh_url", "installed_by", "installed_at", "updated_at", "token_signed_at", "mode", "approvals_via_mesh", "settings_signed_at"}
 
 // MeshEventRow is one row of mesh_events in the scoped-transfer snapshot.
 type MeshEventRow struct {

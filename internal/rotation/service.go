@@ -30,11 +30,13 @@ const (
 	CarrierStale = "stale"
 )
 
-// CarrierStatus is one carrier's row of a report: id, phase, state.
+// CarrierStatus is one carrier's row of a report: id, phase, state and the
+// closed class its step failed with ("" when it did not).
 type CarrierStatus struct {
 	CarrierID string
 	Phase     string
 	State     string
+	Class     Class
 }
 
 // RunReport is the durable state of one run, metadata only. Version and
@@ -51,6 +53,14 @@ type RunReport struct {
 	Carriers    []CarrierStatus
 	// Approval is the human approval the run waited for, when it needed one.
 	Approval *ApprovalRef
+	// IncidentOpened: the run failed with the old version alive and an incident is open.
+	IncidentOpened bool
+	// Settling: the run failed and its owner, still holding the lease, has not
+	// recorded the incident yet. The outcome is not final: a caller that stops
+	// at the first failed answer would read a failure without its incident. A
+	// failed run without an incident and without a live owner (the incident
+	// could not be opened) is final and not settling.
+	Settling bool
 }
 
 // Service starts runs in the background and reports on them. A caller gets
@@ -279,7 +289,14 @@ func (s *Service) Report(ctx context.Context, ref Ref, id uuid.UUID) (RunReport,
 	if err != nil {
 		return RunReport{}, err
 	}
-	rep := RunReport{RunID: id, State: run.State, Class: run.Class, Done: run.State == StateDone, Failed: run.State == StateFailed}
+	rep := RunReport{RunID: id, State: run.State, Class: run.Class, Done: run.State == StateDone, Failed: run.State == StateFailed, IncidentOpened: run.IncidentOpened}
+	if run.owesIncident() {
+		// The engine writes the failed state, then opens and records the
+		// incident in a later step under the same lease.
+		if rep.Settling, err = s.e.store.leased(ctx, id, s.e.now()); err != nil {
+			return RunReport{}, err
+		}
+	}
 	if rep.Done {
 		rep.Version, rep.Fingerprint = run.NewVersion, run.ExpectedFP
 	}
@@ -313,7 +330,7 @@ func (s *Service) reportApproval(ctx context.Context, ref Ref, id uuid.UUID) (Ru
 // carrierStatus maps a step onto phase and state. Deploy comes first: a
 // carrier is in the verify phase once its layout is confirmed.
 func carrierStatus(st stepRow, runFailed bool) CarrierStatus {
-	cs := CarrierStatus{CarrierID: st.CarrierID, Phase: PhaseDeploy, State: st.Deploy}
+	cs := CarrierStatus{CarrierID: st.CarrierID, Phase: PhaseDeploy, State: st.Deploy, Class: st.Class}
 	if st.Deploy == CarrierOK {
 		cs.Phase, cs.State = PhaseVerify, st.Verify
 	}

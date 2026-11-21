@@ -13,13 +13,10 @@ test=TestExecCardPredicateIgnoresUUIDWithZeros
 
 fail=0
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$2 from=$3 to=$4
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$file" >"$work/tree/$file"; then
+	if ! mutation_edit "$root/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$file"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -42,7 +39,8 @@ if ! mutation_apply_only; then
 		echo "ok   baseline: $test green on the real code, none skipped"
 	else
 		echo "FAIL baseline: $test is not green on the clean tree"
-		cat "$work/base"
+		"$root/scripts/test-result-names.sh" "$root" <"$work/base" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	fi
 fi

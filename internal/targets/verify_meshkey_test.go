@@ -15,13 +15,13 @@ import (
 func TestVerifyReadsEveryMeshKeyCarrier(t *testing.T) {
 	f := newVerifyFixture(t)
 	dir := f.dir
-	reg := fmt.Sprintf(`{"agents":[{"name":"Other","agent_key":%q,"mesh_agent_key":%q},{"name":"Sage","agent_key":%q,"mesh_agent_key":%q}]}`,
+	reg := fmt.Sprintf(`{"agents":[{"name":"Other","agent_key":%q,"mesh_agent_key":%q},{"name":"Alpha","agent_key":%q,"mesh_agent_key":%q}]}`,
 		f.others[0], f.others[1], f.target, f.target)
 	f.write(t, "mesh-agents.json", reg)
 	f.write(t, "fiddler.json", reg)
 	f.write(t, ".mcp.json", fmt.Sprintf(`{"mcpServers":{"evc-mesh":{"env":{"MESH_AGENT_KEY":%q}}}}`, f.target))
-	f.write(t, "sage.env", fmt.Sprintf("OTHER=%s\nMESH_AGENT_KEY=%s\n", f.others[0], f.target))
-	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Sage", LaneDir: dir, BinDir: dir, CfgDir: dir, EnvDir: dir, EnvFile: "sage.env"})
+	f.write(t, "agent.env", fmt.Sprintf("OTHER=%s\nMESH_AGENT_KEY=%s\n", f.others[0], f.target))
+	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Alpha", LaneDir: dir, BinDir: dir, CfgDir: dir, EnvDir: dir, EnvFile: "agent.env"})
 	if err != nil {
 		t.Fatal(err)
 	}

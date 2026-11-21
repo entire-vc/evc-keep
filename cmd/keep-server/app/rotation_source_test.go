@@ -110,8 +110,8 @@ func TestRotateE2E_BoundSecretUsesTheKeyProvider(t *testing.T) {
 	r.checkNoLeak(seen)
 }
 
-// A failing carrier keeps the original key and opens an incident: nothing the
-// provider holds is ended before every carrier confirmed the new key.
+// A failing carrier keeps the original key and opens an incident: the run is
+// rolled back and only the key it issued itself is ended.
 func TestRotateE2E_BoundSecretFailingCarrierKeepsOriginalKey(t *testing.T) {
 	k := &keyProvider{dual: true, original: uuid.NewString(), value: base64.RawURLEncoding.EncodeToString([]byte("test-agent-key-zyxwvutsrq9876543"))}
 	var id uuid.UUID
@@ -133,8 +133,13 @@ func TestRotateE2E_BoundSecretFailingCarrierKeepsOriginalKey(t *testing.T) {
 			t.Fatal("the original key was revoked although a carrier failed")
 		}
 	}
-	if got := r.activeVersions(); len(got) != 2 || got[0] != "1" {
-		t.Fatalf("the old version must stay active, got %v", got)
+	// The failed run is rolled back: the key it issued is the only one ended,
+	// the new version is disabled and the old one alone stays active.
+	if len(revoked) != 1 || len(issued) != 1 || revoked[0] != issued[0] {
+		t.Fatalf("only the key the failed run issued is revoked: issued %v revoked %v", issued, revoked)
+	}
+	if got := r.activeVersions(); len(got) != 1 || got[0] != "1" {
+		t.Fatalf("the old version alone must stay active, got %v", got)
 	}
 	// The incident is written by the run's own goroutine just after the result
 	// turns failed: wait for it instead of reading the log at once.

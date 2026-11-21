@@ -47,6 +47,9 @@ func (i *testIssuer) SealMaterial(_ context.Context, s Snapshot, recipient []byt
 	if i.fail {
 		return runnerproto.ValueEnvelope{}, errors.New("synthetic backend failure")
 	}
+	if s.Job.Action == runnerproto.ActionDiscover {
+		return runnerproto.ValueEnvelope{JobID: s.Job.JobID, SealedFingerprintKey: []byte("sealed-discover-key")}, nil
+	}
 	if s.Job.NeedsFingerprintKey() {
 		return runnerproto.ValueEnvelope{JobID: s.Job.JobID, SealedFingerprintKey: []byte("sealed-key")}, nil
 	}

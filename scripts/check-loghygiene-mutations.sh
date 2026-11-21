@@ -47,9 +47,8 @@ if (cd "$root" && go test -timeout 600s -count=1 -p 1 -v ./internal/testutil/pgs
 	echo "ok   database harness baseline: tests green on the real code"
 else
 	echo "FAIL database harness baseline: tests are red or skipped on the real code"
-	# Result lines plus the tests' own fixed messages (they never carry a DSN),
-	# so a timing failure on a loaded runner names what failed.
-	grep -E -- '^(--- |FAIL|ok )|^ +[a-z_]+\.go:[0-9]+: ' "$work/out" || true
+	# Declared test names and package paths only: no line of test output.
+	mutation_result_names "$work/out" ./internal/testutil/pgscratch/
 	exit 1
 fi
 # shellcheck disable=SC2086
@@ -57,8 +56,10 @@ if (cd "$root" && go test -timeout 600s -count=1 -p 1 -v -run "$run" $pkgs >"$wo
 	echo "ok   baseline: tests green on the real code"
 else
 	echo "FAIL baseline: tests are red or skipped on the real code"
-	# Only the result lines: a full dump could carry connection details.
-	grep -E -- '^(--- |FAIL|ok )' "$work/out" || true
+	# Declared test names and package paths only: a full dump could carry
+	# connection details or a value a test printed.
+	# shellcheck disable=SC2086 # fixed package paths
+	mutation_result_names "$work/out" $pkgs
 	fail=1
 fi
 
@@ -74,19 +75,13 @@ fi
 if [ "$fail" -ne 0 ]; then exit 1; fi
 fi
 
-# mutate NAME FILE FROM TO [AFTER]: replace the first literal occurrence of
-# FROM with TO; with AFTER, the first one on a line after a line holding AFTER.
+# mutate NAME FILE FROM TO: replace the only anchor, or MUTATION_OCCURRENCE.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
-	name=$1 src=$2 from=$3 to=$4 after=${5:-}
-	rm -rf "$work/tree"
+	name=$1 src=$2 from=$3 to=$4
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" -v after="$after" '
-		BEGIN { armed = (after == "") }
-		armed && !done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		!armed && index($0, after) { armed = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -128,8 +123,9 @@ mutate() {
 		echo "FAIL $name: tests stayed green with the property switched off"
 		fail=1
 	elif mutation_infrastructure_failed "$work/out"; then
-		# Only test names and result lines; never dump connection errors.
-		grep -E -- '^(=== RUN|--- FAIL|[[:space:]]+--- FAIL|FAIL[[:space:]])' "$work/out" || true
+		# Declared test names and package paths only; never test output.
+		# shellcheck disable=SC2086 # fixed package paths
+		mutation_result_names "$work/out" $mutant_pkgs
 		exit 1
 	elif ! grep -q -- '--- FAIL' "$work/out"; then
 		echo "FAIL $name: mutant did not reach a failing test (build error?)"
@@ -152,7 +148,8 @@ mutate mismatch-ignored  $hyg 'if got != RequiredLogSettings[name] {' 'if false 
 # keep-server calls the check before it listens
 mutate server-unchecked  $main 'if err := store.CheckLogSettings(ctx, pool); err != nil {' 'if err := error(nil); err != nil {'
 # the refusal is a failure exit, so a supervisor sees it
-mutate refusal-exits-zero $main 'return 1' 'return 0' 'store.CheckLogSettings(ctx, pool)'
+# the return that closes the CheckLogSettings refusal, found by the check after it
+mutate refusal-exits-zero $main "$(printf '\t\treturn 1\n\t}\n\n\tif err := store.CheckNotSuperuser(')" "$(printf '\t\treturn 0\n\t}\n\n\tif err := store.CheckNotSuperuser(')"
 
 # point 2: duration/sample settings that bypass log_error_verbosity/
 # log_min_error_statement entirely are each actually required
@@ -211,7 +208,7 @@ mutate reserved-count-loose     $rsv 'WHERE starts_with(provider_ref, $1)' "WHER
 mutate reserved-query-fails-open $rsv 'return 0, apperr.New(apperr.ClassInternal, "reserved provider reference check failed")' 'return 0, nil'
 mutate reserved-count-ignored   $rsv 'if n > 0 {' 'if false {'
 mutate reserved-unchecked       $main 'if n, err := store.CheckReservedRefs(ctx, pool, keepprovider.ReservedRefPrefix); err != nil {' 'if n, err := len(keepprovider.ReservedRefPrefix)*0, error(nil); err != nil {'
-mutate reserved-refusal-exits-zero $main 'return 1' 'return 0' 'store.CheckReservedRefs(ctx, pool, keepprovider.ReservedRefPrefix)'
+mutate reserved-refusal-exits-zero $main "$(printf 'class, n)\n\t\treturn 1')" "$(printf 'class, n)\n\t\treturn 0')"
 
 # point 3: a superuser role is refused, and keep-server actually calls the
 # check before it listens

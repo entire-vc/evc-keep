@@ -461,9 +461,18 @@ func (r *Repo) RotatorOwner(ctx context.Context, workspace uuid.UUID) (uuid.UUID
 // and a failing seal rolls the window and the installation back. seal works
 // on its own connection, so its write is not undone if the commit fails; its
 // error is returned as is.
-func (r *Repo) BindPending(ctx context.Context, workspace uuid.UUID, p Pending, mode Mode, seal func(context.Context) error) error {
+// An optional workspace settings snapshot is applied, and a change of it
+// journaled, in the same transaction after seal (see SetSettings), so a
+// journal failure rolls the window and the installation back like a failing
+// commit would, leaving seal's write behind.
+func (r *Repo) BindPending(ctx context.Context, workspace uuid.UUID, p Pending, mode Mode, seal func(context.Context) error, settings ...Snapshot) error {
 	if !mode.Valid() {
 		return ErrBadMode
+	}
+	for _, s := range settings {
+		if s.Journal == nil {
+			return ErrNoSettingsJournal
+		}
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -489,7 +498,13 @@ VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workspace_id) DO NOTHING`, workspace, p
 	if tag.RowsAffected() != 1 {
 		return ErrWorkspaceTaken
 	}
+	// seal before the settings journal: seal waits for the organisation's
+	// key-level lock, and a key-level change holding it journals its request,
+	// so this transaction must not hold the audit chain head while it waits.
 	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -515,7 +530,16 @@ var ErrNotStore = errors.New("meshext: no store installation to upgrade")
 // installation that is absent, of another organisation, of another Mesh
 // address or already an
 // extension is ErrNotStore, and either way the window is left as it was.
-func (r *Repo) UpgradeStore(ctx context.Context, workspace uuid.UUID, p Pending, seal func(context.Context) error) error {
+// An optional workspace settings snapshot is applied, and a change of it
+// journaled, in the same transaction after seal (see SetSettings), so a
+// journal failure rolls the window and the installation back like a failing
+// commit would, leaving seal's write behind.
+func (r *Repo) UpgradeStore(ctx context.Context, workspace uuid.UUID, p Pending, seal func(context.Context) error, settings ...Snapshot) error {
+	for _, s := range settings {
+		if s.Journal == nil {
+			return ErrNoSettingsJournal
+		}
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("meshext: upgrade: %w", err)
@@ -541,7 +565,13 @@ UPDATE mesh_installations SET mode = $3, installed_by = $4, updated_at = now()
 	if tag.RowsAffected() != 1 {
 		return ErrNotStore
 	}
+	// seal before the settings journal: seal waits for the organisation's
+	// key-level lock, and a key-level change holding it journals its request,
+	// so this transaction must not hold the audit chain head while it waits.
 	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

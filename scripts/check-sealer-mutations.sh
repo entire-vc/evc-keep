@@ -23,15 +23,12 @@ temp_workspace
 pkg=internal/builtin/sealer
 
 fail=0
-# mutate NAME FILE FROM TO [WITNESS]: replace the first literal occurrence of FROM with TO.
+# mutate NAME FILE FROM TO [WITNESS]: replace the only or explicitly named literal occurrence of FROM with TO.
 mutate() {
+	mutation_take_occurrences
 	name=$1 src=$pkg/$2 from=$3 to=$4 witness=${5:-.}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -61,7 +58,7 @@ mutate root-identity sealer.go 'if rec.RootKeyID != s.root.ID() {' 'if false {'
 
 # PKI has its own organization domain, independent of value levels/purge.
 mutate pki-namespace level.go 'return "pki:" + lp(s.Org)' 'return "org:" + lp(s.Org)'
-mutate pki-level level.go '		return s' '		return Scope{Org: s.Org}'
+MUTATION_OCCURRENCE=1 mutate pki-level level.go '		return s' '		return Scope{Org: s.Org}'
 mutate pki-scope level.go 'case s.PKI && (s.Workspace != "" || s.Project != "" || s.User != ""):' 'case false && (s.Workspace != "" || s.Project != "" || s.User != ""):'
 mutate pki-purge sealer.go '!k.Domain.PKI && !used[k.ID]' '!used[k.ID]'
 

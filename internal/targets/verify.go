@@ -24,7 +24,7 @@ type readFormat string
 const (
 	// formatJSON: Field is a dotted path of object keys; a segment may carry
 	// one [name=value] selector that picks the single array element whose
-	// string member `name` equals value, e.g. agents[name=sage].agent_key.
+	// string member `name` equals value, e.g. agents[name=alpha].agent_key.
 	formatJSON readFormat = "json"
 	// formatEnv: Field is a variable name in NAME=value / export NAME=value lines.
 	formatEnv readFormat = "env"

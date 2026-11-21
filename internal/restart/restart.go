@@ -30,9 +30,6 @@ const (
 	tokenBytes = 16
 )
 
-// DefaultLanes is the allowlist of lanes a restart may be requested for.
-var DefaultLanes = []string{"Hugh", "Test"}
-
 // Result is what the poller reports for a claimed request.
 type Result string
 
@@ -84,11 +81,9 @@ type Repo struct {
 	now   func() time.Time
 }
 
-// NewRepo returns a queue that accepts only the given lanes; none means DefaultLanes.
+// NewRepo returns a queue that accepts only the given lanes. There is no
+// built-in allowlist: no lanes means every request is refused.
 func NewRepo(db *pgxpool.Pool, lanes ...string) *Repo {
-	if len(lanes) == 0 {
-		lanes = DefaultLanes
-	}
 	r := &Repo{db: db, lanes: make(map[string]bool, len(lanes)), now: time.Now}
 	for _, l := range lanes {
 		r.lanes[l] = true

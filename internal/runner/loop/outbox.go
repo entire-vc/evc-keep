@@ -22,6 +22,12 @@ const (
 	stateStarted = "started"
 	stateClosed  = "closed"
 	maxEntrySize = 64 << 10
+	// maxDiscoverEntrySize bounds a discover entry: the largest report the
+	// contract allows stays below it: MaxDiscoverFindings findings, each with a
+	// 1 KiB path and a 128-char name of characters json.Marshal expands to six
+	// bytes (<, >, &), about 29 MB. Write and read use the same
+	// cap, so a stored entry is never one List refuses.
+	maxDiscoverEntrySize = 32 << 20
 )
 
 var jobIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
@@ -30,17 +36,26 @@ var jobIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0
 // server has not acknowledged.
 type Outbox struct{ dir string }
 
+// kindDiscover marks an entry of a discover job: its closed outcome is a
+// DiscoverResult, never a Result.
+const kindDiscover = "discover"
+
 type entry struct {
-	JobID  string           `json:"job_id"`
-	State  string           `json:"state"`
-	Result *json.RawMessage `json:"result,omitempty"`
+	JobID    string           `json:"job_id"`
+	State    string           `json:"state"`
+	Kind     string           `json:"kind,omitempty"`
+	Result   *json.RawMessage `json:"result,omitempty"`
+	Discover *json.RawMessage `json:"discover,omitempty"`
 }
 
-// Pending is one outbox entry read back.
+// Pending is one outbox entry read back. A discover job has IsDiscover set
+// and, once closed, its report in Discover; Result is then zero.
 type Pending struct {
-	JobID  string
-	Closed bool
-	Result runnerproto.Result
+	JobID      string
+	Closed     bool
+	IsDiscover bool
+	Result     runnerproto.Result
+	Discover   runnerproto.DiscoverResult
 }
 
 // OpenOutbox creates dir (0700) if needed and refuses a symlink, a
@@ -68,7 +83,36 @@ func (o *Outbox) path(jobID string) (string, error) {
 
 // Begin records that the job was accepted and is about to run. It is durable
 // before the value is requested.
-func (o *Outbox) Begin(jobID string) error { return o.write(jobID, stateStarted, nil, true) }
+func (o *Outbox) Begin(jobID string) error { return o.write(jobID, stateStarted, "", nil, true) }
+
+// BeginDiscover is Begin for a discover job, so a restart closes it with a
+// failed DiscoverResult rather than a Result.
+func (o *Outbox) BeginDiscover(jobID string) error {
+	return o.write(jobID, stateStarted, kindDiscover, nil, true)
+}
+
+// CloseDiscover records a discover job's closed report. It refuses a report
+// outside the contract.
+func (o *Outbox) CloseDiscover(jobID string, r runnerproto.DiscoverResult) error {
+	return o.closeDiscover(jobID, r, false)
+}
+
+// CloseDiscoverIfAbsent is CloseDiscover that never replaces an entry.
+func (o *Outbox) CloseDiscoverIfAbsent(jobID string, r runnerproto.DiscoverResult) error {
+	return o.closeDiscover(jobID, r, true)
+}
+
+func (o *Outbox) closeDiscover(jobID string, r runnerproto.DiscoverResult, exclusive bool) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	raw := json.RawMessage(b)
+	return o.write(jobID, stateClosed, kindDiscover, &raw, exclusive)
+}
 
 // Close records the job's closed Result. It replaces a started entry and
 // refuses a Result outside the contract.
@@ -92,7 +136,7 @@ func (o *Outbox) close(jobID string, r runnerproto.Result, exclusive bool) error
 		return err
 	}
 	raw := json.RawMessage(b)
-	return o.write(jobID, stateClosed, &raw, exclusive)
+	return o.write(jobID, stateClosed, "", &raw, exclusive)
 }
 
 // Ack removes the entry once the server acknowledged the Result (or refused
@@ -108,7 +152,9 @@ func (o *Outbox) Ack(jobID string) error {
 	return nil
 }
 
-func (o *Outbox) write(jobID, state string, result *json.RawMessage, exclusive bool) error {
+// write stores one entry. A discover entry keeps its report under "discover",
+// any other under "result".
+func (o *Outbox) write(jobID, state, kind string, result *json.RawMessage, exclusive bool) error {
 	p, err := o.path(jobID)
 	if err != nil {
 		return err
@@ -118,9 +164,18 @@ func (o *Outbox) write(jobID, state string, result *json.RawMessage, exclusive b
 			return fmt.Errorf("loop: outbox entry exists: %w", os.ErrExist)
 		}
 	}
-	b, err := json.Marshal(entry{JobID: jobID, State: state, Result: result})
+	e := entry{JobID: jobID, State: state, Kind: kind}
+	if kind == kindDiscover {
+		e.Discover = result
+	} else {
+		e.Result = result
+	}
+	b, err := json.Marshal(e)
 	if err != nil {
 		return err
+	}
+	if len(b) > entryCap(kind) {
+		return errors.New("loop: outbox entry too large")
 	}
 	tmp, err := os.CreateTemp(o.dir, ".tmp-outbox-*")
 	if err != nil {
@@ -193,8 +248,10 @@ func (o *Outbox) read(jobID string) (Pending, error) {
 	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 || !ownedByUs(fi) {
 		return Pending{}, bad
 	}
-	b, err := io.ReadAll(io.LimitReader(f, maxEntrySize+1))
-	if err != nil || len(b) > maxEntrySize {
+	// The kind is not known before decoding, so read up to the larger cap and
+	// check the entry's own cap after it.
+	b, err := io.ReadAll(io.LimitReader(f, maxDiscoverEntrySize+1))
+	if err != nil || len(b) > maxDiscoverEntrySize {
 		return Pending{}, bad
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -204,9 +261,19 @@ func (o *Outbox) read(jobID string) (Pending, error) {
 		return Pending{}, bad
 	}
 	switch {
-	case e.State == stateStarted && e.Result == nil:
-		return Pending{JobID: jobID}, nil
-	case e.State == stateClosed && e.Result != nil:
+	case len(b) > entryCap(e.Kind):
+		return Pending{}, bad
+	case e.Kind != "" && e.Kind != kindDiscover:
+		return Pending{}, bad
+	case e.State == stateStarted && e.Result == nil && e.Discover == nil:
+		return Pending{JobID: jobID, IsDiscover: e.Kind == kindDiscover}, nil
+	case e.State == stateClosed && e.Kind == kindDiscover && e.Discover != nil && e.Result == nil:
+		r, err := runnerproto.DecodeDiscoverResult(*e.Discover)
+		if err != nil {
+			return Pending{}, bad
+		}
+		return Pending{JobID: jobID, Closed: true, IsDiscover: true, Discover: r}, nil
+	case e.State == stateClosed && e.Kind == "" && e.Result != nil && e.Discover == nil:
 		r, err := runnerproto.DecodeResult(*e.Result)
 		if err != nil {
 			return Pending{}, bad
@@ -214,4 +281,12 @@ func (o *Outbox) read(jobID string) (Pending, error) {
 		return Pending{JobID: jobID, Closed: true, Result: r}, nil
 	}
 	return Pending{}, fmt.Errorf("%w", bad)
+}
+
+// entryCap is the size limit of an entry of the given kind.
+func entryCap(kind string) int {
+	if kind == kindDiscover {
+		return maxDiscoverEntrySize
+	}
+	return maxEntrySize
 }

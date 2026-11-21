@@ -25,12 +25,12 @@ var ErrAgent = errors.New("meshkey: agent description rejected")
 // Mesh registries spell it (a selector value, not a secret).
 type Agent struct {
 	Host    string
-	Name    string // registry name, e.g. "Sage"
+	Name    string // registry name, e.g. "Alpha"
 	LaneDir string // directory holding the lane's .mcp.json
 	BinDir  string // directory holding mesh-agents.json
 	CfgDir  string // fiddler config directory holding fiddler.json
 	EnvDir  string // directory of per-agent env files
-	EnvFile string // file name inside EnvDir, e.g. "sage.env"
+	EnvFile string // file name inside EnvDir, e.g. "agent.env"
 	EnvVar  string // "" or MESH_AGENT_KEY: the only variable the manifest admits
 }
 

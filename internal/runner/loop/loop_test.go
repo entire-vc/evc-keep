@@ -47,6 +47,7 @@ type fake struct {
 	calls     []string
 	fetches   int
 	results   map[string]runnerproto.Result
+	discovers map[string]runnerproto.DiscoverResult
 	sends     int
 	onPoll    func() // called when the queue is empty
 	onFetch   func() // called when a value is requested
@@ -79,7 +80,10 @@ func (f *fake) FetchValue(_ context.Context, id string) (runnerproto.ValueEnvelo
 	v, k := f.valueFor(j)
 	defer v.Wipe()
 	defer k.Wipe()
-	if j.Action == runnerproto.ActionVerify {
+	if j.Action == runnerproto.ActionDiscover {
+		return builtin.SealDiscoverKey(j, f.recipient, k)
+	}
+	if j.Action == runnerproto.ActionVerify || j.Action == runnerproto.ActionAdopt {
 		return builtin.SealRunnerKey(j, f.recipient, k)
 	}
 	return builtin.SealRunnerMaterial(j, f.recipient, v, k)
@@ -99,6 +103,23 @@ func (f *fake) SendResult(_ context.Context, id string, r runnerproto.Result) er
 		f.results = map[string]runnerproto.Result{}
 	}
 	f.results[id] = r
+	return nil
+}
+
+func (f *fake) SendDiscoverResult(_ context.Context, id string, r runnerproto.DiscoverResult) error {
+	f.calls = append(f.calls, "send")
+	f.sends++
+	if len(f.sendErrs) > 0 {
+		err := f.sendErrs[0]
+		f.sendErrs = f.sendErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
+	if f.discovers == nil {
+		f.discovers = map[string]runnerproto.DiscoverResult{}
+	}
+	f.discovers[id] = r
 	return nil
 }
 

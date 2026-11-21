@@ -12,13 +12,10 @@ dir=internal/runner/deploy
 
 fail=0
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$dir/$2 test=$3 from=$4 to=$5
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$file" >"$work/tree/$file"; then
+	if ! mutation_edit "$root/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$file"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return

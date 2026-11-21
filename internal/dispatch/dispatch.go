@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entire-vc/evc-keep/internal/audit"
+	"github.com/entire-vc/evc-keep/internal/carriers"
 	"github.com/entire-vc/evc-keep/internal/deployment"
 	"github.com/entire-vc/evc-keep/internal/mtls"
 	"github.com/entire-vc/evc-keep/internal/registry"
@@ -119,7 +120,15 @@ func (s *Service) claimNext(ctx context.Context, p mtls.Principal) (runnerproto.
 	 WHERE id=(SELECT id FROM deployment_jobs WHERE org_id=$1 AND runner_id=$2 AND status='queued' AND expires_at>clock_timestamp() ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED)
 	 RETURNING `+snapshotColumns, p.OrgID, p.RunnerID), p, false)
 	if errors.Is(err, ErrNotFound) {
-		return runnerproto.SignedJob{}, false, nil
+		// A deploy row the snapshot read refused may have been marked issued by
+		// the UPDATE: give it back before looking at discover jobs.
+		_ = tx.Rollback(ctx)
+		dtx, _, err := s.begin(ctx, p)
+		if err != nil {
+			return runnerproto.SignedJob{}, false, err
+		}
+		defer func() { _ = dtx.Rollback(ctx) }()
+		return s.claimDiscover(ctx, dtx, p)
 	}
 	if err != nil {
 		return runnerproto.SignedJob{}, false, err
@@ -146,6 +155,9 @@ func (s *Service) Material(ctx context.Context, p mtls.Principal, id string) (ru
 		return runnerproto.ValueEnvelope{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if env, found, err := s.discoverMaterial(ctx, tx, p, jobID, recipient); found || err != nil {
+		return env, err
+	}
 	snap, err := readSnapshot(tx.QueryRow(ctx, `UPDATE deployment_jobs SET material_issued_at=clock_timestamp()
 	 WHERE id=$1 AND org_id=$2 AND runner_id=$3 AND status='issued' AND material_issued_at IS NULL AND expires_at>clock_timestamp()
 	 RETURNING `+snapshotColumns, jobID, p.OrgID, p.RunnerID), p, false)
@@ -215,6 +227,17 @@ func (s *Service) Result(ctx context.Context, p mtls.Principal, id string, resul
 	if !resultMatchesJob(result, snap.Job) {
 		return ErrNotFound
 	}
+	if snap.Job.Action == runnerproto.ActionAdopt {
+		var live bool
+		if err := tx.QueryRow(ctx, `SELECT expires_at>clock_timestamp() FROM deployment_jobs WHERE org_id=$1 AND id=$2`, p.OrgID, jobID).Scan(&live); err != nil || !live || !time.Now().Before(snap.Job.NotAfter) || result.Healthcheck != nil {
+			return ErrNotFound
+		}
+		if result.OK {
+			if err := carriers.ApplyAdoptionResultTx(ctx, tx, p.OrgID, p.RunnerID, snap.Job, result); err != nil {
+				return ErrNotFound
+			}
+		}
+	}
 	status := "failed"
 	auditStatus := audit.StatusFailed
 	errorClass := auditFailureClass(result.ErrorClass)
@@ -227,6 +250,12 @@ func (s *Service) Result(ctx context.Context, p mtls.Principal, id string, resul
 		return ErrUnavailable
 	}
 	action, auditFingerprint := audit.ActionDeployResult, result.Fingerprint
+	if snap.Job.Action == runnerproto.ActionAdopt {
+		action = audit.ActionCarrierAdoptResult
+		if !result.OK {
+			auditFingerprint = ""
+		}
+	}
 	if snap.Job.Action == runnerproto.ActionVerify {
 		// The journal keeps what the runner confirmed; an observed fingerprint
 		// of a mismatching file lives only in the carrier's verification line.
@@ -271,7 +300,7 @@ func resultMatchesJob(result runnerproto.Result, job runnerproto.Job) bool {
 	// A verify job exists to find a file that does not hold the expected
 	// value, so its mismatch report names the observed fingerprint, which
 	// by definition is not the job's. Nothing else may differ.
-	if job.Action == runnerproto.ActionVerify && !result.OK && result.ErrorClass == runnerproto.ErrClassFingerprintMismatch {
+	if (job.Action == runnerproto.ActionVerify || job.Action == runnerproto.ActionAdopt) && !result.OK && result.ErrorClass == runnerproto.ErrClassFingerprintMismatch {
 		return result.Fingerprint != job.ExpectedFingerprint && (result.Version == "" || result.Version == job.ExpectedVersion)
 	}
 	if result.Fingerprint != "" && result.Fingerprint != job.ExpectedFingerprint {

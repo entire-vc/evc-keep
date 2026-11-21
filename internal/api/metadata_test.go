@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -57,8 +58,8 @@ func TestCreateRefMetadataSurrogateEscapes(t *testing.T) {
 			t.Fatal("surrogate canary output control failed")
 		}
 	}
-	for _, pair := range []struct{ wire, decoded string }{{`\ud83d\ude80`, "\U0001f680"}, {`\\ud800`, `\ud800`}} {
-		body := `{"scope_level":"org","scope_id":"` + f.org.ID.String() + `","name":"safe` + pair.wire + `","class":"credential","type":"generic","provider_ref":"builtin://default/test"}`
+	for i, pair := range []struct{ wire, decoded string }{{`\ud83d\ude80`, "\U0001f680"}, {`\\ud800`, `\ud800`}} {
+		body := `{"scope_level":"org","scope_id":"` + f.org.ID.String() + `","name":"safe` + pair.wire + `","class":"credential","type":"generic","provider_ref":"builtin://default/test-` + strconv.Itoa(i) + `"}`
 		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+bearer)
 		res := httptest.NewRecorder()

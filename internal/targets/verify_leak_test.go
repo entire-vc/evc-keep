@@ -80,7 +80,7 @@ func (f *verifyFixture) cases(t *testing.T) []struct {
 	name string
 	spec readSpec
 } {
-	meshAgents := fmt.Sprintf(`{"mesh_api_url":"https://x.invalid","agents":[{"name":"sage","agent_key":%q},{"name":"bender","agent_key":%q},{"name":"goku","agent_key":%q}]}`,
+	meshAgents := fmt.Sprintf(`{"mesh_api_url":"https://x.invalid","agents":[{"name":"alpha","agent_key":%q},{"name":"worker","agent_key":%q},{"name":"other","agent_key":%q}]}`,
 		f.target, f.others[0], f.others[1])
 	mcp := fmt.Sprintf(`{"mcpServers":{"evc-mesh":{"env":{"MESH_AGENT_KEY":%q,"OTHER":%q}}}}`, f.target, f.others[0])
 	env := fmt.Sprintf("OTHER=%s\nexport MESH_AGENT_KEY='%s'\nLATER=%s\n", f.others[0], f.target, f.others[1])
@@ -88,10 +88,10 @@ func (f *verifyFixture) cases(t *testing.T) []struct {
 		name string
 		spec readSpec
 	}{
-		{"mesh-agents", readSpec{Format: formatJSON, Path: f.write(t, "mesh-agents.json", meshAgents), Field: "agents[name=sage].agent_key"}},
-		{"fiddler", readSpec{Format: formatJSON, Path: f.write(t, "fiddler.json", meshAgents), Field: "agents[name=sage].agent_key"}},
+		{"mesh-agents", readSpec{Format: formatJSON, Path: f.write(t, "mesh-agents.json", meshAgents), Field: "agents[name=alpha].agent_key"}},
+		{"fiddler", readSpec{Format: formatJSON, Path: f.write(t, "fiddler.json", meshAgents), Field: "agents[name=alpha].agent_key"}},
 		{"mcp-json", readSpec{Format: formatJSON, Path: f.write(t, ".mcp.json", mcp), Field: "mcpServers.evc-mesh.env.MESH_AGENT_KEY"}},
-		{"agent-env", readSpec{Format: formatEnv, Path: f.write(t, "sage.env", env), Field: "MESH_AGENT_KEY"}},
+		{"agent-env", readSpec{Format: formatEnv, Path: f.write(t, "agent.env", env), Field: "MESH_AGENT_KEY"}},
 	}
 }
 
@@ -134,9 +134,9 @@ func TestVerifyErrorsNeverLeak(t *testing.T) {
 		spec readSpec
 		fp   string
 	}{
-		{"truncated-json", readSpec{formatJSON, f.write(t, "a.json", `{"agents":[{"name":"sage","agent_key":"`+f.target), "agents[name=sage].agent_key"}, good},
-		{"not-a-string", readSpec{formatJSON, f.write(t, "b.json", `{"agents":[{"name":"sage","agent_key":{"k":"`+f.target+`"}}]}`), "agents[name=sage].agent_key"}, good},
-		{"ambiguous", readSpec{formatJSON, f.write(t, "c.json", `{"agents":[{"name":"sage","agent_key":"`+f.target+`"},{"name":"sage","agent_key":"`+f.others[0]+`"}]}`), "agents[name=sage].agent_key"}, good},
+		{"truncated-json", readSpec{formatJSON, f.write(t, "a.json", `{"agents":[{"name":"alpha","agent_key":"`+f.target), "agents[name=alpha].agent_key"}, good},
+		{"not-a-string", readSpec{formatJSON, f.write(t, "b.json", `{"agents":[{"name":"alpha","agent_key":{"k":"`+f.target+`"}}]}`), "agents[name=alpha].agent_key"}, good},
+		{"ambiguous", readSpec{formatJSON, f.write(t, "c.json", `{"agents":[{"name":"alpha","agent_key":"`+f.target+`"},{"name":"alpha","agent_key":"`+f.others[0]+`"}]}`), "agents[name=alpha].agent_key"}, good},
 		{"object-selected", readSpec{formatJSON, f.write(t, "d.json", `{"agents":{"k":"`+f.target+`"}}`), "agents"}, good},
 		{"bad-selector", readSpec{formatJSON, f.write(t, "e.json", `{"a":"`+f.target+`"}`), "a[["}, good},
 		{"bad-fingerprint", readSpec{formatJSON, f.write(t, "f.json", `{"a":"`+f.target+`"}`), "a"}, f.target},
@@ -182,7 +182,7 @@ func TestVerifyAbsentAndRefusals(t *testing.T) {
 	if err := os.Symlink(cs[0].spec.Path, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifySpec(readSpec{formatJSON, link, "agents[name=sage].agent_key"}, good, f.key); !errors.Is(err, ErrPolicy) {
+	if _, err := verifySpec(readSpec{formatJSON, link, "agents[name=alpha].agent_key"}, good, f.key); !errors.Is(err, ErrPolicy) {
 		t.Fatalf("symlink must be refused by policy, got %v", err)
 	}
 	if _, err := verifySpec(readSpec{formatJSON, "relative.json", "a"}, good, f.key); !errors.Is(err, ErrPolicy) {

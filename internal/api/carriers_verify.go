@@ -50,10 +50,21 @@ type CarrierVerifyItem struct {
 	ErrorClass       string        `json:"error_class,omitempty"`
 }
 
-// CarrierTarget is Carrier's target{kind,path}.
+// CarrierTarget names an exact field for structured carriers.
 type CarrierTarget struct {
-	Kind string `json:"kind"`
-	Path string `json:"path"`
+	Kind  string `json:"kind"`
+	Path  string `json:"path"`
+	Field string `json:"field,omitempty"`
+}
+
+func carrierTargetDTO(kind runnerproto.TargetKind, path, field string) CarrierTarget {
+	target := CarrierTarget{Kind: string(kind), Path: path}
+	// YAML adoption identifies one exact scalar. Preserve the closed legacy
+	// target shape for the pre-existing carrier kinds.
+	if kind == runnerproto.TargetYAMLScalar {
+		target.Field = field
+	}
+	return target
 }
 
 type carrierVerifyBody struct {
@@ -185,7 +196,7 @@ func (c *carrierVerifyRoutes) write(w http.ResponseWriter, requestID string, rep
 		if class != "" && !class.Valid() {
 			class = runnerproto.ErrClassInternal
 		}
-		row := CarrierVerifyItem{ID: it.CarrierID.String(), Host: it.Host, Target: CarrierTarget{Kind: string(it.TargetKind), Path: it.TargetPath},
+		row := CarrierVerifyItem{ID: it.CarrierID.String(), Host: it.Host, Target: carrierTargetDTO(it.TargetKind, it.TargetPath, it.TargetField),
 			Status: string(it.State), LastVerifiedAt: it.LastVerifiedAt, ErrorClass: string(class)}
 		if it.RunnerID != uuid.Nil {
 			row.RunnerID = it.RunnerID.String()

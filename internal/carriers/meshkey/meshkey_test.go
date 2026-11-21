@@ -7,8 +7,8 @@ import (
 )
 
 func agent() Agent {
-	return Agent{Host: "mini", Name: "Sage", LaneDir: "/w/sage", BinDir: "/h/bin", CfgDir: "/h/.config/fiddler",
-		EnvDir: "/h/.config/agents", EnvFile: "sage.env"}
+	return Agent{Host: "mini", Name: "Alpha", LaneDir: "/w/alpha", BinDir: "/h/bin", CfgDir: "/h/.config/fiddler",
+		EnvDir: "/h/.config/agents", EnvFile: "agent.env"}
 }
 
 func TestForDescribesFourCarriers(t *testing.T) {
@@ -20,10 +20,10 @@ func TestForDescribesFourCarriers(t *testing.T) {
 		k           Kind
 		f, p, field string
 	}{
-		{MCPJSON, FormatJSON, "/w/sage/.mcp.json", "mcpServers.evc-mesh.env.MESH_AGENT_KEY"},
-		{MeshAgents, FormatJSON, "/h/bin/mesh-agents.json", "agents[name=Sage].agent_key"},
-		{FiddlerJSON, FormatJSON, "/h/.config/fiddler/fiddler.json", "agents[name=Sage].mesh_agent_key"},
-		{AgentEnv, FormatEnv, "/h/.config/agents/sage.env", "MESH_AGENT_KEY"},
+		{MCPJSON, FormatJSON, "/w/alpha/.mcp.json", "mcpServers.evc-mesh.env.MESH_AGENT_KEY"},
+		{MeshAgents, FormatJSON, "/h/bin/mesh-agents.json", "agents[name=Alpha].agent_key"},
+		{FiddlerJSON, FormatJSON, "/h/.config/fiddler/fiddler.json", "agents[name=Alpha].mesh_agent_key"},
+		{AgentEnv, FormatEnv, "/h/.config/agents/agent.env", "MESH_AGENT_KEY"},
 	}
 	for i, w := range want {
 		c := cs[i]
@@ -41,7 +41,7 @@ func TestForRefusesSelectorWideningAndBadPaths(t *testing.T) {
 		"dot-in-name":      func(a *Agent) { a.Name = "a.b" },
 		"empty-name":       func(a *Agent) { a.Name = "" },
 		"equals-in-name":   func(a *Agent) { a.Name = "a=b" },
-		"relative-lane":    func(a *Agent) { a.LaneDir = "w/sage" },
+		"relative-lane":    func(a *Agent) { a.LaneDir = "w/alpha" },
 		"unclean-bin":      func(a *Agent) { a.BinDir = "/h/bin/../x" },
 		"env-file-slash":   func(a *Agent) { a.EnvFile = "../keys.env" },
 		"bad-var":          func(a *Agent) { a.EnvVar = "A B" },
@@ -63,7 +63,7 @@ func TestForRefusesSelectorWideningAndBadPaths(t *testing.T) {
 // TestMemberAcceptsOnlyTheManifest: every carrier For produces is a member;
 // a carrier moved to another file name, field or kind is not.
 func TestMemberAcceptsOnlyTheManifest(t *testing.T) {
-	cs, err := For(Agent{Host: "h", Name: "Sage", LaneDir: "/l", BinDir: "/b", CfgDir: "/c", EnvDir: "/e", EnvFile: "sage.env"})
+	cs, err := For(Agent{Host: "h", Name: "Alpha", LaneDir: "/l", BinDir: "/b", CfgDir: "/c", EnvDir: "/e", EnvFile: "agent.env"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestMemberAcceptsOnlyTheManifest(t *testing.T) {
 // other name would make Verify a fingerprint oracle over the neighbours in
 // the same file.
 func TestMemberAgentEnvKeepsOnlyTheAgentKeyVariable(t *testing.T) {
-	cs, err := For(Agent{Host: "h", Name: "Sage", LaneDir: "/l", BinDir: "/b", CfgDir: "/c", EnvDir: "/e", EnvFile: "sage.env"})
+	cs, err := For(Agent{Host: "h", Name: "Alpha", LaneDir: "/l", BinDir: "/b", CfgDir: "/c", EnvDir: "/e", EnvFile: "agent.env"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestMemberAgentEnvKeepsOnlyTheAgentKeyVariable(t *testing.T) {
 			t.Errorf("variable %q is a member", field)
 		}
 	}
-	if _, err := For(Agent{Host: "h", Name: "Sage", LaneDir: "/l", BinDir: "/b", CfgDir: "/c", EnvDir: "/e", EnvFile: "sage.env", EnvVar: "DB_PASSWORD"}); err == nil {
+	if _, err := For(Agent{Host: "h", Name: "Alpha", LaneDir: "/l", BinDir: "/b", CfgDir: "/c", EnvDir: "/e", EnvFile: "agent.env", EnvVar: "DB_PASSWORD"}); err == nil {
 		t.Error("For describes a carrier for another variable")
 	}
 }

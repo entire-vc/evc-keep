@@ -63,8 +63,8 @@ func (f *lockFixture) secret(scope Scope, name, class string) uuid.UUID {
 	id := uuid.Must(uuid.NewV7())
 	if _, err := f.pool.Exec(context.Background(),
 		`INSERT INTO secrets (id, org_id, scope_level, scope_id, name, class, type, store_id, provider_ref)
-		 VALUES ($1, $2, $3, $4, $5, $6, 'generic', $7, 'x')`,
-		id, f.org, string(scope.Level), scope.ID, name, class, f.store); err != nil {
+		 VALUES ($1, $2, $3, $4, $5, $6, 'generic', $7, $8)`,
+		id, f.org, string(scope.Level), scope.ID, name, class, f.store, "x/"+id.String()); err != nil {
 		f.t.Fatalf("insert secret %s at %s: %v", name, scope.Level, err)
 	}
 	return id

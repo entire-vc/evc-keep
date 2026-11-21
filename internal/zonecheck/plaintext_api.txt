@@ -228,26 +228,31 @@ internal/runner/loop.ErrRefused: error
 internal/runner/loop.ErrTransport: error
 internal/runner/loop.HTTPTransport.FetchValue: func(ctx context.Context, jobID string) (runnerproto.ValueEnvelope, error)
 internal/runner/loop.HTTPTransport.NextJob: func(ctx context.Context) (*runnerproto.SignedJob, error)
+internal/runner/loop.HTTPTransport.SendDiscoverResult: func(ctx context.Context, jobID string, r runnerproto.DiscoverResult) error
 internal/runner/loop.HTTPTransport.SendResult: func(ctx context.Context, jobID string, r runnerproto.Result) error
 internal/runner/loop.HTTPTransport: struct{base string; client *http.Client}
 internal/runner/loop.NewHTTPTransport: func(server string, cred runner.Credential, serverCA *x509.CertPool) (*loop.HTTPTransport, error)
 internal/runner/loop.OpenOutbox: func(dir string) (*loop.Outbox, error)
 internal/runner/loop.Outbox.Ack: func(jobID string) error
 internal/runner/loop.Outbox.Begin: func(jobID string) error
+internal/runner/loop.Outbox.BeginDiscover: func(jobID string) error
 internal/runner/loop.Outbox.Close: func(jobID string, r runnerproto.Result) error
+internal/runner/loop.Outbox.CloseDiscover: func(jobID string, r runnerproto.DiscoverResult) error
+internal/runner/loop.Outbox.CloseDiscoverIfAbsent: func(jobID string, r runnerproto.DiscoverResult) error
 internal/runner/loop.Outbox.CloseIfAbsent: func(jobID string, r runnerproto.Result) error
 internal/runner/loop.Outbox.List: func() ([]loop.Pending, error)
 internal/runner/loop.Outbox: struct{dir string}
-internal/runner/loop.Pending: struct{JobID string; Closed bool; Result runnerproto.Result}
+internal/runner/loop.Pending: struct{JobID string; Closed bool; IsDiscover bool; Result runnerproto.Result; Discover runnerproto.DiscoverResult}
 internal/runner/loop.Runner.Drain: func(ctx context.Context) error
 internal/runner/loop.Runner.Once: func(ctx context.Context) (bool, error)
 internal/runner/loop.Runner.Run: func(ctx context.Context) error
-internal/runner/loop.Runner: struct{Transport loop.Transport; Me runnerproto.Identity; Keys runnerproto.TrustedKeys; Policy runnerproto.HostPolicy; Journal runnerproto.Journal; Limiter *runnerproto.Limiter; Delivery *ecdh.PrivateKey; Outbox *loop.Outbox; Deploy deploy.Deps; Exec *execrun.Deps; ExecSink func(jobID string, out execrun.Outcome); Log *slog.Logger; Now func() time.Time; Sleep func(ctx context.Context, d time.Duration)}
-internal/runner/loop.Transport: interface{FetchValue(ctx context.Context, jobID string) (runnerproto.ValueEnvelope, error); NextJob(ctx context.Context) (*runnerproto.SignedJob, error); SendResult(ctx context.Context, jobID string, r runnerproto.Result) error}
+internal/runner/loop.Runner: struct{Transport loop.Transport; Me runnerproto.Identity; Keys runnerproto.TrustedKeys; Policy runnerproto.HostPolicy; Journal runnerproto.Journal; Limiter *runnerproto.Limiter; Discover *runnerproto.DiscoverLimiter; Delivery *ecdh.PrivateKey; Outbox *loop.Outbox; Deploy deploy.Deps; Exec *execrun.Deps; ExecSink func(jobID string, out execrun.Outcome); Log *slog.Logger; Now func() time.Time; Sleep func(ctx context.Context, d time.Duration)}
+internal/runner/loop.Transport: interface{FetchValue(ctx context.Context, jobID string) (runnerproto.ValueEnvelope, error); NextJob(ctx context.Context) (*runnerproto.SignedJob, error); SendDiscoverResult(ctx context.Context, jobID string, r runnerproto.DiscoverResult) error; SendResult(ctx context.Context, jobID string, r runnerproto.Result) error}
 internal/runner/loop.beginFirst.Claim: func(jobID string, notAfter time.Time, now time.Time) error
 internal/targets.ErrPolicy: error
 internal/targets.ErrUnconfirmed: error
 internal/targets.ErrWrite: error
+internal/targets.FingerprintYAML: func(content []byte, fields []string, key fingerprint.Key) ([]targets.YAMLObservation, error)
 internal/targets.Observe: func(t runnerproto.Target, owner int64, agentUIDs []int64, agentGIDs []int64, fpKey fingerprint.Key) (fp string, found bool, err error)
 internal/targets.Option: func(*targets.writeOptions)
 internal/targets.OwnerOf: func(t runnerproto.Target, agentUIDs []int64, agentGIDs []int64) (uid int64, exists bool, err error)
@@ -256,6 +261,7 @@ internal/targets.VerifyCarrier: func(roots []string, ordinal int, c meshkey.Carr
 internal/targets.VerifyResult: string
 internal/targets.WithSystemdCredPlaintextFallback: func(notice func(path string)) targets.Option
 internal/targets.Write: func(t runnerproto.Target, v secret.Value, agentUIDs []int64, agentGIDs []int64, fpKey fingerprint.Key, opts ...targets.Option) (string, error)
+internal/targets.YAMLObservation: struct{Field string; Fingerprint string; Length int}
 pkg/fingerprint.Compute: func(k fingerprint.Key, v secret.Value) (string, error)
 pkg/fingerprint.ErrKeyID: error
 pkg/fingerprint.ErrKeySize: error

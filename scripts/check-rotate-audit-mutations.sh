@@ -30,13 +30,9 @@ fi
 mutation_apply_only || (cd "$root" && go run ./cmd/keep-server migrate up)
 
 fail=0
-# edit SRC FROM TO: print SRC with the first literal occurrence of FROM
-# replaced by TO; exit 1 if FROM is not there.
+# edit SRC FROM TO [OCCURRENCE]: refuse absent or ambiguous anchors.
 edit() {
-	awk -v from="$2" -v to="$3" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$1"
+	mutation_edit "$1" "$2" "$3" "${4:-}"
 }
 
 pkgs="./internal/api/ -run TestRotate"
@@ -57,13 +53,13 @@ rotation_database_failed() {
 # line) proves nothing about the property WANT names. Mirrors the
 # `--- FAIL: WANT` check in check-identity-attack-mutations.sh.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 src=$2 from=$3 to=$4 want=${5:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	if [ "$from" = "@remove-file" ]; then
 		printf '%s\n' 'package rotation' >"$work/tree/$src"
-	elif ! edit "$root/$src" "$from" "$to" >"$work/tree/$src"; then
+	elif ! edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -105,7 +101,7 @@ mutate() {
 		fail=1
 		return
 	fi
-	echo "ok   $name: tests went red ($(grep -c -- '--- FAIL' "$work/out") failing)${want:+, confirmed on: $want}"
+	echo "ok   $name: tests went red ($(grep -c -- '--- FAIL' "$work/out" | awk '{print ($1 > 40 ? "40+" : $1)}') failing)${want:+, confirmed on: $want}"
 }
 
 # Each mutant switches off one guard; the named test must be the one that
@@ -114,7 +110,7 @@ mutate prod-gate-off internal/rotation/service.go \
  'if o.Class == ClassProd {' 'if false {' 'TestRotateApproval_ProdWaitsForAHuman'
 mutate request-record-dropped internal/rotation/service.go \
  's.journal.AppendTx(ctx, tx, requestRecord(ref, id, o, audit.DecisionAllow, uuid.Nil))' '(audit.Record{}), error(nil)' 'TestRotateAudit_OutcomeHoldsNamesAndNoValue'
-mutate nil-journal-starts-rotation internal/rotation/service.go \
+MUTATION_OCCURRENCE=1 mutate nil-journal-starts-rotation internal/rotation/service.go \
  'if s.journal == nil {' 'if false {' 'TestRotateAudit_NoRecordNoRotation'
 mutate journal-failure-ignored internal/rotation/service.go \
  'rec, err := s.journal.AppendTx(ctx, tx, requestRecord(ref, id, o, audit.DecisionAllow, uuid.Nil))' 'rec, err := s.journal.AppendTx(ctx, tx, requestRecord(ref, id, o, audit.DecisionAllow, uuid.Nil)); err = nil' 'TestRotateAudit_NoRecordNoRotation'
@@ -132,7 +128,7 @@ mutate binding-hash-unchecked internal/rotation/approval.go \
  'subtle.ConstantTimeCompare(stored, shown) != 1 ||' 'false ||' 'TestRotateApproval_ApprovingStartsTheRunOfTheRequestID'
 mutate expired-approval-decidable internal/rotation/approval.go \
  'if expired {' 'if false {' 'TestRotateApproval_ExpiredApprovalCannotBeDecided'
-mutate rejection-starts-run internal/rotation/approval.go \
+MUTATION_OCCURRENCE=1 mutate rejection-starts-run internal/rotation/approval.go \
  'if in.Approve {' 'if true {' 'TestRotateApproval_RejectionStartsNothingAndReportsDenied'
 mutate console-ignores-rotation-approvals internal/api/approvals_rotate.go \
  'if ra, ok := rotations.(RotationApprovals); ok {' 'if ra, ok := rotations.(RotationApprovals); ok && false {' 'TestRotateApproval_ConsoleServiceRoutesRotationApprovals'
@@ -144,7 +140,6 @@ if mutation_apply_only; then
 	mutation_shard_finish
 	exit "$fail"
 fi
-rm -rf "$work/tree"
 mutation_snapshot "$work/tree"
 # shellcheck disable=SC2086
 if (cd "$work/tree" && timeout -k 10s 180s go test -timeout 90s -count=1 -p 1 -v $pkgs >"$work/out" 2>&1); then
@@ -156,7 +151,8 @@ if (cd "$work/tree" && timeout -k 10s 180s go test -timeout 90s -count=1 -p 1 -v
     fi
 else
 	echo "FAIL baseline: tests are red on the real code"
-	grep -E -- '^(--- FAIL|FAIL|panic:)|_test.go:[0-9]+:' "$work/out" | head -40 | cut -c1-300
+	"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+		echo "FAIL diagnostics: test-result-names.sh exited $?"
 	fail=1
 fi
 

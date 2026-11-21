@@ -45,7 +45,7 @@ import (
 
 const (
 	e2ePath    = "builtin://mesh-e2e"
-	e2eSubject = "Sage"
+	e2eSubject = "Alpha"
 	fpBadValue = "kfp1:k1:zzzzzzzzzzzzzzzz"
 	// carrier numbers, 1-based, in meshkey.For order
 	cMCP, cMeshAgents, cFiddler, cEnv = 1, 2, 3, 4
@@ -416,7 +416,7 @@ func newRig(t *testing.T, dual bool) *rig {
 		return d
 	}
 	r.files, err = meshkey.For(meshkey.Agent{Host: "e2e", Name: e2eSubject, LaneDir: dir("lane"), BinDir: dir("bin"),
-		CfgDir: dir("cfg"), EnvDir: dir("env"), EnvFile: "sage.env"})
+		CfgDir: dir("cfg"), EnvDir: dir("env"), EnvFile: "agent.env"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,8 +794,19 @@ func TestE2EDualKeyBadCarrierDoesNotActivate(t *testing.T) {
 			if !r.keyActive(r.oldKeyID) {
 				t.Error("the old key was revoked although a carrier does not hold the new one")
 			}
-			if n := r.ev.count("revoke "); n != 0 {
-				t.Errorf("Revoke was called %d times in a run with a bad carrier", n)
+			// The run rolls back and ends only the key it issued itself:
+			// exactly one Revoke, of the new key, after the last read-back.
+			if n := r.ev.count("revoke "); n != 1 || r.ev.count("revoke "+r.oldKeyID) != 0 {
+				t.Errorf("want one Revoke, of the new key only: %v", r.ev.all())
+			}
+			if r.keyActive(r.newKeyID()) || r.activeKeys() != 1 {
+				t.Errorf("the issued key must be revoked and the old one alone alive: active=%d", r.activeKeys())
+			}
+			if r.ev.last("verify ") > r.ev.first("revoke ") {
+				t.Error("the new key was revoked before the rollback was read back")
+			}
+			if !r.disabled("2") {
+				t.Error("the new version must be disabled after the rollback")
 			}
 			if r.disabled("1") || !r.resolves("1", r.oldVal) {
 				t.Error("the old version was disabled: the new version was activated")
@@ -803,8 +814,10 @@ func TestE2EDualKeyBadCarrierDoesNotActivate(t *testing.T) {
 			if tc.stale && (!r.holds(cFiddler, r.oldVal) || r.holds(cFiddler, r.c.Value(1))) {
 				t.Error("the failed carrier must be stale: still on the old key")
 			}
-			if tc.class == rotation.ClassDeployFailed && r.deployed[cFiddler] != 1 {
-				t.Errorf("a DualKey run retried the layout %d times: with a second valid key it gets one attempt", r.deployed[cFiddler])
+			// One forward attempt (a DualKey run does not retry: it has a second
+			// valid key) plus one best-effort put-back in the rollback.
+			if tc.class == rotation.ClassDeployFailed && r.deployed[cFiddler] != 2 {
+				t.Errorf("a DualKey run tried the layout %d times: want one forward attempt and one rollback put-back", r.deployed[cFiddler])
 			}
 			var named bool
 			for _, rec := range r.inc.all() {
@@ -1051,4 +1064,48 @@ func TestE2ECaptureSeesStrayOutput(t *testing.T) {
 			t.Errorf("the capture missed %s", m)
 		}
 	}
+}
+
+// (7) An agent that still has only its original Mesh key, "primary" (every
+// agent created before agent keys existed): the two-phase rotation issues the
+// new key, moves every carrier to it and then ends "primary" too. The original
+// key left alive, or an original_key_unknown incident, is the defect.
+func TestE2EDualKeyLegacyPrimaryIsRevoked(t *testing.T) {
+	r := newRig(t, true)
+	// Turn the rig's agent into a legacy one: no issued key, the carriers hold
+	// the value of the original key.
+	r.stub.mu.Lock()
+	delete(r.stub.keys, r.oldKeyID)
+	r.stub.primaryOn = true
+	r.stub.mu.Unlock()
+	r.oldKeyID = "primary"
+
+	res, err := r.rotate(rotation.Options{})
+	okRun(t, res, err)
+
+	for i := 1; i <= 4; i++ {
+		if !r.holds(i, r.c.Value(1)) {
+			t.Errorf("carrier %d does not hold the new key", i)
+		}
+	}
+	r.stub.mu.Lock()
+	primaryOn := r.stub.primaryOn
+	r.stub.mu.Unlock()
+	if primaryOn {
+		t.Error("Mesh: the original key \"primary\" is still active after the rotation")
+	}
+	if !r.keyActive(r.newKeyID()) || r.activeKeys() != 1 {
+		t.Errorf("Mesh: new key active=%t, active issued keys=%d", r.keyActive(r.newKeyID()), r.activeKeys())
+	}
+	if !r.resolves("2", r.c.Value(1)) || !r.disabled("1") {
+		t.Error("store: version 2 must hold the new key and version 1 must be disabled")
+	}
+	if r.inc.has(rotation.ClassOriginalKeyUnknown) {
+		t.Errorf("the run could not name the original key: %+v", r.inc.all())
+	}
+	if rv, lv := r.ev.first("revoke "), r.ev.last("verify "); rv < 0 || rv < lv {
+		t.Errorf("revoke at %d, last verify at %d\n%v", rv, lv, r.ev.all())
+	}
+	r.positiveControl()
+	r.noLeak(fmt.Sprintf("%+v", res))
 }

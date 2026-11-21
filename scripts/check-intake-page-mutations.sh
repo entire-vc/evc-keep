@@ -31,32 +31,20 @@ mutation_apply_only || (cd "$root" && go test -timeout 180s -tags intake_browser
   echo '{"baseline":"page","event":"diagnostics-unavailable"}'
  echo 'FAIL page mutation baseline'; exit 1;
 }
-mkdir "$work/tree"
-(cd "$root" && tar --exclude=.git --exclude=.gocache --exclude=.gomodcache -cf - .) | (cd "$work/tree" && tar -xf -)
 mutate() {
+	mutation_take_occurrences
  name=$1 file=$2 from=$3 to=$4 expected=$5
- cp "$root/$file" "$work/tree/$file"
- python3 - "$work/tree/$file" "$from" "$to" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]); s=p.read_text()
-if s.count(sys.argv[2])!=1: raise SystemExit('FAIL page mutation: target is not unique')
-p.write_text(s.replace(sys.argv[2],sys.argv[3],1))
-PY
+ mutation_snapshot "$work/tree"
+ { mutation_edit "$work/tree/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/edited" &&
+		mv "$work/edited" "$work/tree/$file"; }
  if [ "$name" = descriptor-metadata ]; then
   # Model a protocol downgrade on both peers, so an honest link still works
   # and the test must reject a changed visible field rather than fail startup.
-  python3 - "$work/tree/internal/intake/descriptor/message.go" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]); s=p.read_text()
-fields=', m.SecretName, m.Scope, m.StoreName, m.Class, m.RequestedBy, m.Sponsor'
-if s.count(fields)!=1: raise SystemExit('FAIL metadata mutation: target is not unique')
-p.write_text(s.replace(fields,'',1))
-PY
+  mutation_edit "$work/tree/internal/intake/descriptor/message.go" ', m.SecretName, m.Scope, m.StoreName, m.Class, m.RequestedBy, m.Sponsor' '' >"$work/edited"
+  mv "$work/edited" "$work/tree/internal/intake/descriptor/message.go"
  fi
  if mutation_apply_only; then
   echo "ok   $name: applies"
-  cp "$root/$file" "$work/tree/$file"
-  cp "$root/internal/intake/descriptor/message.go" "$work/tree/internal/intake/descriptor/message.go"
   return
  fi
  case "$file" in
@@ -83,8 +71,6 @@ PY
   echo "FAIL $name: did not reach the intended behavioral assertion"; exit 1
  fi
  echo "ok   $name: page assertion rejected mutant"
- cp "$root/$file" "$work/tree/$file"
- cp "$root/internal/intake/descriptor/message.go" "$work/tree/internal/intake/descriptor/message.go"
 }
 mutate signature web/intake/app.js "if (!verified)" "if (false)" 'expected UI state was not reached (secret-name)'
 mutate metadata-visible web/intake/app.js "!visible(node)" "false" 'expected UI state was not reached (hidden-field-SecretName)'
@@ -133,6 +119,11 @@ mutate runtime-spellcheck web/intake/app.js 'field.disabled = false;' 'field.spe
 mutate sri web/intake/page.html 'integrity="{{.Integrity}}"' '' 'script integrity does not match'
 mutate capability-response internal/api/intake.go 'io.WriteString(w, page.String())' 'io.WriteString(w, page.String()+r.PathValue("token"))' 'page capability escaped'
 if ! mutation_apply_only; then
-(cd "$root" && go test -timeout 180s -tags intake_browser -count=1 -v -run '^TestIntakePageBrowserLifecycle$' ./internal/builtin)
-echo 'ok   baseline: production page lifecycle passed'
+ # The verbose log can carry a value; only declared test names reach stdout.
+ final_status=0
+ (cd "$root" && go test -timeout 180s -tags intake_browser -count=1 -v -run '^TestIntakePageBrowserLifecycle$' ./internal/builtin >"$work/final" 2>&1) || final_status=$?
+ "$root/scripts/test-result-names.sh" "$root" <"$work/final" ||
+  echo "FAIL diagnostics: test-result-names.sh exited $?"
+ if [ "$final_status" -ne 0 ]; then echo "FAIL baseline: production page lifecycle exited $final_status"; exit 1; fi
+ echo 'ok   baseline: production page lifecycle passed'
 fi

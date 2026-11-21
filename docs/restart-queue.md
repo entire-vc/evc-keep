@@ -5,8 +5,16 @@ restarted. The server cannot reach that host, so the restart is a pull: the
 server queues a request and a poller on the host claims it, restarts the lane
 and acknowledges the result.
 
-A request holds the lane name (from an allowlist, `Hugh` and `Test` by default),
-the key version label and the `kfp1` fingerprint. It never holds a key value.
+A request holds the lane name, the key version label and the `kfp1`
+fingerprint. It never holds a key value.
+
+The lanes a restart may be queued for are set with `KEEP_RESTART_LANES` on
+`keep-server`: comma-separated names, each a letter followed by up to 31
+letters, digits, `_` or `-` (for example `KEEP_RESTART_LANES=worker,other`).
+There is no built-in list. Without the variable the queue refuses every request
+and the server logs one line at start saying so; a malformed name stops the
+start. A self-rotation lane (`KEEP_MESH_SELF_ROTATE_RESTART_LANE`) must be one
+of these names, otherwise the server does not start.
 
 States: `pending`, `claimed`, `done`, `nothing_running`, `failed`, `expired`.
 A pending request expires 15 minutes after it was queued. A claim leases a
@@ -27,7 +35,7 @@ Any other caller gets 403.
 `POST /v1/restarts/claim` answers 200 with up to ten requests:
 
 ```json
-[{"request_id": "…", "lane": "Hugh", "key_version": "…", "fingerprint": "kfp1:…", "claim_token": "<32 hex>"}]
+[{"request_id": "…", "lane": "worker", "key_version": "…", "fingerprint": "kfp1:…", "claim_token": "<32 hex>"}]
 ```
 
 Every claim, a reissue after a lapsed lease included, returns a new

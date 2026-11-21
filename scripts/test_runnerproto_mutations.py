@@ -16,12 +16,14 @@ BASELINE = SOURCE[SOURCE.index('# And the unmutated tree'):]
 class RunnerWitness(unittest.TestCase):
     def execute(self, form="mutate", mode="failure", witness="TestWitness", race=False, strict=False):
         with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
+            # The argv log and cache sit beside the source, not in it: the
+            # suite's exit handler fails a run whose source changed.
+            root = Path(d) / "repo"
             (root / "scripts/lib").mkdir(parents=True)
             (root / "pkg/runnerproto").mkdir(parents=True)
             (root / "go.mod").write_text("module fixture\n")
             (root / "pkg/runnerproto/value.go").write_text('e.str(tagSecretScope, j.Secret.Scope)\nx = 1\n')
-            for path in ("mutation-helpers.sh", "temp-workspace.sh", "lib/gocache.sh"):
+            for path in ("mutation-helpers.sh", "temp-workspace.sh", "lib/gocache.sh", "lib/mutation_edit.py", "lib/mutation_snapshot.py"):
                 shutil.copy(ROOT / "scripts" / path, root / "scripts" / path)
             # The real prefix runs its own six strict subprocess fault controls.
             args = (f"control value.go '{witness}' 'x = 1' 'x = 2'" if form == "mutate"
@@ -51,9 +53,9 @@ if fault=='setup': print('FAIL package [setup failed]')
 sys.exit(1)
 """)
             (fake / "go").chmod(0o755)
-            log = root / "argv"
+            log = Path(d) / "argv"
             env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ["PATH"],
-                       ARGV_LOG=str(log), FAULT=mode, GOCACHE=str(root / "cache"))
+                       ARGV_LOG=str(log), FAULT=mode, GOCACHE=str(Path(d) / "cache"))
             run = subprocess.run(["sh", str(script)], env=env, capture_output=True, text=True)
             rows = [json.loads(s) for s in log.read_text().splitlines()] if log.exists() else []
             return run.returncode, rows, run.stdout

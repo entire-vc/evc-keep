@@ -26,16 +26,12 @@ if [ -z "${KEEP_DATABASE_URL:-}" ] && ! mutation_apply_only; then
 fi
 
 fail=0
-# edit SRC FROM TO: print SRC with the first literal occurrence of FROM
-# replaced by TO; exit 1 if FROM is not there.
+# edit SRC FROM TO [OCCURRENCE]: refuse absent or ambiguous anchors.
 edit() {
-	awk -v from="$2" -v to="$3" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$1"
+	mutation_edit "$1" "$2" "$3" "${4:-}"
 }
 
-pkgs="-run ^TestRotateE2E ./cmd/keep-server/app/"
+pkgs="-run ^(TestRotateE2E|TestServeRestartLanes) ./cmd/keep-server/app/"
 
 # Setup uses sanitized store connection errors, while subsequent pgx/sql
 # operations can return driver errors directly. Neither proves a rotation
@@ -53,13 +49,13 @@ rotation_database_failed() {
 # line) proves nothing about the property WANT names. Mirrors the
 # `--- FAIL: WANT` check in check-identity-attack-mutations.sh.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 src=$2 from=$3 to=$4 want=${5:-} from2=${6:-} to2=${7:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	if [ "$from" = "@remove-file" ]; then
 		printf '%s\n' 'package main' >"$work/tree/$src"
-	elif ! edit "$root/$src" "$from" "$to" >"$work/tree/$src"; then
+	elif ! edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -67,7 +63,7 @@ mutate() {
 	# A second edit, for a property two code paths enforce: one alone is masked
 	# by the other, so both are switched off together.
 	if [ -n "$from2" ]; then
-		if ! edit "$work/tree/$src" "$from2" "$to2" >"$work/tree/$src.next"; then
+		if ! edit "$work/tree/$src" "$from2" "$to2" "${mutation_occurrence2:-}" >"$work/tree/$src.next"; then
 			echo "FAIL $name: second mutation did not apply — the source changed, update this script"
 			fail=1
 			return
@@ -128,7 +124,7 @@ mutate catalog-old-version-left-enabled cmd/keep-server/app/rotation.go \
  'SET disabled=true WHERE org_id=$1 AND secret_id=$2 AND provider_version=$3`, ref.OrgID, ref.SecretID, v)' 'SET disabled=false WHERE org_id=$1 AND secret_id=$2 AND provider_version=$3`, ref.OrgID, ref.SecretID, v)'
 mutate hook-panic-not-contained internal/intake/service.go \
  'defer func() { _ = recover() }()' '' 'TestRotateE2E_PanickingHookDoesNotFailTheInput'
-mutate input-conflict-dropped cmd/keep-server/app/rotation.go \
+MUTATION_OCCURRENCE=1 mutate input-conflict-dropped cmd/keep-server/app/rotation.go \
  'ri.release(ctx, p, rotationRetryEvery)' 'ri.finish(ctx, p)' 'TestRotateE2E_HumanInputWaitsForTheActiveRun'
 mutate pending-sweeper-not-run cmd/keep-server/app/rotation.go \
  '		sweep(ctx)' '		_ = sweep' 'TestRotateE2E_PendingLayoutSurvivesRestart TestRotateE2E_HumanInputSurvivesTransientAdoptFailure'
@@ -151,7 +147,7 @@ mutate deployed-pointer-not-updated internal/rotation/engine.go \
 mutate deployed-pointer-ignored-by-predecessor cmd/keep-server/app/rotation.go \
  'WHERE s.org_id=$1 AND s.id=$2 AND d.seal_seq < cur.seal_seq),' 'WHERE s.org_id=$1 AND s.id=$2 AND false),' 'TestRotateE2E_DeployedVersionPointerFeedsThePredecessor'
 mutate current-version-by-created-at internal/deployment/verify.go \
- 'NOT disabled ORDER BY seal_seq DESC LIMIT 1`' 'NOT disabled ORDER BY created_at DESC,id DESC LIMIT 1`' 'TestRotateE2E_NewestIsTheLastSealedNotTheLatestTimestamp'
+ 'provider_version=$3) ORDER BY seal_seq DESC LIMIT 1`' 'provider_version=$3) ORDER BY created_at DESC,id DESC LIMIT 1`' 'TestRotateE2E_NewestIsTheLastSealedNotTheLatestTimestamp'
 mutate plain-input-excluded-as-predecessor cmd/keep-server/app/rotation.go \
  " JOIN intake_rotation_links rl ON rl.org_id=il.org_id AND rl.request_id=il.request_id" "" 'TestRotateE2E_PlainInputVersionIsTheRevokedPredecessor'
 mutate late-plain-input-not-marked internal/intake/service.go \
@@ -178,8 +174,14 @@ mutate resume-sweep-unwired cmd/keep-server/app/rotation.go \
  'n, err := svc.Resume(ctx)' 'n, err := 0, error(nil); _ = svc' 'TestRotateE2E_AbandonedRunIsResumed'
 mutate resume-sweep-wired-without-service cmd/keep-server/app/rotation.go \
  'if !ok {' 'if false && !ok {' 'TestRotateE2E_ResumeSweepNeedsTheService'
+MUTATION_OCCURRENCE=1 mutate rollback-catalog-version-not-disabled cmd/keep-server/app/rotation.go \
+ 'UPDATE secret_versions SET disabled=true WHERE org_id=$1 AND secret_id=$2' 'UPDATE secret_versions SET disabled=false WHERE org_id=$1 AND secret_id=$2' 'TestRotateE2E_OneFailingCarrierActivatesNothing'
+mutate rollback-never-offered cmd/keep-server/app/rotation.go \
+ 'return rotation.NewProviderVersions(d).CanRollback(ctx, ref, runID)' '_ = d; return false, nil' 'TestRotateE2E_OneFailingCarrierActivatesNothing'
+# The served process must take the restart allowlist from KEEP_RESTART_LANES.
+mutate restart-lanes-unwired cmd/keep-server/app/main.go \
+ 'restartQueue(pool, cfg.RestartLanes, logger)' 'restartQueue(pool, nil, logger)' 'TestServeRestartLanes'
 # The baseline runs on an unmutated snapshot, not on the last mutant.
-rm -rf "$work/tree"
 mutation_snapshot "$work/tree"
 # shellcheck disable=SC2086
 if mutation_apply_only; then

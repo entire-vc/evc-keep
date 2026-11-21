@@ -22,15 +22,12 @@ temp_workspace
 src=""
 
 fail=0
-# mutate FILE NAME FROM TO: replace the first literal occurrence of FROM with TO.
+# mutate FILE NAME FROM TO: replace the only or explicitly named literal occurrence of FROM with TO.
 mutate() {
+	mutation_take_occurrences
 	src=$1 name=$2 from=$3 to=$4
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -39,20 +36,6 @@ mutate() {
 	run_mutant "$name"
 }
 
-# mutate_sed FILE NAME SED-EXPR: apply a sed edit to every line of the source.
-mutate_sed() {
-	src=$1 name=$2 expr=$3
-	rm -rf "$work/tree"
-	mutation_snapshot "$work/tree"
-	sed -e "$expr" "$root/$src" >"$work/tree/$src"
-	if cmp -s "$root/$src" "$work/tree/$src"; then
-		echo "FAIL $name: mutation did not apply — the source changed, update this script"
-		fail=1
-		return
-	fi
-	mutation_applied "$name" && return
-	run_mutant "$name"
-}
 
 # run_mutant NAME: the scratch tree must go red in a test, not in the build.
 run_mutant() {

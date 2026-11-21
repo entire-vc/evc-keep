@@ -1,0 +1,11 @@
+[Unit]
+Description=Stand consumer consumer-b1
+[Service]
+User=svc
+Type=notify
+NotifyAccess=main
+Restart=no
+EnvironmentFile=/srv/app/b1/app.env
+# Stand-only: the carrier as this start reads it, kept for the leak scan's needles.
+ExecStartPre=+/usr/local/sbin/testbed-seen.sh b1 /srv/app/b1/app.env
+ExecStart=/usr/local/bin/consumer -name b1 -source env -key SERVICE_TOKEN -listen 127.0.0.1:19201

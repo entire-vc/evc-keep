@@ -50,12 +50,15 @@ is indistinguishable from a check that can't.
   linter config, the mutation helpers) select all of them.
   In CI a merge request pipeline runs no mutation suite and starts no
   mutation child pipeline (owner decision of 13.11.2026), so the local run
-  above is your own check. The full set runs in the nightly schedule, which
-  covers what each merge brought to `main` (the browser mutation suite also
-  runs on every push to `main`), and on a release tag, where the `release`
-  job waits for all of them. The batch pipeline (`KEEP_MUTATION_BATCH=true`)
-  runs only when someone starts it by hand. A red nightly is fixed like a
-  red `main`.
+  above is your own check. The full set runs once a night, in the nightly
+  schedule, and nowhere else: not on a push to `main`, not on a release tag,
+  not in a pipeline started by hand on a branch. It covers what each merge
+  brought to `main`. A release tag does not run the set again: its `release`
+  job publishes only when the newest nightly on the tag's commit or an
+  ancestor of it succeeded with every mutation job green
+  (`scripts/release-nightly-gate.py`). The batch pipeline
+  (`KEEP_MUTATION_BATCH=true`) runs only when someone starts it by hand. A
+  red nightly is fixed like a red `main`.
 - Before waiting on CI, look at the pipeline of `main`. If `main` is red,
   your merge request will not go green for reasons that are not yours:
   depend on the fix for `main` instead of re-running CI.
@@ -125,7 +128,8 @@ This repository is public. Code, comments, test names, error messages,
 scripts, CI config and commit messages are written in English and carry
 no internal planning labels (milestone or wave numbers).
 `scripts/check-public-hygiene.sh` enforces it in CI; run it before you
-push. `docs/` is not scanned. When a test genuinely needs a non-Latin
+push. `docs/` is not scanned for Cyrillic or wave labels (the deny-list
+below does cover it). When a test genuinely needs a non-Latin
 character (a homoglyph host, say), write it as an escape
 (`"\u0430pi.example.com"`); only if that is impossible, put
 `public-hygiene:allow` on that line with the reason next to it. The
@@ -142,15 +146,49 @@ What the check rejects:
   prefix, so `Test_W<n>_<n>` is caught; a label glued to a preceding
   capital letter or digit is not a label.
 - The same two rules in commit messages (subject and body) and, in a
-  merge-request pipeline, in the merge request title and description:
-  with squash they become the commit message on `main` and reach the
-  public mirror. In a merge-request pipeline a missing or empty commit
-  range fails the job instead of passing silently, and so does a
-  description over 2700 characters (CI truncates it, so it cannot be
-  checked in full).
+  merge-request pipeline, in the merge request title: the title becomes
+  the commit subject on `main` (in the merge commit, or as the whole
+  squash commit message) and reaches the public mirror. The merge request
+  description is not checked: no commit template of this project copies
+  it into a commit, so it never reaches `main` or the mirror. In a
+  merge-request pipeline a missing or empty commit range fails the job
+  instead of passing silently.
+- Words from a private deny-list (internal names that must not reach the
+  public tree). CI passes the list as the file variable
+  `PUBLIC_HYGIENE_DENYLIST`, one word per line; the list itself is not in
+  this repository. A word is matched case-insensitively as a whole word,
+  across the whole tree including `docs/`, in tracked file names, in
+  commit messages and in the merge request title. A hit
+  is reported as `path:line` without the word (a file name as its
+  position in `git ls-files`), and any report line of the other rules
+  that would show a listed word is withheld. In a merge-request
+  pipeline a missing or empty list fails the job; a local run without the
+  variable prints `deny-list: not configured, skipped`.
 
 Binary files are not scanned: a tracked binary is not text a reader sees
 in a diff, and arbitrary bytes would trip the Cyrillic check by chance.
+
+A merge request that conflicts with `main` is resolved with
+`git fetch origin && git merge origin/main`, never a rebase and a
+force-push. Keep git's default subject: in a merge-request pipeline a
+commit with two or more parents whose subject is exactly
+`Merge remote-tracking branch 'origin/main' into <branch>` (or
+`Merge branch 'main' into <branch>`, with or without quotes around the
+branch) is checked with the source branch name left out, since that name
+already reaches `main` in the merge commit GitLab writes. The rest of the
+subject and the body are checked as usual; a subject you write yourself, a
+`git pull` subject (`... of <url> into ...`) and any other branch name are
+checked in full.
+
+One exception for stacked merge requests: when the branch was started from
+another merge request's branch and that parent was squash-merged, the
+parent's own merges of `main` stay in your range, under the same default
+subjects naming the parent branch. That branch name is left out too, but
+only when the GitLab API and git prove it: exactly one merge request has it
+as its source branch, it is merged into your target branch, its merge or
+squash commit is in your diff base, and the commit is in its head. The job
+names each such commit and the parent's `!<iid>`. Any API or git error
+leaves the name checked.
 
 ## CI coverage for documentation changes
 
@@ -166,7 +204,7 @@ existing regular files in the explicit documentation list in
 symlink paths, mixed changes and an unavailable diff run full coverage.
 The default branch, scheduled and manually started pipelines always run
 full coverage. Set `KEEP_FULL_CI=1` to force it in an MR as well.
-Full mutation set: daily schedule on main and every release tag.
+Full mutation set: the nightly schedule on main, and only there.
 
 A push to any other branch runs only the security stage (the secret scan
 and its selftests). Full coverage for that commit comes from its MR

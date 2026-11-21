@@ -68,7 +68,7 @@ func TestRunOutputCarriesNoCanary(t *testing.T) {
 	c := canary.New()
 	t.Setenv("KEEP_URL", "https://127.0.0.1:1")
 	t.Setenv("KEEP_LANE_RESTART_SCRIPT", "/abs/keep-lane-restart.sh")
-	t.Setenv("KEEP_POLL_LANES", "Test")
+	t.Setenv("KEEP_POLL_LANES", "other")
 	t.Setenv("KEEP_POLL_INTERVAL", "1s")
 	file := filepath.Join(t.TempDir(), "poller.env")
 	t.Setenv("KEEP_POLLER_TOKEN_FILE", file)

@@ -19,6 +19,11 @@
 #   5. nothing the job printed carries the canary in any of six encodings, the
 #      database password or the root key.
 #
+# Nothing is copied from a probe log into the job log but the fixed messages
+# of scripts/upgrade-rollback-report.sh: a probe that quotes what it found would
+# put it there. What the server, migrate and audit verify print does go into
+# the run's log unfiltered: step 5 scans that log before a line of it is printed.
+#
 # Needs KEEP_ADMIN_URL: a superuser URL of a scratch PostgreSQL 17; psql,
 # pg_dump, pg_restore, curl, jq, git, tar and go. A missing tool, variable or
 # tag is a failure, not a skip. KEEP_DEPLOY_DOC names another copy of the
@@ -32,30 +37,95 @@ pkg=./cmd/keep-server/app
 
 fail() { echo "FAIL upgrade-rollback: $1" >&2; exit 1; }
 
-# The outer shell runs the real script and keeps its output, so the canary
-# scan at the end reads exactly what the job printed.
+# The outer shell runs the real script into a file, scans the file and only
+# then prints it: the job log never sees a line before the scans have. A
+# detector that reads the log after it was streamed would turn the job red
+# with the value already in the CI log. Once the run has ended, whatever is
+# left of its process group is stopped and one snapshot of the file is taken:
+# both scans read that snapshot and only that snapshot is printed, so a writer
+# that outlived the run (or left the group) can add to job.log but never to
+# what is printed; the canary scan must report the snapshot's exact size. The
+# database password and the root key are looked for whatever the run's outcome
+# (secrets.txt holds them before the first step that can print them); the
+# canary once it was sealed. A dirty log is not printed at all: the report
+# names the detector, the size and the matching line numbers, plus the fixed
+# messages the log carries.
+#
+# KEEP_UPGRADE_INNER_TIMEOUT (seconds, default 720, under the job's 15m) bounds
+# the inner run, so a hang ends in the scans and a printed log rather than in an
+# empty log after GitLab kills the job. The inner run gets its own process group
+# (set -m) and the whole group is stopped: busybox timeout signals only its
+# child, and bash runs its TERM trap only after the foreground step returns, so
+# a hung step and the server would outlive it.
 if [ -z "${UPG_INNER:-}" ]; then
+	limit=${KEEP_UPGRADE_INNER_TIMEOUT:-720}
+	case "$limit" in "" | *[!0-9]* | 0*) fail "KEEP_UPGRADE_INNER_TIMEOUT must be a whole number of seconds" ;; esac
 	work=$(mktemp -d)
 	export UPG_WORK=$work
-	trap 'rm -rf "$work"' EXIT
+	inner=""
+	stop_inner() { # the inner run's whole process group: TERM, then KILL
+		[ -n "$inner" ] || return 0
+		kill -TERM -- "-$inner" 2>/dev/null || return 0
+		local i
+		for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 -- "-$inner" 2>/dev/null || return 0; sleep 1; done
+		kill -KILL -- "-$inner" 2>/dev/null || true
+	}
+	trap 'stop_inner; rm -rf "$work"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	set +e
-	UPG_INNER=1 bash "$0" "$@" 2>&1 | tee "$work/job.log"
-	rc=${PIPESTATUS[0]}
+	set -m
+	UPG_INNER=1 bash "$0" "$@" >"$work/job.log" 2>&1 </dev/null &
+	inner=$!
+	set +m
+	deadline=$((SECONDS + limit))
+	while kill -0 "$inner" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 1; done
+	timed_out=""
+	if kill -0 "$inner" 2>/dev/null; then
+		timed_out=1
+		stop_inner
+	fi
+	wait "$inner"
+	rc=$?
+	stop_inner # whatever of the group outlived the run
+	inner=""
 	set -e
+	[ -z "$timed_out" ] || rc=124
+	cp "$work/job.log" "$work/scanned.log"
+	size=$(wc -c <"$work/scanned.log" | tr -d ' ')
+
+	dirty=""
+	if [ -f "$work/secrets.txt" ] && LC_ALL=C grep -a -q -F -f "$work/secrets.txt" "$work/scanned.log"; then
+		lines=$(LC_ALL=C grep -a -n -F -f "$work/secrets.txt" "$work/scanned.log" | cut -d: -f1 | tr '\n' ' ')
+		echo "upgrade-rollback: the password and root key scan matched $(printf '%s' "$lines" | wc -w | tr -d ' ') line(s) of $size bytes of job output: line(s) $lines"
+		echo "FAIL upgrade-rollback: the job output carries the database password or the root key" >&2
+		dirty=1
+	fi
+	scanned=""
 	if [ -f "$work/state/canary.value" ]; then
-		cp "$work/job.log" "$work/scanned.log"
-		if ! (cd "$root" && KEEP_PROBE_ACTION=scan KEEP_PROBE_DIR="$work/state" KEEP_PROBE_LOG="$work/scanned.log" \
+		if (cd "$root" && KEEP_PROBE_ACTION=scan KEEP_PROBE_DIR="$work/state" KEEP_PROBE_LOG="$work/scanned.log" \
 			go test -tags upgradeprobe -count=1 -run '^TestUpgradeProbe$' -v "$pkg" >"$work/scan.out" 2>&1); then
-			tail -8 "$work/scan.out"
+			scanned=$(grep -o -E 'scanned [0-9]+ bytes' "$work/scan.out" | head -1 | grep -o -E '[0-9]+' || true)
+			if [ "$scanned" != "$size" ]; then
+				echo "FAIL upgrade-rollback: the canary scan read ${scanned:-no} bytes, not the $size bytes of the job output" >&2
+				dirty=1
+			fi
+		else
+			echo "upgrade-rollback: the canary scan failed on $size bytes of job output; what it said:"
+			"$root/scripts/upgrade-rollback-report.sh" "$work/scan.out" || true
 			echo "FAIL upgrade-rollback: the canary scan of the job output failed" >&2
-			exit 1
+			dirty=1
 		fi
-		grep -E 'scanned [0-9]+ bytes' "$work/scan.out" || true
-		if [ -f "$work/secrets.txt" ] && grep -q -F -f "$work/secrets.txt" "$work/scanned.log"; then
-			echo "FAIL upgrade-rollback: the job output carries the database password or the root key" >&2
-			exit 1
-		fi
-	elif [ "$rc" -eq 0 ]; then
+	fi
+	if [ -n "$dirty" ]; then
+		echo "upgrade-rollback: the job output is not printed (exit $rc); the fixed messages it carries:"
+		"$root/scripts/upgrade-rollback-report.sh" "$work/scanned.log" "job: " || true
+		exit 1
+	fi
+	cat "$work/scanned.log"
+	[ -z "$scanned" ] || echo "ok: scanned $scanned bytes of job output: the canary is absent"
+	[ -z "$timed_out" ] || fail "the run exceeded ${limit}s (KEEP_UPGRADE_INNER_TIMEOUT); the server and the run were stopped"
+	if [ ! -f "$work/state/canary.value" ] && [ "$rc" -eq 0 ]; then
 		echo "FAIL upgrade-rollback: no canary was sealed, nothing was scanned" >&2
 		exit 1
 	fi
@@ -78,7 +148,11 @@ admin_port=${KEEP_ADMIN_PORT:-5432}
 pids=""
 srv=""
 cleanup() { for p in $pids $srv; do kill "$p" 2>/dev/null || true; done; }
-trap cleanup EXIT INT TERM
+# TERM and INT end the run (the outer watchdog stops a hung one): a trap that
+# only cleaned up would let the script go on to its next step.
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # --- both binaries, built from their own trees ------------------------------
 mkdir -p "$work/old" "$work/bin-old" "$work/bin-new" "$work/state" "$work/backups" "$work/gobin"
@@ -92,7 +166,14 @@ build "$root" "$new_sha" "$work/bin-new" || fail "build HEAD"
 echo "ok: built keep-server $from ($old_sha) and HEAD ($new_sha)"
 
 # --- database and configuration, the way docs/deploy.md describes -----------
-pw="upg$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# What the scan of the job output must not find (secrets.txt) is written as
+# each value is made: the password goes into the file before it exists in a
+# variable, the root key's encodings right after the key file is written.
+( umask 077; printf 'upg%s\n' "$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')" >"$work/secrets.txt" )
+pw=$(head -n 1 "$work/secrets.txt")
+head -c 32 /dev/urandom >"$work/root.key"
+chmod 600 "$work/root.key"
+{ od -An -tx1 "$work/root.key" | tr -d ' \n'; echo; base64 <"$work/root.key" | tr -d '\n'; echo; } >>"$work/secrets.txt"
 psql "$KEEP_ADMIN_URL" -v ON_ERROR_STOP=1 -q <<SQL >/dev/null
 DROP DATABASE IF EXISTS keepupg;
 DROP ROLE IF EXISTS keepupg;
@@ -110,8 +191,6 @@ SQL
 admin_db=$(printf '%s' "$KEEP_ADMIN_URL" | sed 's#/[^/]*$#/keepupg#')
 psql "$admin_db" -v ON_ERROR_STOP=1 -q -c 'ALTER SCHEMA public OWNER TO keepupg' >/dev/null
 
-head -c 32 /dev/urandom >"$work/root.key"
-chmod 600 "$work/root.key"
 # The authority names a host that does not exist; the real one is in the query,
 # which pgx applies over the authority and libpq honours too. A step that parses
 # the URL by hand and drops the query reaches the decoy and fails.
@@ -128,8 +207,6 @@ export ENV_FILE=$work/keep-server.env
 	echo "KEEP_HTTP_ADDR='$KEEP_HTTP_ADDR'"
 	echo "KEEP_RUNNER_ADDR='$KEEP_RUNNER_ADDR'"
 } >"$ENV_FILE" )
-# What the scan of the job output must not find.
-{ printf '%s\n' "$pw"; od -An -tx1 "$work/root.key" | tr -d ' \n'; echo; base64 <"$work/root.key" | tr -d '\n'; echo; } >"$work/secrets.txt"
 export GOBIN=$work/gobin
 export PATH="$GOBIN:$PATH" # goose, "put it on root's PATH"
 
@@ -191,7 +268,7 @@ probe() { # action tree outfile
 	rm -f "$3"
 	(cd "$2" && KEEP_PROBE_ACTION=$1 KEEP_PROBE_DIR="$work/state" KEEP_PROBE_ORG=$org KEEP_PROBE_OUT=$3 \
 		go test -tags upgradeprobe -count=1 -run '^TestUpgradeProbe$' "$pkg" >"$work/probe.log" 2>&1) \
-		|| { sed 's/^/probe: /' "$work/probe.log" | tail -15; fail "probe $1 in $2"; }
+		|| { "$root/scripts/upgrade-rollback-report.sh" "$work/probe.log" "probe: " || true; fail "probe $1 in $2"; }
 	[ -s "$3" ] || fail "probe $1 wrote no state"
 }
 
@@ -234,7 +311,7 @@ start_server "$work/bin-old/keep-server"
 check_version "$old_sha"
 probe seal "$work/old" "$work/state/before"
 want=$(cat "$work/state/before")
-case "$want" in "version="*" fingerprint=kfp1:"*" length="*) ;; *) fail "the sealed canary's state is malformed: $want" ;; esac
+case "$want" in "version="*" fingerprint=kfp1:"*" length="*) ;; *) fail "the sealed canary's state is malformed" ;; esac
 audit0=$(audit_count)
 [ "$audit0" -ge 1 ] || fail "the audit chain is empty before the upgrade: nothing to verify"
 echo "ok: $from at schema $old_schema, canary sealed ($want), audit chain of $audit0 record(s) verified"

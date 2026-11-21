@@ -18,23 +18,12 @@ dir=.
 # mutate NAME FILE FROM TO TEST: replace one literal FROM with TO in FILE and
 # require TEST (package $pkg, run in $dir) to fail with a real --- FAIL.
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$2 from=$3 to=$4 test=$5
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! python3 - "$work/tree/$file" "$from" "$to" "${6:-}" "${7:-}" "${8:-}" <<'PY'
-import sys
-p, a, b, f2, a2, b2 = sys.argv[1:]
-s = open(p).read()
-if s.count(a) < 1:
-    sys.exit(1)
-open(p, 'w').write(s.replace(a, b, 1))
-if f2:
-    q = p.rsplit('/tree/', 1)[0] + '/tree/' + f2
-    t = open(q).read()
-    if t.count(a2) < 1:
-        sys.exit(1)
-    open(q, 'w').write(t.replace(a2, b2, 1))
-PY
+	if ! { mutation_edit "$work/tree/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/edited" &&
+		mv "$work/edited" "$work/tree/$file" &&
+		{ [ -z "${6:-}" ] || { mutation_edit "$work/tree/$6" "$7" "$8" "${mutation_occurrence2:-}" >"$work/edited" && mv "$work/edited" "$work/tree/$6"; }; }; }
 	then
 		echo "FAIL $name: mutation did not apply, the source changed, update this script"
 		fail=1
@@ -55,6 +44,15 @@ PY
 }
 
 M=internal/meshgate/meshgate.go
+# The workspace chooses the approval channel. Cover both an ignored false
+# and a no-op setting read (including removing the variable's dependency).
+dir=plugins/mesh
+pkg=.
+mutate settings-false-ignored internal/meshgate/opentx.go 'if !on {' 'if !on && false {' TestApprovalsViaMeshSettingDecidesTheCard
+mutate settings-read-noop internal/meshgate/opentx.go 'on, err := ts.ApprovalsViaMeshTx(ctx, tx, ws[0])' 'on, err := true, error(nil)' TestApprovalsViaMeshSettingDecidesTheCard
+mutate settings-true-ignored internal/meshgate/opentx.go 'if !on {' 'if on {' TestApprovalsViaMeshSettingDecidesTheCard
+dir=.
+pkg=./internal/deployment
 # Who may answer, and on what.
 mutate agent-answer-accepted  $M 'if d.DecidedByType != "user" {' 'if false {'                                   TestGateRefusesWhatInvariantsForbid
 mutate hash-compare-noop      $M 'subtle.ConstantTimeCompare(shown, g.Hash[:]) != 1' 'subtle.ConstantTimeCompare(shown[:0], shown[:0]) != 1' TestGateRefusesWhatInvariantsForbid
@@ -220,7 +218,7 @@ mutate bindings-size-both-off plugins/mesh/cmd/keep-server/rotators.go 'io.Limit
 mutate rotate-token-path-relative-ok plugins/mesh/cmd/keep-server/rotators.go '!filepath.IsAbs(tok) || !filepath.IsAbs(bind)' '!filepath.IsAbs(bind)' TestRotators_ExistingFilesByRelativePathAreRefused
 mutate rotate-bindings-path-relative-ok plugins/mesh/cmd/keep-server/rotators.go '!filepath.IsAbs(tok) || !filepath.IsAbs(bind)' '!filepath.IsAbs(tok)' TestRotators_ExistingFilesByRelativePathAreRefused
 mutate rotate-abs-check-off plugins/mesh/cmd/keep-server/rotators.go '!filepath.IsAbs(tok) || !filepath.IsAbs(bind)' '(!filepath.IsAbs(tok) || !filepath.IsAbs(bind)) && false' TestRotators_ExistingFilesByRelativePathAreRefused
-mutate cards-ignore-vault-source plugins/mesh/cmd/keep-server/cards.go '	if tokens != nil {' '	if false {' TestCardsAskTheVaultSourceOnEveryCall
+MUTATION_OCCURRENCE=1 mutate cards-ignore-vault-source plugins/mesh/cmd/keep-server/cards.go '	if tokens != nil {' '	if false {' TestCardsAskTheVaultSourceOnEveryCall
 mutate cards-vault-token-cached plugins/mesh/cmd/keep-server/cards.go '	return func(ctx context.Context) (mesh.Token, error) {
 		tok, err := tokens.Token(ctx)' '	tok, err := tokens.Token(context.Background())
 	return func(ctx context.Context) (mesh.Token, error) {' TestCardsAskTheVaultSourceOnEveryCall
@@ -271,7 +269,7 @@ for spec in './internal/deployment:TestGate:16' './cmd/keep-server/app:TestMeshG
 		fail=1
 	fi
 done
-if (cd "$root/plugins/mesh" && go test -count=1 -v -run 'TestGates' ./... >"$work/base" 2>&1) && ! grep -q -- '--- SKIP' "$work/base" && [ "$(grep -c -- '--- PASS' "$work/base")" -ge 8 ]; then
+if (cd "$root/plugins/mesh" && go test -count=1 -v -run 'TestGates|TestApprovalsViaMeshSettingDecidesTheCard' ./... >"$work/base" 2>&1) && ! grep -q -- '--- SKIP' "$work/base" && [ "$(grep -c -- '--- PASS' "$work/base")" -ge 12 ]; then
 	echo "ok   baseline: TestGates green on the real code, none skipped"
 else
 	echo "FAIL baseline: TestGates red or skipped"

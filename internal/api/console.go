@@ -171,6 +171,8 @@ type cardView struct {
 	NetWarning   string
 	CanDecide    bool
 	Note         string
+	Operation    string
+	ApproveLabel string
 }
 
 type listRow struct {
@@ -204,6 +206,12 @@ func toCard(a deployment.Approval, csrf string) cardView {
 		Decided: when(a.DecidedAt), Reason: a.Reason, Hash: a.BindingHash, Requester: string(a.Requester.Type) + " " + a.Requester.ID, Sponsor: a.Requester.SponsorID,
 		RequestID: a.RequestID, Secret: a.SecretName, Class: a.SecretClass, Scope: a.Scope.String(), Runner: a.RunnerID.String(), NetAllowlist: a.NetAllowlist}
 	v.Target = rows(a.Target)
+	v.ApproveLabel = "Approve"
+	if a.Adopt {
+		v.Operation = "Read-only YAML adoption"
+		v.ApproveLabel = "Approve adoption"
+		v.Target = []targetRow{{"Version", a.VersionID.String()}, {"Type", string(a.Target.Kind)}, {"Path", a.Target.Path}, {"Field", a.Target.Field}}
+	}
 	if e := a.Exec; e != nil {
 		d := e.Digest
 		if len(d) > 16 {
@@ -443,6 +451,9 @@ func (c *consoleRoutes) decide(w http.ResponseWriter, r *http.Request) {
 }
 
 func listTarget(a deployment.Approval) string {
+	if a.Adopt {
+		return "Read-only adoption · " + a.Target.Path + " · " + a.Target.Field
+	}
 	if a.Rotate {
 		return "rotate"
 	}

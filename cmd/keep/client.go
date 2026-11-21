@@ -191,6 +191,13 @@ func (c *client) do(method, path string, query url.Values, body any) ([]byte, er
 // doEndpoint is do for a full endpoint URL; it also returns the HTTP status
 // so a caller can tell a pending 202 from a terminal 200.
 func (c *client) doEndpoint(method, endpoint string, body any) (int, []byte, error) {
+	return c.doEndpointMax(method, endpoint, body, maxResponseBytes)
+}
+
+// doEndpointMax is doEndpoint with a per-call response cap, for the one
+// answer whose valid contract is larger than maxResponseBytes (a full
+// discovery report). The read stays bounded; only the bound differs.
+func (c *client) doEndpointMax(method, endpoint string, body any, limit int) (int, []byte, error) {
 
 	var reqBody io.Reader
 	if body != nil {
@@ -224,11 +231,11 @@ func (c *client) doEndpoint(method, endpoint string, body any) (int, []byte, err
 	// from "more"; the Content-Length header is never trusted, so a chunked
 	// or lying server is bounded the same way. Refused before any decoding,
 	// with a static error that carries no response bytes.
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return 0, nil, errors.New("read response: failed")
 	}
-	if len(respBody) > maxResponseBytes {
+	if len(respBody) > limit {
 		return 0, nil, errors.New("read response: too large")
 	}
 	c.debugf("-> %d %s", resp.StatusCode, redactedHeaderDump(resp.Header))

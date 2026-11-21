@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "agent_uids": [3001],
+  "agent_gids": [],
+  "max_deploys_per_hour": 100,
+  "discovery": {
+    "max_per_hour": 10,
+    "roots": [
+      {"root": "/srv/app", "trusted_uids": [0, 2001], "max_bytes": 65536, "max_files": 64,
+       "rules": [
+         {"glob": "*/app.env", "kind": "env-file", "names": ["SERVICE_TOKEN"]}
+       ]}
+    ]
+  },
+  "targets": [
+    {"kind": "env-file", "path_prefixes": ["/srv/app/b1"], "fields": ["SERVICE_TOKEN"],
+     "units": ["systemd:consumer-b1.service"],
+     "health": {"kind": "http", "url": "http://127.0.0.1:19201/", "expect_status": 200, "body_marker": "consumer-ok:b1", "timeout_seconds": 5}},
+    {"kind": "file", "path_prefixes": ["/srv/app/b2"],
+     "units": ["systemd:consumer-b2.service"],
+     "health": {"kind": "unit-active", "settle_seconds": 2}}
+  ]
+}

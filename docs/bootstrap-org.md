@@ -77,6 +77,21 @@ without one `POST /orgs/{org}/secrets` answers `409 no_store_bound`.
 scope, in one transaction with the store itself, so a secret with
 `provider_ref` `builtin://default/<name>` can be created right away.
 
+A `provider_ref` names the value inside its store, so one secret holds it per
+store, also while that secret is disabled (disabling is reversible and the
+value stays): a second secret with the same `provider_ref` in the same store,
+from any scope, is refused with `409 provider_ref_in_use` (the answer names
+neither the reference nor the secret holding it). A secret that overrides a
+name at a lower scope gets its own reference, for example
+`builtin://default/<scope>/<name>`.
+
+Upgrading a catalog that already holds such duplicates stops with
+`secrets share a provider_ref in one store` and repairs nothing; disabled
+secrets count. Each duplicate pair shared one value, so it may already have
+been read or overwritten from the other scope: keep the secret of the store's
+owner scope, re-point or remove the others, and rotate the value before
+migrating again.
+
 An organization created before `bootstrap-org` did this has no store. Bind one
 without recreating the organization:
 

@@ -26,7 +26,8 @@ run() { (cd "$1" && env -u KEEP_MESH_UI_SHOTS go test -tags mesh_ui_browser -cou
 if ! mutation_apply_only; then
 	if ! run "$root" "$work/base" || grep -q -- '--- SKIP' "$work/base" || ! grep -q -- '--- PASS' "$work/base"; then
 		echo "FAIL baseline: the browser scenario is not green on the unmodified tree"
-		tail -n 15 "$work/base"
+		"$root/scripts/test-result-names.sh" "$root" <"$work/base" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		exit 1
 	fi
 	echo "ok   baseline: $test passes, no skip"
@@ -36,17 +37,11 @@ fi
 # require the scenario to fail at STEP (a name without spaces) or with the
 # literal message STEP (a text with spaces).
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$2 from=$3 to=$4 step=$5
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! python3 - "$work/tree/$file" "$from" "$to" <<'PY'
-import sys
-p, a, b = sys.argv[1:]
-s = open(p).read()
-if s.count(a) < 1:
-    sys.exit(1)
-open(p, 'w').write(s.replace(a, b, 1))
-PY
+	if ! { mutation_edit "$work/tree/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/edited" &&
+		mv "$work/edited" "$work/tree/$file"; }
 	then
 		echo "FAIL $name: mutation did not apply, the source changed, update this script"
 		fail=1
@@ -63,7 +58,8 @@ PY
 		fail=1
 	elif case "$step" in *" "*) ! grep -qF -- "$step" "$work/out" ;; *) ! grep -q -- "FAIL step=$step:" "$work/out" ;; esac; then
 		echo "FAIL $name: the scenario went red at another step (wanted $step)"
-		grep -- 'FAIL step=' "$work/out" | head -n 2
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "ok   $name: red at step $step"
@@ -91,12 +87,52 @@ mutate csp-ancestors-none     $U '		anc = strings.Join(origins, " ")' '		_ = ori
 # The sidebar entry Mesh draws comes from the manifest title.
 mutate manifest-sidebar-title mesh-extension.json '"title": "Keep"' '"title": "Secrets"' sidebar-signin
 mutate toast-attr-dropped     $S '{{if .Toast}} data-toast="{{.Toast}}" data-toast-level="{{.ToastLvl}}"{{end}}' '' key-level-toast
-mutate narrow-frame-overflow  $S 'min-width:0;text-align:right;overflow-wrap:anywhere}' 'min-width:0;text-align:right;white-space:nowrap}' narrow
-mutate settings-form-overflow    $S '.stack{display:flex;flex-direction:column;gap:12px;max-width:420px}' '.stack{display:flex;flex-direction:column;gap:12px;min-width:600px}' key-level-narrow
-mutate settings-form-hidden      $S '.stack{display:flex;flex-direction:column;gap:12px;max-width:420px}' '.stack{display:none}' key-level-narrow
+mutate narrow-frame-overflow  $S '.row-link{font-weight:500;text-decoration:none;color:hsl(var(--foreground));overflow-wrap:anywhere}' '.row-link{font-weight:500;text-decoration:none;color:hsl(var(--foreground));white-space:nowrap}' narrow
+mutate settings-form-overflow    $S '.levels{display:grid;gap:8px;margin:12px 0 16px;padding:0;border:0;min-width:0}' '.levels{display:grid;gap:8px;margin:12px 0 16px;padding:0;border:0;min-width:600px}' key-level-narrow
+mutate settings-form-hidden      $S '.levels{display:grid;gap:8px;margin:12px 0 16px;padding:0;border:0;min-width:0}' '.levels{display:none}' key-level-narrow
+# Empty-list guidance and the add form stay visible within the frame;
+# an existing record's long terminal command scrolls inside its own box.
+mutate empty-guidance-hidden $S '.empty small{display:block;' '.empty small{display:none;' empty-narrow
+mutate empty-guidance-overflow $S '.empty small{display:block;' '.empty small{display:block;min-width:600px;' empty-narrow
+mutate empty-form-hidden     $S '.add-form{display:flex;' '.add-form{display:none;' empty-narrow
+mutate empty-form-overflow   $S '.add-form{display:flex;' '.add-form{display:flex;min-width:600px;' empty-narrow
+mutate empty-command-unbounded $S '.empty code{display:inline-block;max-width:100%;overflow-x:auto;' '.empty code{display:inline-block;' empty-long-narrow
+# Fonts: the policy must let the embedded fonts load, and the style must use them.
+mutate csp-font-src-dropped   $U "font-src 'self'; " '' fonts
+mutate font-face-broken       $S 'src:url(/mesh/ui/fonts/inter-latin-500-normal.woff2)' 'src:url(/mesh/ui/fonts/inter-latin-500-missing.woff2)' fonts
+# Theme: dark tokens from mesh.context on every page load, mesh.theme live; a
+# token of the wrong name or shape never reaches the style.
+mutate theme-noop             $S "if (tokenOK(n, tokens[k])) { st.setProperty('--' + n, tokens[k]); }" 'void 0;' theme-dark
+mutate theme-context-off      $S '      applyMeshTheme(d.theme);' '' theme-dark
+mutate theme-message-off      $S "if (d.type === 'mesh.theme') { applyMeshTheme(d); return; }" "if (d.type === 'mesh.theme') { return; }" theme-dark
+mutate theme-check-off        $S "if (tokenOK(n, tokens[k])) {" "if (true) {" theme-dark
+mutate theme-scheme-off       $S "st.setProperty('color-scheme', t.mode);" 'void 0;' theme-dark
+mutate theme-var-unused       $S 'body{font:400 14px/20px var(--font-sans);color:hsl(var(--foreground));background:hsl(var(--background));' 'body{font:400 14px/20px var(--font-sans);color:hsl(var(--foreground));background:hsl(0 0% 100%);' theme-dark
+# The page of one secret: a row opens it, it fits a 393 px frame, and its DOM
+# is part of the leak scan.
+B=internal/api/mesh_ui_secrets.go
+H=internal/api/mesh_ui_secrets_html.go
+mutate secret-row-link-dead   $B 'Href: "/mesh/ui/secrets/" + ref.ID.String(), Name:' 'Href: "/mesh/ui/secrets", Name:' secret-page
+mutate secret-wrap-dropped    $H '{{if $i}}<wbr>{{end}}' '' secret-page-narrow
+mutate secret-dom-not-scanned scripts/check-mesh-ui-browser.mjs "await dump(keepSecrets + '/');" 'void 0;' 'the DOM dump is missing'
+mutate list-dom-not-scanned   scripts/check-mesh-ui-browser.mjs "await dump(keepSecrets);" 'void 0;' 'the DOM dump is missing'
+mutate settings-dom-not-scanned scripts/check-mesh-ui-browser.mjs "await dump(keep + '/mesh/ui/settings');" 'void 0;' 'the DOM dump is missing'
 # Leak red run: the fingerprint of a catalog row carries the value, so the
 # browser renders it; the scan of the real DOM must see it.
 mutate leak-in-the-dom        cmd/keep-server/app/mesh_ui_test.go '"kfp1:k1:ABCDEFGHIJKLMNOP", len(value)' '"kfp1:k1:ABCDEFGHIJKLMNOP"+value, len(value)' 'canary in the browser DOM'
+# Add secret: the button above the list, the form in the empty state, the
+# link opens in a new tab outside Mesh's sandbox, Copy fills the clipboard,
+# and the links the run saw reach the server-log scan.
+mutate add-button-gone        $H '{{if .Total}}{{template "add-button" .}}{{end}}' '' sidebar-signin
+# Without the input service the screen offers no Add secret link at all: the
+# disabled button replaces it above the list, so the first step goes red.
+mutate add-input-unwired      $U '	if deps.Input != nil {' '	if false {' 'no Add secret above the list'
+mutate add-copy-noop          $S 'if (cp) { copyFrom(cp); }' 'void 0;' add-secret-1440
+mutate add-copy-truncated     $S "var text = field ? field.value : btn.getAttribute('data-copy');" "var text = field ? field.value.slice(0, -1) : btn.getAttribute('data-copy');" 'did not hand the link to the clipboard'
+mutate clipboard-recorder-off scripts/check-mesh-ui-browser.mjs "try { __keepClipboardHandoff(String(t)); } catch (e) {}" 'void 0;' 'did not hand the link to the clipboard'
+mutate add-popups-blocked     cmd/keep-server/app/mesh_ui_browser_test.go ' allow-popups allow-popups-to-escape-sandbox"' '"' add-secret-1440
+mutate add-links-not-scanned  scripts/check-mesh-ui-browser.mjs "if (input.linkDump) await appendFile(input.linkDump, res.link + '\n');" 'void 0;' 'no input links were recorded'
+mutate add-link-in-server-log cmd/keep-server/app/mesh_ui_browser_test.go 'if tok == "" || tok == l || strings.Contains(f.logbuf.String(), tok) || f.logbuf.Len() == 0 {' 'f.logbuf.WriteString(tok); if tok == "" || tok == l || strings.Contains(f.logbuf.String(), tok) || f.logbuf.Len() == 0 {' 'token reached the server log'
 # The baseline screenshots must be byte-identical after every mutant ran.
 if [ "$(shots_sum)" != "$shots_before" ]; then
 	echo "FAIL screenshots: a mutant rewrote the baseline PNG files"

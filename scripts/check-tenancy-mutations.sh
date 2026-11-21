@@ -31,13 +31,9 @@ if ! mutation_apply_only && [ -z "${KEEP_DATABASE_URL:-}" ]; then
 fi
 
 fail=0
-# edit SRC FROM TO: print SRC with the first literal occurrence of FROM
-# replaced by TO; exit 1 if FROM is not there.
+# edit SRC FROM TO [OCCURRENCE]: refuse absent or ambiguous anchors.
 edit() {
-	awk -v from="$2" -v to="$3" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$1"
+	mutation_edit "$1" "$2" "$3" "${4:-}"
 }
 
 pkgs="./internal/tenancy/ ./internal/catalog/"
@@ -46,7 +42,6 @@ pkgs="./internal/tenancy/ ./internal/catalog/"
 # unmutated target package with no SKIP: a red or skipped baseline makes every
 # "red" below meaningless, so the run stops here, in seconds, naming the
 # package, instead of after the whole inventory.
-rm -rf "$work/tree"
 mutation_snapshot "$work/tree"
 for baseline_pkg in $pkgs; do
 	mutation_apply_only && break
@@ -55,7 +50,8 @@ for baseline_pkg in $pkgs; do
 		echo "ok   baseline: $baseline_pkg tests green on the real code (0 SKIP)"
 	else
 		echo "FAIL baseline: $baseline_pkg tests did not run successfully (or skipped) on the real code"
-		grep -E -- '^(--- FAIL|FAIL|panic)' "$work/out" | head -20 || true
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		echo "FAIL baseline is red: no mutant was run"
 		exit 1
 	fi
@@ -70,11 +66,11 @@ done
 # line) proves nothing about the property WANT names. Mirrors the
 # `--- FAIL: WANT` check in check-identity-attack-mutations.sh.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 src=$2 from=$3 to=$4 want=${5:?expected test witness required}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! edit "$root/$src" "$from" "$to" >"$work/tree/$src"; then
+	if ! edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -139,7 +135,7 @@ mutate() {
 		fail=1
 		return
 	fi
-	echo "ok   $name: tests went red ($(grep -c -- '--- FAIL' "$work/out") failing)${want:+, confirmed on: $want}"
+	echo "ok   $name: tests went red ($(grep -c -- '--- FAIL' "$work/out" | awk '{print ($1 > 40 ? "40+" : $1)}') failing)${want:+, confirmed on: $want}"
 }
 
 # RemoveUser stops filtering by org: one organisation could remove another's
@@ -190,7 +186,7 @@ mutate explicit-store-outside-chain internal/catalog/store.go \
 	'if s == owner {' \
 	'if s == owner || true {' 'TestCreateRef_ExplicitStore'
 # ... or the store lookup stops filtering by org.
-mutate explicit-store-any-org internal/catalog/store.go \
+MUTATION_OCCURRENCE=1 mutate explicit-store-any-org internal/catalog/store.go \
 	'FROM stores WHERE org_id = $1 AND id = $2' \
 	'FROM stores WHERE $1::uuid IS NOT NULL AND id = $2' 'TestEveryQueryFiltersByOrg'
 
@@ -261,7 +257,7 @@ mutate authz-agent-sponsor-check-off internal/catalog/authz.go \
 # in place: the latter leaves anc unused by the compiler's static check
 # (the call it guards is the only reference to anc left in the loop), so it
 # fails to build rather than proving anything about the property.
-mutate createref-no-scope-lock internal/catalog/catalog.go \
+MUTATION_OCCURRENCE=1 mutate createref-no-scope-lock internal/catalog/catalog.go \
 	'for _, anc := range ancestors {' \
 	'for _, anc := range []tenancy.Scope{} {' 'TestCreateRef_OverrideLockRace'
 # CreateOverrideLock stops taking the same lock on its own target scope
@@ -275,6 +271,22 @@ mutate createoverridelock-no-scope-lock internal/catalog/lock.go \
 mutate createref-unique-unclassified internal/catalog/catalog.go \
 	'if uniqueViolation(err) {' \
 	'if false && uniqueViolation(err) {' 'TestCreateRef_DuplicateName'
+# A unique violation of the one-active-provider_ref-per-store index stops
+# being told apart: a ref reusing another secret's locator in the same store
+# is reported as a duplicate name instead of provider_ref_in_use.
+mutate createref-provider-ref-unclassified internal/catalog/catalog.go \
+	'if providerRefViolation(err) {' \
+	'if false && providerRefViolation(err) {' 'TestCreateRef_ProviderRefInUse'
+# The index itself is gone: a second active ref to one locator in one store
+# is accepted and shares the first one's value across scopes.
+mutate provider-ref-index-off internal/store/migrations/00069_secrets_provider_ref_unique.sql \
+	'CREATE UNIQUE INDEX secrets_provider_ref_per_store' \
+	'CREATE INDEX secrets_provider_ref_per_store' 'TestCreateRef_ProviderRefInUse'
+# The index is partial again: a disabled secret no longer holds its locator,
+# and a new ref reaches the retired value that is still stored.
+mutate provider-ref-index-active-only internal/store/migrations/00069_secrets_provider_ref_unique.sql \
+	'ON secrets (org_id, store_id, provider_ref);' \
+	"ON secrets (org_id, store_id, provider_ref) WHERE status = 'active';" 'TestCreateRef_ProviderRefInUse'
 # Same, for store_bindings' one-binding-per-scope UNIQUE.
 mutate storebinding-unique-unclassified internal/catalog/store.go \
 	'return StoreBinding{}, alreadyBoundError()' \
@@ -290,7 +302,7 @@ mutate store-scope-gate-off internal/catalog/store.go \
 	'WHERE TRUE' 'TestCreateStore_InvalidScope'
 # A class-mode OverrideLock goes back to blocking only a same-level
 # definition of the name it covers, not a lower one (tenancy model v3 §3
-# step 2, Calvin's follow-up on this card).
+# step 2, a review follow-up).
 mutate classlock-same-level-only internal/tenancy/resolve.go \
 	'candidate, candidateFound, err = r.deepestDefinition(ctx, org, chain, scopeIDs, name, i)' \
 	'candidate, candidateFound, err = r.deepestDefinition(ctx, org, chain[i:i+1], scopeIDs[i:i+1], name, 0)' 'TestResolve_OverrideLocks'

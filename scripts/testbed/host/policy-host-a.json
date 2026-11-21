@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "agent_uids": [3001],
+  "agent_gids": [],
+  "max_deploys_per_hour": 100,
+  "discovery": {
+    "max_per_hour": 10,
+    "roots": [
+      {"root": "/srv/app", "trusted_uids": [0, 2001], "max_bytes": 65536, "max_files": 64,
+       "rules": [
+         {"glob": "*/app.env", "kind": "env-file", "names": ["API_TOKEN"]},
+         {"glob": "*/mcp.json", "kind": "mcp-config", "names": ["GATEWAY_TOKEN"]}
+       ]}
+    ]
+  },
+  "targets": [
+    {"kind": "env-file", "path_prefixes": ["/srv/app/a1"], "fields": ["API_TOKEN"],
+     "units": ["systemd:consumer-a1.service"],
+     "health": {"kind": "http", "url": "http://127.0.0.1:19101/", "expect_status": 200, "body_marker": "consumer-ok:a1", "timeout_seconds": 5}},
+    {"kind": "mcp-config", "path_prefixes": ["/srv/app/a2"], "fields": ["mcpServers.gateway.env.GATEWAY_TOKEN"],
+     "units": ["systemd:consumer-a2.service"],
+     "health": {"kind": "unit-active", "settle_seconds": 2}},
+    {"kind": "systemd-credential", "path_prefixes": ["/srv/app/a3"],
+     "units": ["systemd:consumer-a3.service"],
+     "health": {"kind": "http", "url": "http://127.0.0.1:19103/", "expect_status": 200, "body_marker": "consumer-ok:a3", "timeout_seconds": 5}}
+  ]
+}

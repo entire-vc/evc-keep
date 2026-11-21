@@ -86,6 +86,9 @@ func Write(t runnerproto.Target, v secret.Value, agentUIDs, agentGIDs []int64, f
 	if err := t.Validate(); err != nil {
 		return "", denied("%v", err)
 	}
+	if t.Kind == runnerproto.TargetYAMLScalar {
+		return "", denied("YAML targets are read-only")
+	}
 	h, ok := kindHandlers[t.Kind]
 	if !ok {
 		return "", denied("unknown target kind %q", t.Kind)

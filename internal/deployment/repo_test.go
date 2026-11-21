@@ -480,3 +480,37 @@ func sameDecision(a, b Outcome) bool {
 	a.Created, b.Created = false, false
 	return a == b
 }
+
+// A rollback layout is refused by the hourly limit only at twice the limit: the
+// forward layout of the same run has already used part of it.
+func TestSubmitRollbackHasHeadroomAboveTheLimitButNotWithout(t *testing.T) {
+	f := newFixture(t)
+	f.policy(t, 3)
+	base := f.request(t)
+	submit := func(rollback bool) Status {
+		in := base
+		in.RequestID = mustID(t).String()
+		in.Rollback = rollback
+		out, err := f.repo.Submit(f.ctx, in)
+		if err != nil {
+			t.Fatal("submit failed")
+		}
+		return out.Status
+	}
+	for i := 0; i < 3; i++ {
+		if submit(false) != Queued {
+			t.Fatal("forward layout within the limit was not queued")
+		}
+	}
+	if submit(false) != RateLimited {
+		t.Fatal("forward layout above the limit was queued")
+	}
+	for i := 0; i < 3; i++ {
+		if submit(true) != Queued {
+			t.Fatal("rollback layout was refused by the limit its forward layout used up")
+		}
+	}
+	if submit(true) != RateLimited {
+		t.Fatal("rollback layout is not bounded: queued above twice the limit")
+	}
+}

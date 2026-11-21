@@ -1,0 +1,10 @@
+[Unit]
+Description=keep-runner (stand host)
+After=network-online.target testbed-init.service
+ConditionPathExists=/var/lib/keep-runner/cred
+[Service]
+ExecStart=/usr/local/bin/keep-runner run -cred-dir /var/lib/keep-runner/cred -policy /etc/keep/host-policy.json -server https://keep-server:8443 -server-ca /etc/keep/pki/server-ca.pem -state-dir /var/lib/keep-runner/state
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
