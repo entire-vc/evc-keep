@@ -28,6 +28,7 @@ import (
 
 	"github.com/entire-vc/evc-keep/pkg/rotation"
 	"github.com/entire-vc/evc-keep/pkg/secret"
+	"github.com/google/uuid"
 )
 
 // Kind is the provider type name.
@@ -43,8 +44,33 @@ var ErrBadAnswer = errors.New("mesh plugin: unexpected answer from backend")
 const (
 	maxBody        = 1 << 20
 	defaultTimeout = 15 * time.Second
-	active         = "active"
+	// primaryKeyID is how Mesh addresses an agent's original key.
+	primaryKeyID = "primary"
 )
+
+// primaryNamespace is the UUID namespace of PrimaryAlias. It is part of the
+// ledger format: changing it orphans every recorded alias, among them those of
+// rotations in flight, so a golden test pins it.
+var primaryNamespace = uuid.MustParse("ef80de33-2cb0-4dca-a3ac-c90cf2012f14")
+
+// PrimaryAlias is the key id under which this plugin names the Mesh key
+// "primary" of agentID: the agent's original key, which Mesh addresses by that
+// word rather than by a UUID. Keep's core takes only canonical UUID key ids,
+// so the plugin gives that key a stable name-based (v5) UUID of its own, a
+// different one for every agent. Current reports it, Check and Revoke turn it
+// back into "primary"; Mesh itself never sees it.
+func PrimaryAlias(agentID string) string {
+	return uuid.NewSHA1(primaryNamespace, []byte(agentID+"/"+primaryKeyID)).String()
+}
+
+// meshID is the path segment Mesh knows keyID by: "primary" for the alias,
+// the id itself for every other key.
+func (p *Provider) meshID(keyID string) string {
+	if keyID == p.alias {
+		return primaryKeyID
+	}
+	return keyID
+}
 
 // Token is the service token of Keep's Mesh account (right agent_key:rotate).
 // Every formatting path renders it as [REDACTED], like secret.Value, so a
@@ -83,6 +109,7 @@ type Config struct {
 type Provider struct {
 	base  *url.URL
 	agent string
+	alias string // PrimaryAlias(agent)
 	token Token
 	src   TokenSource
 	hc    *http.Client
@@ -110,7 +137,7 @@ func New(cfg Config) (*Provider, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Provider{base: u, agent: cfg.AgentID, token: cfg.Token, src: cfg.TokenSource, hc: hc, log: log}, nil
+	return &Provider{base: u, agent: cfg.AgentID, alias: PrimaryAlias(cfg.AgentID), token: cfg.Token, src: cfg.TokenSource, hc: hc, log: log}, nil
 }
 
 // loopback: plain http is allowed only to the local machine (tests, a sidecar).
@@ -132,14 +159,20 @@ func (p *Provider) Capabilities() rotation.Capabilities {
 	return rotation.Capabilities{DualKey: true}
 }
 
+// keyMeta is one item of Mesh's key list: ids and dates, never a key. Mesh
+// gives no status field: a key is active until it has a revoked_at.
 type keyMeta struct {
-	KeyID  string `json:"key_id"`
-	Status string `json:"status"`
+	KeyID     string  `json:"id"`
+	RevokedAt *string `json:"revoked_at"`
 }
+
+// A key is active only while revoked_at is null; any value there, even an
+// empty one, is read as revoked (fail closed).
+func (k keyMeta) active() bool { return k.RevokedAt == nil }
 
 type issueAnswer struct {
 	KeyID string `json:"key_id"`
-	Key   string `json:"key"`
+	Key   string `json:"api_key"`
 }
 
 // Issue creates a second key; the old one stays valid.
@@ -162,9 +195,12 @@ func (p *Provider) Issue(ctx context.Context, req rotation.IssueRequest) (rotati
 	// The raw body held the value: drop it, and the decoded string as soon as
 	// it is copied into a Value.
 	clear(body)
-	if derr != nil || !rotation.ValidKeyID(a.KeyID) || a.Key == "" {
+	// An answer naming the alias names the original key: never a new one.
+	if derr != nil || !rotation.ValidKeyID(a.KeyID) || a.KeyID == p.alias || a.Key == "" {
 		// A well-formed id with no usable value is a key Mesh created and
 		// Keep cannot use: end it rather than leave it unaccounted for.
+		// The alias never reaches revokeOrphan's DELETE: a list that shows
+		// it is refused, and one that does not leaves nothing to end.
 		if rotation.ValidKeyID(a.KeyID) {
 			p.revokeOrphan(ctx, a.KeyID, before)
 		}
@@ -213,7 +249,12 @@ func (p *Provider) list(ctx context.Context) ([]keyMeta, error) {
 		return nil, ErrBadAnswer
 	}
 	for _, k := range a.Keys {
-		if !rotation.ValidKeyID(k.KeyID) {
+		// Mesh always lists the agent's original key, under the id "primary";
+		// every other key id is a canonical UUID. Keep never sees "primary":
+		// it names that key by the alias (PrimaryAlias).
+		// A Mesh key that carries the alias as its own id would be confused
+		// with the original key: refuse the whole answer.
+		if (k.KeyID != primaryKeyID && !rotation.ValidKeyID(k.KeyID)) || k.KeyID == p.alias {
 			return nil, ErrBadAnswer
 		}
 	}
@@ -231,15 +272,18 @@ func (p *Provider) Check(ctx context.Context, keyID string) (rotation.Status, er
 		p.journal("check", keyID, "", err)
 		return rotation.Status{}, err
 	}
+	want := p.meshID(keyID)
 	for _, k := range keys {
-		if k.KeyID == keyID {
-			return rotation.Status{Active: k.Status == active}, nil
+		if k.KeyID == want {
+			return rotation.Status{Active: k.active()}, nil
 		}
 	}
 	return rotation.Status{}, rotation.ErrNotFound
 }
 
-// Current returns the only active key; none or several: ok=false.
+// Current returns the only active key; none or several: ok=false. The
+// original key ("primary"), when it is the only active one, is returned as its
+// alias (PrimaryAlias), so a rotation can retire it like any other key.
 func (p *Provider) Current(ctx context.Context, _ string) (string, bool, error) {
 	keys, err := p.list(ctx)
 	if err != nil {
@@ -247,13 +291,16 @@ func (p *Provider) Current(ctx context.Context, _ string) (string, bool, error) 
 	}
 	id := ""
 	for _, k := range keys {
-		if k.Status != active {
+		if !k.active() {
 			continue
 		}
 		if id != "" {
 			return "", false, nil
 		}
 		id = k.KeyID
+		if id == primaryKeyID {
+			id = p.alias
+		}
 	}
 	return id, id != "", nil
 }
@@ -266,14 +313,16 @@ func (p *Provider) Revoke(ctx context.Context, keyID string) error {
 	if !rotation.ValidKeyID(keyID) {
 		return rotation.ErrNotFound
 	}
-	_, err := p.do(ctx, http.MethodDelete, "/"+keyID, http.StatusOK, http.StatusNoContent)
+	// The path segment is the key id checked above or the constant "primary"
+	// for the alias: never anything an answer or a caller spelled.
+	_, err := p.do(ctx, http.MethodDelete, "/"+p.meshID(keyID), http.StatusOK, http.StatusNoContent)
 	if errors.Is(err, rotation.ErrNotFound) {
 		err = nil
 		keys, lerr := p.list(ctx)
 		switch {
 		case lerr != nil:
 			err = lerr
-		case listed(keys, keyID):
+		case listed(keys, p.meshID(keyID)):
 			err = rotation.ErrUnavailable
 		}
 	}

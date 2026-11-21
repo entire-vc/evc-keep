@@ -18,6 +18,9 @@ import subprocess
 import sys
 
 root, work = map(Path, sys.argv[1:])
+import sys
+sys.path.insert(0, str(root / 'scripts/lib'))
+from mutation_edit import named_edit as mutation_edit
 source = (root / 'internal/deployment/repo.go').read_text()
 target = work / 'tree/internal/deployment/repo.go'
 mutations = [
@@ -36,9 +39,7 @@ mutations = [
 env = os.environ.copy()
 apply_only = os.environ.get('MUTATION_APPLY_ONLY') == '1'
 def check_mutation(name, before, after, test, original, mutated, test_package='internal/deployment', expect=None):
-    if original.count(before) != 1:
-        raise SystemExit('FAIL ' + name + ': mutation target is not unique')
-    mutated.write_text(original.replace(before, after, 1))
+    mutated.write_text(mutation_edit(name, original, before, after, src=str(mutated.relative_to(work / "tree"))))
     try:
         if apply_only:
             print('ok   ' + name + ': applies', flush=True)
@@ -68,6 +69,37 @@ def check_mutation(name, before, after, test, original, mutated, test_package='i
         mutated.write_text(original)
 for name, before, after, test in mutations:
     check_mutation(name, before, after, test, source, target)
+# The registry one discover compares with is bounded, so the answer stays
+# within what the CLI reads whole: each guard, and the count it depends on,
+# must fail TestDiscoverBoundsTheRegistryItCompares or the oversized-carrier test.
+discover_source = (root / 'internal/deployment/discover.go').read_text()
+discover_target = work / 'tree/internal/deployment/discover.go'
+count_block = (root / 'internal/deployment/discover.go').read_text().split('\tvar registered int\n', 1)[1].split('\t// A job whose runner never answered', 1)[0]
+discover_mutations = [
+    ('discover-registry-count-removed', '\tvar registered int\n' + count_block, '', 'TestDiscoverBoundsTheRegistryItCompares'),
+    ('discover-registry-bound-off-by-one', 'if registered > MaxDiscoverCarriers {', 'if registered >= MaxDiscoverCarriers {', 'TestDiscoverBoundsTheRegistryItCompares'),
+    ('discover-apply-bound-removed', 'if len(known) > MaxDiscoverCarriers {', 'if false {', 'TestDiscoverBoundsTheRegistryItCompares'),
+    ('discover-known-path-unbounded', 'if utf8.RuneCountInString(k.path) > maxKnownPath || utf8.RuneCountInString(k.name) > maxKnownName {', 'if utf8.RuneCountInString(k.name) > maxKnownName {', 'TestApplyDiscoverRejectsAnOversizedRegisteredCarrier'),
+    ('discover-known-name-unbounded', 'if utf8.RuneCountInString(k.path) > maxKnownPath || utf8.RuneCountInString(k.name) > maxKnownName {', 'if utf8.RuneCountInString(k.path) > maxKnownPath {', 'TestApplyDiscoverRejectsAnOversizedRegisteredCarrier'),
+    # Counting bytes would blind discovery to a validly registered carrier.
+    ('discover-known-limits-in-bytes', 'if utf8.RuneCountInString(k.path) > maxKnownPath || utf8.RuneCountInString(k.name) > maxKnownName {', 'if len(k.path) > maxKnownPath || utf8.RuneCountInString(k.name) > maxKnownName {', 'TestApplyDiscoverRejectsAnOversizedRegisteredCarrier'),
+    # Two carriers at one place are one line, not a failed discover.
+    ('discover-lines-not-deduplicated', 'if seen[key] {', 'if false {', 'TestApplyDiscoverStoresEveryLineTheContractAllows'),
+    ('discover-known-limits-narrowed', 'maxKnownPath = 4096', 'maxKnownPath = 1024', 'TestApplyDiscoverRejectsAnOversizedRegisteredCarrier'),
+    # A registered mcp-config field is deploy's JSON path; a scan names the env key.
+    ('discover-mcp-name-unmapped', 'return m[1]', 'return field', 'TestApplyDiscoverMatchesAnMCPConfigCarrierByItsVariable'),
+    ('discover-mcp-scan-name-dropped', 'k.scanName = scanNameOf(kind, k.name)', 'k.scanName = k.name', 'TestApplyDiscoverMatchesAnMCPConfigCarrierByItsVariable'),
+    ('discover-mcp-kind-ignored', 'if kind == string(runnerproto.TargetMCPConfig) {', 'if true {', 'TestApplyDiscoverMatchesAnMCPConfigCarrierByItsVariable'),
+    ('discover-mcp-absence-by-field', 'if !seen[k.path+"\\x00"+k.scanName] {', 'if !seen[k.path+"\\x00"+k.name] {', 'TestApplyDiscoverMatchesAnMCPConfigCarrierByItsVariable'),
+    ('discover-mcp-field-unanchored-start', '`^mcpServers', '`mcpServers', 'TestDiscoverNameOfARegisteredField'),
+    ('discover-mcp-field-unanchored-end', '{0,127})$`)', '{0,127})`)', 'TestDiscoverNameOfARegisteredField'),
+    ('discover-mcp-malformed-kept-whole', '\t\treturn ""\n\t}\n\treturn field', '\t}\n\treturn field', 'TestApplyDiscoverMalformedMCPFieldMatchesNothing'),
+    # A finding and an absent carrier at one path and name are two lines.
+    ('discover-observation-side-dropped', 'side = "absent"', 'side = "found"', 'TestApplyDiscoverMalformedMCPFieldMatchesNothing'),
+    ('discover-mcp-server-part-loosened', '`^mcpServers\\.[A-Za-z0-9_-]+\\.env', '`^mcpServers\\..+\\.env', 'TestDiscoverNameOfARegisteredField'),
+]
+for name, before, after, test in discover_mutations:
+    check_mutation(name, before, after, test, discover_source, discover_target)
 policy_file = 'internal/deployment/policy.go'
 check_mutation('secret-template-binding', 'if rule.SecretID != secretID {', 'if false {',
                'TestReviewSecretPolicyIsolation', (root / policy_file).read_text(),

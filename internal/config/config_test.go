@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCatalogLimitFromEnv(t *testing.T) {
 	t.Setenv("KEEP_DATABASE_URL", "postgres://keep@127.0.0.1/keep")
@@ -39,5 +42,41 @@ func TestTrustedProxiesFromEnv(t *testing.T) {
 		if _, err := FromEnv(); err == nil {
 			t.Fatalf("%q was accepted", bad)
 		}
+	}
+}
+
+// KEEP_RESTART_LANES is the restart allowlist: unset or blank is no lane at
+// all (the queue refuses every request), set is exactly the names listed, and
+// a malformed name stops the start with an error that does not repeat it.
+func TestRestartLanesFromEnv(t *testing.T) {
+	t.Setenv("KEEP_DATABASE_URL", "postgres://keep@127.0.0.1/keep")
+	c, err := FromEnv()
+	if err != nil || c.RestartLanes != nil {
+		t.Fatalf("unset: %q %v", c.RestartLanes, err)
+	}
+	for _, blank := range []string{"", "  "} {
+		t.Setenv("KEEP_RESTART_LANES", blank)
+		if c, err = FromEnv(); err != nil || c.RestartLanes != nil {
+			t.Fatalf("blank %q: %q %v", blank, c.RestartLanes, err)
+		}
+	}
+	t.Setenv("KEEP_RESTART_LANES", " worker, other_2 ,w-3")
+	if c, err = FromEnv(); err != nil || strings.Join(c.RestartLanes, "|") != "worker|other_2|w-3" {
+		t.Fatalf("set: %q %v", c.RestartLanes, err)
+	}
+	long := "w" + strings.Repeat("x", 32)
+	for _, bad := range []string{"worker,", ",worker", "worker,,other", "worker;x", "work er", "2worker", "-worker", "../worker", "wörker", long} {
+		t.Setenv("KEEP_RESTART_LANES", bad)
+		_, err := FromEnv()
+		if err == nil {
+			t.Fatalf("%q was accepted", bad)
+		}
+		if !strings.Contains(err.Error(), "KEEP_RESTART_LANES") || strings.Contains(err.Error(), "worker") || strings.Contains(err.Error(), "xxxx") {
+			t.Fatalf("%q: error does not name the variable or repeats the value: %v", bad, err)
+		}
+	}
+	t.Setenv("KEEP_RESTART_LANES", "w"+strings.Repeat("x", 31))
+	if _, err := FromEnv(); err != nil {
+		t.Fatalf("a 32-character name was refused: %v", err)
 	}
 }

@@ -43,7 +43,7 @@ func TestCreateRefMetadataValidation(t *testing.T) {
 			}
 		}
 		base := CreateRefInput{Org: f.org.ID, Scope: tenancy.Org(f.org.ID), StoreID: store.ID,
-			Name: "safe-" + field, Class: "credential", Type: "generic", ProviderRef: "builtin://default/test"}
+			Name: "safe-" + field, Class: "credential", Type: "generic", ProviderRef: "builtin://default/test-" + field}
 		// Rune limits must permit multibyte, printable text right at the boundary.
 		valid := base
 		set(&valid, strings.Repeat("界", limit))

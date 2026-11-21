@@ -65,6 +65,14 @@ Caddy); `KEEP_PUBLIC_URL` is the https URL clients use through it. The
 server's own TLS listener (`8443`) uses the certificate named by
 `KEEP_SERVER_TLS_CERT_FILE` and `KEEP_SERVER_TLS_KEY_FILE`.
 
+### Lane restart allowlist
+
+`KEEP_RESTART_LANES` lists the lanes the [restart queue](restart-queue.md)
+accepts requests for, comma-separated (for example `worker,other`). It has no
+default: unset or empty, every restart request is refused and the start logs
+one line naming the variable. Set it before an image that reads it is rolled
+out; an older image ignores it.
+
 ### The proxy must name the client
 
 The Mesh calls that are not yet authenticated (`POST /mesh/events`, the signed

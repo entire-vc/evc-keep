@@ -7,7 +7,7 @@ class Controls(unittest.TestCase):
  def exercise(self,mode,unknown=False,unset_database=False):
   with tempfile.TemporaryDirectory() as td:
    p=pathlib.Path(td);r=p/'repo';(r/'scripts/lib').mkdir(parents=True);(r/'cmd/keep').mkdir(parents=True)
-   for n in ['mutation-helpers.sh','temp-workspace.sh','lib/gocache.sh','cli-mutation-witnesses.sh']:shutil.copy2(ROOT/'scripts'/n,r/'scripts'/n)
+   for n in ['mutation-helpers.sh','temp-workspace.sh','lib/gocache.sh','lib/mutation_edit.py','lib/mutation_snapshot.py','cli-mutation-witnesses.sh']:shutil.copy2(ROOT/'scripts'/n,r/'scripts'/n)
    (r/'go.mod').write_text('module fixture\n')
    (r/'cmd/keep/client.go').write_text('if strings.EqualFold(k, "Authorization") {\n')
    (r/'cmd/keep/output.go').write_text('w.Write(escapeJSONControls(buf.Bytes()))\n')
@@ -58,8 +58,9 @@ sys.exit(1)
  def test_missing_database_fails_before_go(self):
   x,record=self.exercise('red',unset_database=True);self.assertNotEqual(x.returncode,0);self.assertEqual(record,[])
  def test_unchanged_baseline_failure_fails(self):self.assertNotEqual(self.exercise('baseline_failure')[0].returncode,0)
- def test_all_106_map_to_existing_tests_and_no_inventory_edits(self):
+ def test_all_127_map_to_existing_tests_and_no_inventory_edits(self):
   new=(ROOT/'scripts/check-keep-cli-mutations.sh').read_text()
+  new=re.sub(r'^(?:MUTATION_OCCURRENCE2?=\d+ )+', '', new, flags=re.M)
   # Frozen 67-mutant inventory, metadata controls and full baseline from 52cb6cdc,
   # plus the apply-only exit before the baseline (scripts/mutation-helpers.sh),
   # plus the two non-regular token file mutants added for --token-file FIFOs,
@@ -82,10 +83,17 @@ sys.exit(1)
   # runner-server-ca-path-echoed re-anchored from the removed os.ReadFile branch of runner.go to the open-error branch of server_ca_read.go (same witness, same count);
   # plus the four shared-client response cap mutants (unbounded read, size check removed, off-by-one, missing extra byte);
   # debug-traces-response-body is re-anchored on the capped read line,
+  # the four cap mutants and that one follow the read to doEndpointMax's per-call limit (same names, same count),
   # plus runner-policy-error-echoed now echoing the -policy path (readPolicyFile's error is already static).
   # deploy-approval-url-unchecked re-anchored on approvalScheme(base), plus three approval scheme metadata mutants (https only, either scheme, loopback predicate dropped).
-  self.assertEqual(hashlib.sha256(new.split('# AC red run (1):')[1].encode()).hexdigest(),'1608eeaa227a3fcef73a243d5c1fb320b3175f5effbf728577532f56cb791b3a')
-  names=re.findall(r'^mutate ([a-z0-9-]+) ',new,re.M);self.assertEqual(len(names),106)
+  # plus eighteen keep carriers discover mutants: eleven page-contract checks, later pages skipped, a pending first page, the first answer's status, and length in JSON, table and help.
+  # discover-first-page-offset-accepted re-anchored on the offset term of the first-page guard (same witness, same count).
+  # plus discover-first-page-empty-accepted: an empty first page of a report with lines.
+  # discover-first-page-pending-lines witnessed by a pending 202 / failed and expired 200 answer with lines (same count).
+  # plus the two discover --json escape mutants (header and finding lines written without escapeJSONControls).
+  # Compound edits use the shared literal editor; explicit occurrence metadata preserves the inventory.
+  self.assertEqual(hashlib.sha256(new.split('# AC red run (1):')[1].encode()).hexdigest(),'963e31f06dc350e85db9a02f01c61f90a0f468cce7860fff6355f68cb16c38a9')
+  names=re.findall(r'^mutate ([a-z0-9-]+) ',new,re.M);self.assertEqual(len(names),127)
   tests=set()
   for f in (ROOT/'cmd/keep').glob('*test.go'):tests.update(re.findall(r'^func (Test[A-Za-z0-9_]+)\(',f.read_text(),re.M))
   for n in names:

@@ -261,7 +261,7 @@ func classifyErr(err error) audit.ErrorClass {
 		return audit.ErrClassInvalidArgument
 	case apperr.ClassNotFound, apperr.ClassSecretNotFound:
 		return audit.ErrClassNotFound
-	case apperr.ClassOverrideLocked, apperr.ClassNoStoreBound:
+	case apperr.ClassOverrideLocked, apperr.ClassNoStoreBound, apperr.ClassProviderRefInUse:
 		return audit.ErrClassPolicyDenied
 	default:
 		return audit.ErrClassInternal

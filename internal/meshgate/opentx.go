@@ -15,7 +15,7 @@ import (
 // yet.
 type Request struct {
 	Org, Approval uuid.UUID
-	Kind          string // deploy, exec or rotate
+	Kind          string // deploy, exec, rotate or adopt
 	SecretName    string
 	Class         string
 	RequestID     string
@@ -29,6 +29,9 @@ type TxStore interface {
 	// WorkspacesOfTx lists the Mesh workspaces installed for org as an
 	// extension: a store-only workspace has no Keep extension to answer a card.
 	WorkspacesOfTx(ctx context.Context, tx pgx.Tx, org uuid.UUID) ([]uuid.UUID, error)
+	// ApprovalsViaMeshTx is the workspace setting approvals_via_mesh as Mesh
+	// last sent it, true when Mesh never sent it (the manifest default).
+	ApprovalsViaMeshTx(ctx context.Context, tx pgx.Tx, workspace uuid.UUID) (bool, error)
 	InsertTx(ctx context.Context, tx pgx.Tx, g Gate) error
 }
 
@@ -37,6 +40,10 @@ type TxStore interface {
 // commits. An error means no card is left to answer: the caller rolls back and
 // no approval exists. The returned undo closes the card when the commit itself
 // then fails.
+//
+// A workspace whose setting approvals_via_mesh is false gets no card: OpenTx
+// returns a nil undo and no error, and the approval stays an ordinary Keep
+// approval, decided in Keep's console.
 func (s *Service) OpenTx(ctx context.Context, tx pgx.Tx, r Request) (undo func(context.Context), err error) {
 	ts, ok := s.store.(TxStore)
 	if s.cards == nil || !ok {
@@ -51,6 +58,13 @@ func (s *Service) OpenTx(ctx context.Context, tx pgx.Tx, r Request) (undo func(c
 		// installation leaves nobody to ask, and several leave Keep guessing
 		// which workspace to ask: either way no approval is made.
 		return nil, ErrUnavailable
+	}
+	on, err := ts.ApprovalsViaMeshTx(ctx, tx, ws[0])
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	if !on {
+		return nil, nil
 	}
 	a := Approval{ID: r.Approval, Status: "requested", BindingHash: hex.EncodeToString(r.BindingHash[:]), ExpiresAt: r.ExpiresAt,
 		SecretName: r.SecretName, Class: r.Class, Kind: r.Kind, RequestID: r.RequestID}

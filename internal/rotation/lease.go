@@ -69,3 +69,23 @@ func preparedFrom(ctx context.Context) (Version, bool) {
 	v, ok := ctx.Value(preparedKey{}).(Version)
 	return v, ok
 }
+
+type rollbackKey struct{}
+
+func withRollback(ctx context.Context) context.Context { return WithRollback(ctx) }
+
+// WithRollback marks ctx as the rollback of a failed run. The engine sets it on
+// every Deploy and Verify of a rollback; it is exported so a collaborator's own
+// tests can build the same call.
+func WithRollback(ctx context.Context) context.Context {
+	return context.WithValue(ctx, rollbackKey{}, true)
+}
+
+// IsRollback reports that a Deploy or Verify is part of the rollback of a
+// failed run: the carrier is put back on, and checked against, the old version.
+// A collaborator that derives request ids from the run and the carrier must
+// keep these apart from the layout's.
+func IsRollback(ctx context.Context) bool {
+	v, _ := ctx.Value(rollbackKey{}).(bool)
+	return v
+}

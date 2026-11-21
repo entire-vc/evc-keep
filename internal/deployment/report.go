@@ -23,6 +23,7 @@ type Report struct {
 	// SecretID and VersionID are the catalog ids the request was pinned to,
 	// so a retry of the same request id replays against the same version.
 	SecretID, VersionID uuid.UUID
+	JobID               uuid.UUID
 	// Done is true once the runner reported a terminal result.
 	Done   bool
 	Result runnerproto.Result
@@ -32,6 +33,16 @@ type Report struct {
 // organization never created is ErrNotFound, indistinguishable from another
 // organization's.
 func (r *Repo) Report(ctx context.Context, org uuid.UUID, requestID string) (Report, error) {
+	return r.report(ctx, org, requestID, false)
+}
+
+// AdoptionReport is deliberately separate from the deployment surface: an
+// accepted read-only attestation must never appear as a completed deployment.
+func (r *Repo) AdoptionReport(ctx context.Context, org uuid.UUID, requestID string) (Report, error) {
+	return r.report(ctx, org, requestID, true)
+}
+
+func (r *Repo) report(ctx context.Context, org uuid.UUID, requestID string, adoption bool) (Report, error) {
 	if r == nil || r.pool == nil {
 		return Report{}, ErrUnavailable
 	}
@@ -41,8 +52,8 @@ func (r *Repo) Report(ctx context.Context, org uuid.UUID, requestID string) (Rep
 	var out Report
 	var reqUUID uuid.UUID
 	var level string
-	err := r.pool.QueryRow(ctx, `SELECT id,decision,secret_scope_level,secret_scope_id,secret_id,version_id FROM deployment_requests r WHERE r.org_id=$1 AND r.request_id=$2
-	 AND NOT EXISTS (SELECT 1 FROM deployment_jobs j WHERE j.org_id=r.org_id AND j.deployment_request_id=r.id AND j.action='verify')`, org, requestID).Scan(&reqUUID, &out.Status, &level, &out.Scope.ID, &out.SecretID, &out.VersionID)
+	err := r.pool.QueryRow(ctx, `SELECT id,decision,secret_scope_level,secret_scope_id,secret_id,version_id FROM deployment_requests r WHERE r.org_id=$1 AND r.request_id=$2 AND r.adoption=$3
+	 AND NOT EXISTS (SELECT 1 FROM deployment_jobs j WHERE j.org_id=r.org_id AND j.deployment_request_id=r.id AND j.action='verify')`, org, requestID, adoption).Scan(&reqUUID, &out.Status, &level, &out.Scope.ID, &out.SecretID, &out.VersionID)
 	out.Scope.Level = tenancy.Level(level)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Report{}, ErrNotFound
@@ -70,7 +81,7 @@ func (r *Repo) Report(ctx context.Context, org uuid.UUID, requestID string) (Rep
 func (r *Repo) readJob(ctx context.Context, org, reqUUID uuid.UUID, out *Report) error {
 	var state string
 	var stored []byte
-	err := r.pool.QueryRow(ctx, `SELECT status,result FROM deployment_jobs WHERE org_id=$1 AND deployment_request_id=$2`, org, reqUUID).Scan(&state, &stored)
+	err := r.pool.QueryRow(ctx, `SELECT id,status,result FROM deployment_jobs WHERE org_id=$1 AND deployment_request_id=$2`, org, reqUUID).Scan(&out.JobID, &state, &stored)
 	if err != nil {
 		return err
 	}

@@ -67,7 +67,7 @@ func OwnerOf(t runnerproto.Target, agentUIDs, agentGIDs []int64) (uid int64, exi
 // function, only its fingerprint.
 func Observe(t runnerproto.Target, owner int64, agentUIDs, agentGIDs []int64, fpKey fingerprint.Key) (fp string, found bool, err error) {
 	h, ok := kindHandlers[t.Kind]
-	if !ok {
+	if !ok && t.Kind != runnerproto.TargetYAMLScalar {
 		return "", false, denied("unknown target kind")
 	}
 	ag := agentSet{uids: agentUIDs, gids: agentGIDs}
@@ -87,6 +87,13 @@ func Observe(t runnerproto.Target, owner int64, agentUIDs, agentGIDs []int64, fp
 		return "", false, nil
 	}
 	defer wipe(content)
+	if t.Kind == runnerproto.TargetYAMLScalar {
+		out, err := FingerprintYAML(content, []string{t.Field}, fpKey)
+		if err != nil || len(out) == 0 {
+			return "", false, err
+		}
+		return out[0].Fingerprint, true, nil
+	}
 	v, err := h.readBack(content, t)
 	if err != nil {
 		// An untrusted decrypt tool is a policy refusal, not a mismatch. Any

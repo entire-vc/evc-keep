@@ -48,3 +48,11 @@ func alreadyBoundError() *apperr.Error {
 func duplicateNameError() *apperr.Error {
 	return apperr.New(apperr.ClassAlreadyExists, "a secret with this name already exists at this scope")
 }
+
+// providerRefInUseError is CreateRef's answer when another secret in the
+// chosen store, active or disabled, already uses the provider reference
+// (index secrets_provider_ref_per_store). It names neither the reference nor
+// the secret holding it: the caller already knows the reference it sent.
+func providerRefInUseError() *apperr.Error {
+	return apperr.New(apperr.ClassProviderRefInUse, "this provider reference is already in use in this store")
+}

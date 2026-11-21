@@ -38,17 +38,14 @@ if [ "$mutation_index" -eq 1 ] && ! mutation_apply_only; then
 	fi
 fi
 
-# mutate NAME FILE TEST FROM TO [N]: replace the Nth (default first) literal
+# mutate NAME FILE TEST FROM TO [N]: replace the Nth (required if ambiguous) literal
 # occurrence of FROM with TO in FILE; TEST must be among the failing tests.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
-	name=$1 file=$dir/$2 test=$3 from=$4 to=$5 nth=${6:-1}
-	rm -rf "$work/tree"
+	name=$1 file=$dir/$2 test=$3 from=$4 to=$5 nth=${6:-${mutation_occurrence:-}}
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" -v nth="$nth" '
-		!done && (i = index($0, from)) && ++seen == nth { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$file" >"$work/tree/$file"; then
+	if ! mutation_edit "$root/$file" "$from" "$to" "$nth" >"$work/tree/$file"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -61,22 +58,20 @@ mutate() {
 		exit 1
 	elif ! grep -q -- "--- FAIL: $test" "$work/out"; then
 		echo "FAIL $name: $test did not fail (build error or wrong test?):"
-		head -20 "$work/out"
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "ok   $name: $test went red"
 	fi
 }
 
-# apply1 FILE FROM TO: like mutate's single replacement, but writes straight
+# apply1 FILE FROM TO [N]: like mutate's single replacement, but writes straight
 # into $work/tree (already checked out) instead of building a fresh copy —
 # used by mutate2 to stack two independent replacements before testing.
 apply1() {
 	file=$dir/$1 from=$2 to=$3
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$work/tree/$file" >"$work/tree/$file.new"; then
+	if ! mutation_edit "$work/tree/$file" "$from" "$to" "${4:-}" >"$work/tree/$file.new"; then
 		return 1
 	fi
 	mv "$work/tree/$file.new" "$work/tree/$file"
@@ -88,11 +83,11 @@ apply1() {
 # the other still catching it (itself a good sign, not a gap: proving that
 # needs both switched off together).
 mutate2() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 test=$2 file1=$3 from1=$4 to1=$5 file2=$6 from2=$7 to2=$8
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! apply1 "$file1" "$from1" "$to1" || ! apply1 "$file2" "$from2" "$to2"; then
+	if ! apply1 "$file1" "$from1" "$to1" "${mutation_occurrence:-}" || ! apply1 "$file2" "$from2" "$to2" "${mutation_occurrence2:-}"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -105,30 +100,31 @@ mutate2() {
 		exit 1
 	elif ! grep -q -- "--- FAIL: $test" "$work/out"; then
 		echo "FAIL $name: $test did not fail (build error or wrong test?):"
-		head -20 "$work/out"
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "ok   $name: $test went red"
 	fi
 }
 
-# mutateN NAME TEST FILE FROM TO [FILE FROM TO ...]: switches off several
+# mutateN NAME TEST FILE FROM TO N [FILE FROM TO N ...]: switches off several
 # independent things at once and requires TEST to go red — for a property
 # that redundant layers all catch (only all together prove any of them), or
 # a mutant that needs a helper declared alongside the change.
 mutateN() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 test=$2
 	shift 2
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	while [ $# -gt 0 ]; do
-		if ! apply1 "$1" "$2" "$3"; then
+		if ! apply1 "$1" "$2" "$3" "$4"; then
 			echo "FAIL $name: mutation did not apply — the source changed, update this script"
 			fail=1
 			return
 		fi
-		shift 3
+		shift 4
 	done
 	mutation_applied "$name" && return
 	if (cd "$work/tree" && go test -timeout 600s -count=1 ${RACE:+-race} -run "^${test}\$" ./$dir/... >"$work/out" 2>&1); then
@@ -138,7 +134,8 @@ mutateN() {
 		exit 1
 	elif ! grep -q -- "--- FAIL: $test" "$work/out"; then
 		echo "FAIL $name: $test did not fail (build error or wrong test?):"
-		head -20 "$work/out"
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "ok   $name: $test went red"
@@ -153,14 +150,11 @@ mutateN() {
 # the mutation cannot be applied. This is the positive-control counterpart
 # to a mutateN that switches both off together and expects red.
 assert_still_green() {
+	mutation_take_occurrences
 	mutation_selected || return 0
-	name=$1 file=$dir/$2 test=$3 from=$4 to=$5 nth=${6:-1}
-	rm -rf "$work/tree"
+	name=$1 file=$dir/$2 test=$3 from=$4 to=$5 nth=${6:-${mutation_occurrence:-}}
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" -v nth="$nth" '
-		!done && (i = index($0, from)) && ++seen == nth { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$file" >"$work/tree/$file"; then
+	if ! mutation_edit "$root/$file" "$from" "$to" "$nth" >"$work/tree/$file"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -174,16 +168,19 @@ assert_still_green() {
 			echo "ok   $name: $test stayed green with only that layer off (the deeper layer caught it)"
 		else
 			echo "FAIL $name: exit 0 but $test never ran (typo'd test name or nothing matched -run):"
-			head -20 "$work/out"
+			"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+				echo "FAIL diagnostics: test-result-names.sh exited $?"
 			fail=1
 		fi
 	elif grep -q -- "--- FAIL: $test" "$work/out"; then
 		echo "FAIL $name: $test went red with only one layer off — the layers are not independent:"
-		head -20 "$work/out"
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "FAIL $name: $test did not fail cleanly (build error or wrong test?):"
-		head -20 "$work/out"
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	fi
 }
@@ -240,9 +237,9 @@ mutate no-symlink-target-check securewrite_unix.go TestSymlinkedTargetContentNot
 # implementation that kept the path around would use): after the directory is
 # swapped for a symlink, the rename no longer finds the temporary file.
 mutateN rename-by-path TestParentDirSwappedForSymlinkAfterWalkWritesToWalkedDir \
-	securewrite_unix.go 'unix.Renameat(parentFD, tmp, parentFD, base)' 'unix.Rename(mutantDir+"/"+tmp, mutantDir+"/"+base)' \
-	securewrite_unix.go 'segs := strings.Split(absPath[1:], "/")' 'mutantDir = path.Dir(absPath); segs := strings.Split(absPath[1:], "/")' \
-	securewrite_unix.go 'var fsyncFD = unix.Fsync' 'var fsyncFD = unix.Fsync; var mutantDir string'
+	securewrite_unix.go 'unix.Renameat(parentFD, tmp, parentFD, base)' 'unix.Rename(mutantDir+"/"+tmp, mutantDir+"/"+base)' '' \
+	securewrite_unix.go 'segs := strings.Split(absPath[1:], "/")' 'mutantDir = path.Dir(absPath); segs := strings.Split(absPath[1:], "/")' '' \
+	securewrite_unix.go 'var fsyncFD = unix.Fsync' 'var fsyncFD = unix.Fsync; var mutantDir string' ''
 # ".." is refused three times over: pkg/runnerproto.ValidatePath (proven by
 # that package's own mutation script), and, inside walkToParent itself,
 # once syntactically up front and once again per path segment during the
@@ -285,8 +282,8 @@ mutate no-fchown             securewrite_unix.go TestWriteAppliesOwnerGroupAndMo
 mutate no-fchmod             securewrite_unix.go TestFileTargetModeAndOwnerApplied \
 	'if err := unix.Fchmod(fd, mode); err != nil {' 'if err := error(nil); err != nil {'
 mutateN no-owner-apply-or-verify TestWriteAppliesOwnerGroupAndMode \
-	securewrite_unix.go 'if err := unix.Fchown(fd, int(uid), int(gid)); err != nil {' 'if err := error(nil); err != nil {' \
-	securewrite_unix.go 'case int64(st.Uid) != uid:' 'case false:'
+	securewrite_unix.go 'if err := unix.Fchown(fd, int(uid), int(gid)); err != nil {' 'if err := error(nil); err != nil {' '' \
+	securewrite_unix.go 'case int64(st.Uid) != uid:' 'case false:' ''
 
 # Write validates the target's own fields before touching anything.
 mutate no-target-validate    write.go TestWriteRejectsXMLInjectionInLaunchdField \
@@ -296,9 +293,9 @@ mutate no-target-validate-env write.go TestWriteRejectsNewlineInEnvFileField \
 
 # Agent-reach defense: a directory an agent can write or read/traverse, or
 # a target mode/owner an agent could read, must be refused.
-mutate no-agent-write-group agents.go TestAgentWritableDirRefused \
+MUTATION_OCCURRENCE=1 mutate no-agent-write-group agents.go TestAgentWritableDirRefused \
 	'mode&0o020 != 0 && a.groupIsAgents(int64(st.Gid))' 'mode&0o020 != 0 && false'
-mutate no-write-anyone      agents.go TestWorldWritableDirRefused \
+MUTATION_OCCURRENCE=1 mutate no-write-anyone      agents.go TestWorldWritableDirRefused \
 	'mode&0o002 != 0 {' 'mode&0o002 != 0 && false {'
 mutate no-agent-read-group  agents.go TestAgentReadableParentDirRefused \
 	'(mode>>3)&dirReachBits != 0 && a.groupIsAgents(int64(st.Gid))' '(mode>>3)&dirReachBits != 0 && false'
@@ -331,13 +328,13 @@ mutate no-read-loop-size-bound securewrite_unix.go TestReadAllFDBoundedIndepende
 
 # Directory ownership has two call sites; each is proven by its own test on the
 # function, sticky and not, and end to end by a real directory.
-mutate no-owned-dir-writable agents.go TestAgentOwnedDirRefusedByRefuseWritable \
+MUTATION_OCCURRENCE=1 mutate no-owned-dir-writable agents.go TestAgentOwnedDirRefusedByRefuseWritable \
 	'if a.hasUID(int64(st.Uid)) {' 'if false {'
 mutate no-owned-dir-reachable agents.go TestAgentOwnedDirRefusedByRefuseReachable \
 	'if a.hasUID(int64(st.Uid)) {' 'if false {' 2
 mutateN no-owned-dir-both TestWriteThroughAgentOwnedParentRefused \
-	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {' \
-	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {'
+	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {' 1 \
+	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {' 1
 
 # Directory descriptor hygiene: every descriptor walkToParent opens, and the
 # one Write itself holds for the walked parent, must be closed by the time
@@ -363,9 +360,9 @@ mutate no-fsync-check       securewrite_unix.go TestFsyncFailureLeavesOldContent
 # change.
 mutate envfile-newline-ok   envfile.go TestEnvFileRejectsNewlineInValue \
 	'bytes.IndexByte(val, envForbiddenLF) >= 0' 'false'
-mutate envfile-wrong-line   envfile.go TestEnvFileNeighboringLinesByteIdentical \
+MUTATION_OCCURRENCE=1 mutate envfile-wrong-line   envfile.go TestEnvFileNeighboringLinesByteIdentical \
 	'prefix := append([]byte(t.Field), '"'"'='"'"')' 'prefix := []byte("zzWrongFieldzz=")'
-mutate envfile-duplicate-ok envfile.go TestEnvFileDuplicateLineRefused \
+MUTATION_OCCURRENCE=1 mutate envfile-duplicate-ok envfile.go TestEnvFileDuplicateLineRefused \
 	'if foundAt >= 0 {' 'if false {'
 
 # launchd-env: only edits an existing plist's existing EnvironmentVariables
@@ -381,7 +378,14 @@ mutate launchd-no-key-check    launchd.go TestLaunchdEnvNoEnvironmentVariablesKe
 for t in TestTargetsAttack_PlistDecoyInCDATA TestLaunchdEnvDecoysAheadOfTheRealKeyIgnored TestLaunchdEnvKeyInsideCommentBeforeRealKeyRefused; do
 	mutate "launchd-byte-search/$t" launchd.go "$t" \
 		'func locateEnvDict(plist []byte, field string) (envLoc, error) {' \
-		'func locateEnvDict(plist []byte, field string) (envLoc, error) {\n\tif i := bytes.Index(plist, []byte("<key>EnvironmentVariables</key>")); i >= 0 {\n\t\tj := bytes.Index(plist[i:], []byte("<dict>"))\n\t\tk := bytes.Index(plist[i+j:], []byte("</dict>"))\n\t\tif j >= 0 && k >= 0 {\n\t\t\treturn envLoc{start: i + j + 6, end: i + j + k}, nil\n\t\t}\n\t}'
+		'func locateEnvDict(plist []byte, field string) (envLoc, error) {
+	if i := bytes.Index(plist, []byte("<key>EnvironmentVariables</key>")); i >= 0 {
+		j := bytes.Index(plist[i:], []byte("<dict>"))
+		k := bytes.Index(plist[i+j:], []byte("</dict>"))
+		if j >= 0 && k >= 0 {
+			return envLoc{start: i + j + 6, end: i + j + k}, nil
+		}
+	}'
 done
 # An empty <dict/> is not "the next <dict> in the file" (that one is another
 # key's), and a key not followed by a dict is refused.
@@ -390,23 +394,23 @@ mutate launchd-empty-dict-ok   launchd.go TestLaunchdEnvEmptyDictNotSpilledIntoN
 # Two layers refuse a key followed by a scalar: the name check and the
 # character-data check inside what would be the dict; both go off.
 mutateN launchd-not-followed-by-dict TestLaunchdEnvKeyFollowedByStringRefused \
-	launchd.go 'if name != "dict" {' 'if false {' \
-	launchd.go 'case inEnv && len(stack) == 3 && !isBlank(t):' 'case false:'
+	launchd.go 'if name != "dict" {' 'if false {' '' \
+	launchd.go 'case inEnv && len(stack) == 3 && !isBlank(t):' 'case false:' ''
 mutate launchd-comment-ok      launchd.go TestLaunchdEnvCommentInsideDictRefused \
 	'if inEnv {' 'if false {'
 # A nested container is refused by three independent layers (the depth check,
 # the dict/array case, the unknown-element default); all three go off.
 mutateN launchd-nested-container-ok TestLaunchdEnvNestedContainerRefused \
-	launchd.go 'case n > 4:' 'case false:' \
-	launchd.go 'case name == "dict" || name == "array":' 'case false:' \
-	launchd.go 'return envLoc{}, writeFailed("EnvironmentVariables dict holds an unknown element; not supported")' 'break'
+	launchd.go 'case n > 4:' 'case false:' '' \
+	launchd.go 'case name == "dict" || name == "array":' 'case false:' '' \
+	launchd.go 'return envLoc{}, writeFailed("EnvironmentVariables dict holds an unknown element; not supported")' 'break' ''
 # An unclosed or mismatched element is refused three ways over (the mismatch
 # check, the open-element check at the end, the "no dict found" check); all
 # three go off.
 mutateN launchd-unclosed TestLaunchdEnvUnclosedRefused \
-	launchd.go 'stack[n-1] != t.Name.Local {' 'false {' \
-	launchd.go 'if len(stack) != 0 {' 'if false {' \
-	launchd.go 'if !done {' 'if false {'
+	launchd.go 'stack[n-1] != t.Name.Local {' 'false {' '' \
+	launchd.go 'if len(stack) != 0 {' 'if false {' '' \
+	launchd.go 'if !done {' 'if false {' ''
 mutate launchd-non-string-ok   launchd.go TestLaunchdEnvExistingNonStringEntryRefused \
 	'if name != "string" {' 'if false {'
 mutate launchd-duplicate-ok    launchd.go TestLaunchdEnvDuplicateEntryRefused \
@@ -426,7 +430,7 @@ mutate open-existing-blocking  securewrite_unix.go TestFIFOAtTargetDoesNotBlockW
 
 # JSON targets: the decoder's own message quotes the input, and a document
 # after the first would be dropped by the re-encode.
-mutate json-error-verbatim     jsonpath.go TestJSONPathMalformedExistingErrorLeaksNothing \
+MUTATION_OCCURRENCE=1 mutate json-error-verbatim     jsonpath.go TestJSONPathMalformedExistingErrorLeaksNothing \
 	'return nil, writeFailed("%s", jsonErrClass(err))' 'return nil, writeFailed("%v", err)'
 mutate json-trailing-ok        jsonpath.go TestJSONPathTrailingDataRefused \
 	'if _, err := dec.Token(); !errors.Is(err, io.EOF) {' 'if _, err := dec.Token(); false && !errors.Is(err, io.EOF) {'
@@ -444,8 +448,8 @@ mutate json-trailing-error-verbatim jsonpath.go TestJSONPathTrailingGarbageError
 assert_still_green json-null-early-off-alone jsonpath.go TestJSONTopLevelNullRefused \
 	'if doc == nil {' 'if false {' 1
 mutateN json-null-both-off TestJSONTopLevelNullRefused \
-	jsonpath.go 'if doc == nil {' 'if false {' \
-	jsonpath.go 'if doc == nil {' 'if false {'
+	jsonpath.go 'if doc == nil {' 'if false {' 1 \
+	jsonpath.go 'if doc == nil {' 'if false {' 1
 # Same property, proven again by name for the mcp-config caller
 # (TestJSONPathNullDocumentRefused): TestJSONTopLevelNullRefused exercises
 # the same decodeObject/build() path but is a different test, and a red run
@@ -453,8 +457,8 @@ mutateN json-null-both-off TestJSONTopLevelNullRefused \
 assert_still_green json-null-early-off-alone-mcp jsonpath.go TestJSONPathNullDocumentRefused \
 	'if doc == nil {' 'if false {' 1
 mutateN json-null-both-off-mcp TestJSONPathNullDocumentRefused \
-	jsonpath.go 'if doc == nil {' 'if false {' \
-	jsonpath.go 'if doc == nil {' 'if false {'
+	jsonpath.go 'if doc == nil {' 'if false {' 1 \
+	jsonpath.go 'if doc == nil {' 'if false {' 1
 # build's own encode-error path (the write-side sibling of json-error-verbatim
 # above): encoding/json's error on a malformed json.RawMessage quotes the
 # offending byte straight out of the value. "encode JSON failed" now appears
@@ -468,7 +472,10 @@ mutate json-encode-error-verbatim jsonpath.go TestJSONEncodeErrorLeaksNoByteOfVa
 # systemd-credential: the binary is found at a fixed, ownership-checked path,
 # never on PATH, and runs with a minimal environment.
 mutate systemd-path-lookup     systemdcred.go TestSystemdCredentialsBinaryNotLookedUpOnPATH \
-	'func findSystemdCreds() (path string, present bool, err error) {' 'func findSystemdCreds() (path string, present bool, err error) {\n\tif p, lerr := exec.LookPath("systemd-creds"); lerr == nil {\n\t\treturn p, true, nil\n\t}'
+	'func findSystemdCreds() (path string, present bool, err error) {' 'func findSystemdCreds() (path string, present bool, err error) {
+	if p, lerr := exec.LookPath("systemd-creds"); lerr == nil {
+		return p, true, nil
+	}'
 mutate systemd-env-inherited   systemdcred.go TestSystemdCredentialsChildEnvironmentMinimal \
 	'cmd.Env = childEnv' 'cmd.Env = nil'
 mutate systemd-not-plain-file  systemdcred.go TestSystemdCredentialsUntrustedBinaryRefused \
@@ -489,8 +496,10 @@ mutate systemd-no-name-decrypt systemdcred.go TestSystemdCredentialsChildEnviron
 # comment on runPiped. The mutant also needs the "os" import declared
 # alongside it (systemdcred.go otherwise only imports "os/exec").
 mutateN systemd-stderr-connected TestSystemdCredentialsChildStderrNotConnectedToProcess \
-	systemdcred.go '"os/exec"' '"os"\n\t"os/exec"' \
-	systemdcred.go 'cmd.Dir = "/"' 'cmd.Dir = "/"\n\tcmd.Stderr = os.Stderr'
+	systemdcred.go '"os/exec"' '"os"
+	"os/exec"' '' \
+	systemdcred.go 'cmd.Dir = "/"' 'cmd.Dir = "/"
+	cmd.Stderr = os.Stderr' ''
 
 # The mutant above wires the child's stderr to os.Stderr, the package
 # variable — exactly what TestSystemdCredentialsChildStderrNotConnectedToProcess
@@ -501,8 +510,10 @@ mutateN systemd-stderr-connected TestSystemdCredentialsChildStderrNotConnectedTo
 # TestSystemdCredentialsRealStderrFDNotConnectedToChild exists — it is the
 # only one of the two that catches this mutant.
 mutateN systemd-stderr-real-fd TestSystemdCredentialsRealStderrFDNotConnectedToChild \
-	systemdcred.go '"os/exec"' '"os"\n\t"os/exec"' \
-	systemdcred.go 'cmd.Stdin = bytes.NewReader(stdin)' 'cmd.Stdin = bytes.NewReader(stdin)\n\tcmd.Stderr = os.NewFile(2, "stderr")'
+	systemdcred.go '"os/exec"' '"os"
+	"os/exec"' '' \
+	systemdcred.go 'cmd.Stdin = bytes.NewReader(stdin)' 'cmd.Stdin = bytes.NewReader(stdin)
+	cmd.Stderr = os.NewFile(2, "stderr")' ''
 
 # Linux POSIX ACLs (macOS has its own check, proven by its own tests on a Mac).
 # An access ACL on the directory; a default ACL (inherited by the temporary
@@ -513,8 +524,8 @@ if linux_only linux-acl; then
 	mutate linux-acl-access-parent acl_linux.go TestAccessACLOnParentRefused \
 		'[]string{xattrACLAccess, xattrACLDefault}' '[]string{xattrACLDefault}'
 	mutateN linux-acl-default-parent TestDefaultACLOnParentRefused \
-		acl_linux.go '[]string{xattrACLAccess, xattrACLDefault}' '[]string{xattrACLAccess}' \
-		acl_linux.go 'return denied("file carries an extended ACL")' 'return nil'
+		acl_linux.go '[]string{xattrACLAccess, xattrACLDefault}' '[]string{xattrACLAccess}' '' \
+		acl_linux.go 'return denied("file carries an extended ACL")' 'return nil' ''
 	mutate linux-acl-tmpfile       acl_linux.go TestACLOnTemporaryFileRefused \
 		'return denied("file carries an extended ACL")' 'return nil'
 	mutate linux-acl-fails-open    acl_linux.go TestHasXattrFailsClosed \
@@ -534,8 +545,8 @@ mutate envfile-cr-ok           envfile.go TestEnvFileRejectsNULAndCRInValue \
 mutate envfile-no-quoting      envfile.go TestEnvFileQuotedValuesRoundTrip \
 	'if bare {' 'if bare || true {'
 mutateN envfile-no-quoting-lenient-readback TestTargetsAttack_EnvFileConsumerSeesSameValue \
-	envfile.go 'if bare {' 'if bare || true {' \
-	envfile.go 'return nil, writeFailed("written env-file line is not in the form this package writes")' 'out = append(out, c); i++; continue'
+	envfile.go 'if bare {' 'if bare || true {' '' \
+	envfile.go 'return nil, writeFailed("written env-file line is not in the form this package writes")' 'out = append(out, c); i++; continue' ''
 mutate envfile-quote-not-escaped envfile.go TestEnvFileQuotedValuesRoundTrip \
 	'out = append(out, envEscQuote...)' 'out = append(out, c)'
 mutate envfile-unquote-escaped envfile.go TestEnvFileQuotedValuesRoundTrip \
@@ -583,7 +594,7 @@ mutate tmp-mode-not-checked    securewrite_unix.go TestTemporaryFileModeChangedA
 	'case uint32(st.Mode)&0o7777 != mode:' 'case false:'
 # The two rechecks of the temporary file — before the first byte, and before
 # the rename — are each proven alone.
-mutate tmp-first-recheck-off   securewrite_unix.go TestHardlinkRaceAfterTmpCreateRefused \
+MUTATION_OCCURRENCE=1 mutate tmp-first-recheck-off   securewrite_unix.go TestHardlinkRaceAfterTmpCreateRefused \
 	'if err := checkTmpFile(fd, uid, gid, mode); err != nil {' 'if err := error(nil); err != nil {'
 mutate tmp-second-recheck-off  securewrite_unix.go TestHardlinkAddedDuringWriteRefusedBeforeRename \
 	'if err := checkTmpFile(fd, uid, gid, mode); err != nil {' 'if err := error(nil); err != nil {' 2
@@ -630,17 +641,17 @@ fi
 # Three depth checks each refuse the decoy on their own; the property is proven
 # only with all three switched off together.
 mutateN launchd-nested-key-decoy TestNestedEnvKeyDecoyAhead \
-	launchd.go 'case n == 3 && stack[0] == "plist" && stack[1] == "dict":' 'case n >= 3 && stack[0] == "plist":' \
-	launchd.go 'case inEnv && len(stack) == 4 && stack[3] == "key", !inEnv && len(stack) == 3 && stack[2] == "key":' 'case inEnv && len(stack) == 4 && stack[3] == "key", !inEnv && stack[len(stack)-1] == "key":' \
-	launchd.go 'case !inEnv && n == 3 && name == "key":' 'case !inEnv && name == "key":'
+	launchd.go 'case n == 3 && stack[0] == "plist" && stack[1] == "dict":' 'case n >= 3 && stack[0] == "plist":' '' \
+	launchd.go 'case inEnv && len(stack) == 4 && stack[3] == "key", !inEnv && len(stack) == 3 && stack[2] == "key":' 'case inEnv && len(stack) == 4 && stack[3] == "key", !inEnv && stack[len(stack)-1] == "key":' '' \
+	launchd.go 'case !inEnv && n == 3 && name == "key":' 'case !inEnv && name == "key":' ''
 mutateN launchd-top-key-prefix TestTopKeyMustBeExact \
-	launchd.go '"errors"' '"errors"; "strings"' \
-	launchd.go 'topKey == envVarsKey' 'strings.Contains(topKey, envVarsKey)'
+	launchd.go '"errors"' '"errors"; "strings"' '' \
+	launchd.go 'topKey == envVarsKey' 'strings.Contains(topKey, envVarsKey)' ''
 mutateN launchd-entry-key-prefix TestEntryKeyMustBeExact \
-	launchd.go '"errors"' '"errors"; "strings"' \
-	launchd.go 'if envKey == field {' 'if strings.Contains(envKey, field) {'
+	launchd.go '"errors"' '"errors"; "strings"' '' \
+	launchd.go 'if envKey == field {' 'if strings.Contains(envKey, field) {' ''
 mutate launchd-attr-allowed    launchd.go TestDictShapeRefused 'if len(t.Attr) > 0 {' 'if false {'
-mutate launchd-key-key-ok      launchd.go TestDictShapeRefused 'if envKeyReady {' 'if false {'
+MUTATION_OCCURRENCE=1 mutate launchd-key-key-ok      launchd.go TestDictShapeRefused 'if envKeyReady {' 'if false {'
 mutate launchd-dangling-key-ok launchd.go TestDictShapeRefused 'if envKeyReady {' 'if false {' 2
 mutate launchd-value-no-key-ok launchd.go TestDictShapeRefused 'if !envKeyReady {' 'if false {'
 mutate launchd-markup-ok       launchd.go TestDictShapeRefused 'if inEnv {' 'if false {'
@@ -672,26 +683,26 @@ mutate perm-zero-mode-ok       securewrite_unix.go TestValidateTargetPermDirect 
 mutate tmp-name-constant       securewrite_unix.go TestTmpNameRandom 'rand.Read(b)' 'rand.Read(b[:0])'
 
 # Findings of the independent red-run pass over the second round.
-mutate walk-ancestor-agent-owner agents.go TestWalkAgentOwnedAncestorRefused 'if a.hasUID(int64(st.Uid)) {' 'if false {'
+MUTATION_OCCURRENCE=1 mutate walk-ancestor-agent-owner agents.go TestWalkAgentOwnedAncestorRefused 'if a.hasUID(int64(st.Uid)) {' 'if false {'
 # The parent is checked by two layers that both refuse an agent's ownership;
 # only the pair switched off together proves the property.
 mutateN walk-parent-agent-owner TestWalkToParentRefusals \
-	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {' \
-	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {'
+	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {' 1 \
+	agents.go 'if a.hasUID(int64(st.Uid)) {' 'if false {' 1
 mutate walk-clean-clause-off   securewrite_unix.go TestWalkToParentRefusals \
 	'|| path.Clean(absPath) != absPath ||' '|| false ||'
 mutate perm-setgid-ok          securewrite_unix.go TestValidateTargetPermDirect 'mode&^0o777 != 0:' 'mode&^0o2777 != 0:'
 mutate writable-file-other-bit agents.go TestRefuseWritableFileDirect 'if mode&0o002 != 0 {' 'if mode&0o020 != 0 {' 2
 mutate writable-file-group-bit agents.go TestRefuseWritableFileDirect 'mode&0o020 != 0 && a.groupIsAgents(int64(st.Gid))' 'mode&0o200 != 0 && a.groupIsAgents(int64(st.Gid))' 2
 mutateN launchd-top-key-foldcase TestTopKeyMustBeExact \
-	launchd.go '"errors"' '"errors"; "strings"' \
-	launchd.go 'topKey == envVarsKey' 'strings.EqualFold(topKey, envVarsKey)'
+	launchd.go '"errors"' '"errors"; "strings"' '' \
+	launchd.go 'topKey == envVarsKey' 'strings.EqualFold(topKey, envVarsKey)' ''
 mutateN launchd-entry-key-fold  TestEntryKeyMustBeExact \
-	launchd.go '"errors"' '"errors"; "strings"' \
-	launchd.go 'if envKey == field {' 'if strings.EqualFold(envKey, field) {'
+	launchd.go '"errors"' '"errors"; "strings"' '' \
+	launchd.go 'if envKey == field {' 'if strings.EqualFold(envKey, field) {' ''
 mutateN launchd-entry-key-suffix TestEntryKeyMustBeExact \
-	launchd.go '"errors"' '"errors"; "strings"' \
-	launchd.go 'if envKey == field {' 'if strings.Contains(field, envKey) {'
+	launchd.go '"errors"' '"errors"; "strings"' '' \
+	launchd.go 'if envKey == field {' 'if strings.Contains(field, envKey) {' ''
 mutate launchd-text-in-dict    launchd.go TestTextInsideEnvDictRefused 'case inEnv && len(stack) == 3 && !isBlank(t):' 'case false:'
 mutate systemd-stat-loop-is-absence systemdcred.go TestSystemdStatLoopIsNotAbsence \
 	'if errors.Is(err, unix.ENOENT) {' 'if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) {'
@@ -742,8 +753,8 @@ mutate hermes-json-handler     write.go TestHermesConfigWritesEnvLine \
 	'runnerproto.TargetHermesConfig:      hermesEnvHandler{},' 'runnerproto.TargetHermesConfig:      jsonPathHandler{},'
 # The old shape: hermes-config validated as a dotted key like mcp-config.
 mutateN hermes-dotted-field-ok TestHermesConfigDottedPathInvalid \
-	../../pkg/runnerproto/job.go 'case TargetEnvFile, TargetLaunchdEnv, TargetHermesConfig:' 'case TargetEnvFile, TargetLaunchdEnv:' \
-	../../pkg/runnerproto/job.go 'case TargetMCPConfig:' 'case TargetMCPConfig, TargetHermesConfig:'
+	../../pkg/runnerproto/job.go 'case TargetEnvFile, TargetLaunchdEnv, TargetHermesConfig:' 'case TargetEnvFile, TargetLaunchdEnv:' '' \
+	../../pkg/runnerproto/job.go 'case TargetMCPConfig, TargetYAMLScalar:' 'case TargetMCPConfig, TargetYAMLScalar, TargetHermesConfig:' ''
 
 # Entry boundaries of an env-file: the writer replaces "the line", so it refuses
 # any existing file in which some line is not a complete entry on its own. For
@@ -765,7 +776,7 @@ mutate envscan-hermes-build-reads-as-shell hermesenv.go TestHermesConfigSimpleNe
 mutate envscan-hermes-readback-reads-as-shell hermesenv.go TestHermesConfigSimpleNeighbours \
 	'return envReadBack(dialectDotenv,' 'return envReadBack(dialectShell,'
 # The shell whitelist.
-mutate envscan-shell-comment-line-refused envscan.go TestEnvFileSimpleNeighbours \
+MUTATION_OCCURRENCE=1 mutate envscan-shell-comment-line-refused envscan.go TestEnvFileSimpleNeighbours \
 	"if i >= len(line) || line[i] == '#' {" 'if i >= len(line) {'
 mutate envscan-shell-empty-name-ok envscan.go TestEnvFileEntriesThatSpanLinesAreRefused \
 	'if j == i ||' 'if false ||'
@@ -781,7 +792,7 @@ mutate envscan-shell-trailing-comment-refused envscan.go TestEnvFileSimpleNeighb
 	"return k == len(line) || line[k] == '#'" 'return k == len(line)'
 mutate envscan-shell-blank-does-not-end-word envscan.go TestEnvFileEntriesThatSpanLinesAreRefused \
 	'case isSpaceTab(c):' 'case false:'
-mutate envscan-shell-unclosed-single-ok envscan.go TestEnvFileEntriesThatSpanLinesAreRefused \
+MUTATION_OCCURRENCE=1 mutate envscan-shell-unclosed-single-ok envscan.go TestEnvFileEntriesThatSpanLinesAreRefused \
 	'if end < 0 {' 'if end < 0 { k++; continue }; if false {'
 mutate envscan-shell-unclosed-double-ok envscan.go TestEnvFileEntriesThatSpanLinesAreRefused \
 	'if end < 0 {' 'if end < 0 { k++; continue }; if false {' 2
@@ -895,7 +906,7 @@ mutate envscan-special-prefix-zcurses envscan.go TestEnvFileSpecialFieldNamesAre
 	'"ZCURSES_"}' '"ZCURSEX_"}'
 mutate envscan-special-name-ps0 envscan.go TestEnvFileSpecialFieldNamesAreRefused \
 	'	PS0' '	XPS0'
-mutate envscan-special-name-rprompt envscan.go TestEnvFileSpecialFieldNamesAreRefused \
+MUTATION_OCCURRENCE=1 mutate envscan-special-name-rprompt envscan.go TestEnvFileSpecialFieldNamesAreRefused \
 	'	RPROMPT' '	XRPROMPT'
 mutate envscan-special-name-period envscan.go TestEnvFileSpecialFieldNamesAreRefused \
 	'	PERIOD' '	XPERIOD'
@@ -913,15 +924,15 @@ mutate envscan-assigns-dotenv-ascii-space-only envscan.go TestHermesConfigEntrie
 	'l = bytes.TrimLeftFunc(l, unicode.IsSpace)' 'l = bytes.TrimLeft(l, spaceTab)'
 mutate envscan-assigns-export-not-skipped envscan.go TestEnvFileEntriesThatSpanLinesAreRefused \
 	'if bytes.HasPrefix(l, shellExport) && len(l) > len(shellExport) && isSpaceTab(l[len(shellExport)]) {' 'if false {'
-mutate envscan-assigns-dotenv-no-value-ok envscan.go TestEnvScanNeverPanics \
+MUTATION_OCCURRENCE=1 mutate envscan-assigns-dotenv-no-value-ok envscan.go TestEnvScanNeverPanics \
 	'return len(rest) == 0 || rest[0] ==' 'return rest[0] =='
 mutate envscan-assigns-dotenv-equals-ok envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
 	"|| rest[0] == '=' ||" '||'
-mutate envscan-assigns-dotenv-comment-ok envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
+MUTATION_OCCURRENCE=1 mutate envscan-assigns-dotenv-comment-ok envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
 	"|| rest[0] == '#'" '|| false'
 mutate envscan-assigns-shell-any-continuation envscan.go TestEnvFileSimpleNeighbours \
 	"return len(rest) > 0 && rest[0] == '='" 'return len(rest) > 0'
-mutate envscan-assigns-dotenv-any-continuation envscan.go TestHermesConfigSimpleNeighbours \
+MUTATION_OCCURRENCE=1 mutate envscan-assigns-dotenv-any-continuation envscan.go TestHermesConfigSimpleNeighbours \
 	"return len(rest) == 0 || rest[0] ==" "return true || rest[0] =="
 mutate envscan-dotenv-bom-ok   envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
 	'bytes.Contains(content, utf8BOM)' 'false'
@@ -968,7 +979,7 @@ mutate envscan-dotenv-two-names-ok envscan.go TestHermesConfigEntriesThatSpanLin
 	'if countAssignmentNames(line) > 1 {' 'if false {'
 mutate envscan-dotenv-name-run-too-long envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
 	"case c == '=' && run >= hermesNameRun:" "case c == '=' && run >= 100:"
-mutate envscan-dotenv-name-not-counted envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
+MUTATION_OCCURRENCE=1 mutate envscan-dotenv-name-not-counted envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
 	'n++' 'n += 0'
 mutate envscan-dotenv-escape-next-to-quote-ok envscan.go TestHermesConfigEntriesThatSpanLinesAreRefused \
 	'if bytes.IndexByte(line, envBackslash) >= 0 &&' 'if false &&'
@@ -995,8 +1006,8 @@ mutate envfile-field-missing-ok envfile.go TestEnvReadBackRefusesAFileWithoutThe
 # Two layers refuse an unusable key (before the write, and where the
 # fingerprint is computed after it): the late one is proven with the early one off.
 mutateN write-fingerprint-error-ok TestWriteFailsWhenTheFingerprintCannotBeComputed \
-	write.go 'computeFingerprint(fpKey, secret.New([]byte{0})); err != nil {' 'computeFingerprint(fpKey, secret.New([]byte{0})); err != nil && false {' \
-	write.go 'return "", unconfirmed("compute fingerprint: %v", err)' 'return "", nil'
+	write.go 'computeFingerprint(fpKey, secret.New([]byte{0})); err != nil {' 'computeFingerprint(fpKey, secret.New([]byte{0})); err != nil && false {' '' \
+	write.go 'return "", unconfirmed("compute fingerprint: %v", err)' 'return "", nil' ''
 mutate scan-export-bound envscan.go TestEnvScanNeverPanics \
 	'&& i+len(shellExport) < len(line) &&' '&&'
 mutate scan-name-bound envscan.go TestEnvScanNeverPanics \
@@ -1117,7 +1128,10 @@ mutate no-owned-stale-tmp-owner-list-full securewrite_unix.go TestIsOwnedStaleTm
 mutate stale-tmp-any-age securewrite_unix.go TestStaleTmpNewerThanTheWriteIsKept \
 	'return !statMtime(st).After(t)' 'return !statMtime(st).After(t.Add(100*24*time.Hour))'
 mutate stale-tmp-block-on-fifo securewrite_unix.go TestStaleTmpSwappedForFIFODoesNotBlock \
-	'beforeStaleUnlink(parentFD, name)' 'beforeStaleUnlink(parentFD, name)\n\t\t\tif fd, err := unix.Openat(parentFD, name, unix.O_RDONLY, 0); err == nil {\n\t\t\t\t_ = unix.Close(fd)\n\t\t\t}'
+	'beforeStaleUnlink(parentFD, name)' 'beforeStaleUnlink(parentFD, name)
+			if fd, err := unix.Openat(parentFD, name, unix.O_RDONLY, 0); err == nil {
+				_ = unix.Close(fd)
+			}'
 mutate stale-tmp-owners-target-uid securewrite_unix.go TestStaleTmpOwnersIncludeTargetOwner \
 	'return []int64{int64(unix.Geteuid()), uid}' 'return []int64{int64(unix.Geteuid())}'
 mutate stale-tmp-canary-kept securewrite_unix.go TestStaleTmpWithValueGoneAfterNextWrite \
@@ -1153,7 +1167,7 @@ if linux_only linux-acl-ancestor; then
 fi
 if darwin_only darwin-acl-ancestor; then
 	mutate darwin-ancestor-acl-ignored acl_darwin.go TestAncestorACLGrantingWriteRefused \
-		'if ancestorWritePerms[strings.TrimSpace(perm)] {' 'if false \&\& ancestorWritePerms[strings.TrimSpace(perm)] {'
+		'if ancestorWritePerms[strings.TrimSpace(perm)] {' 'if false && ancestorWritePerms[strings.TrimSpace(perm)] {'
 	mutate darwin-ancestor-acl-add-file acl_darwin.go TestAncestorACLGrantingWriteRefused \
 		'"add_file": true, ' ''
 	mutate darwin-ancestor-acl-writesecurity acl_darwin.go TestAncestorACLGrantingWriteRefused \
@@ -1169,7 +1183,8 @@ if darwin_only darwin-acl-ancestor; then
 	mutate darwin-ancestor-acl-root acl_darwin.go TestAncestorACLForRootAllowed \
 		'strings.TrimSpace(e[:i]) == "user:root"' 'false'
 	mutate darwin-ancestor-acl-deny acl_darwin.go TestAncestorACLNotGrantingWriteAllowed \
-		'i := strings.LastIndex(e, " allow ")' 'e = strings.Replace(e, " deny ", " allow ", 1)\n\ti := strings.LastIndex(e, " allow ")'
+		'i := strings.LastIndex(e, " allow ")' 'e = strings.Replace(e, " deny ", " allow ", 1)
+	i := strings.LastIndex(e, " allow ")'
 fi
 
 # systemd-credential without systemd-creds: refused unless the host policy
@@ -1181,18 +1196,24 @@ mutate cred-fallback-flag-not-wired write.go TestSystemdCredentialPlaintextFallb
 mutate cred-fallback-no-notice write.go TestSystemdCredentialPlaintextFallbackWithFlag \
 	'if fellBack && o.credNotice != nil {' 'if false {'
 mutate cred-fallback-notice-before-write write.go TestSystemdCredentialFallbackNoticeOnlyAfterWrite \
-	'mode := t.Mode' 'if fellBack \&\& o.credNotice != nil {\n\t\to.credNotice(t.Path)\n\t}\n\tmode := t.Mode'
+	'mode := t.Mode' 'if fellBack && o.credNotice != nil {
+		o.credNotice(t.Path)
+	}
+	mode := t.Mode'
 mutate cred-fallback-mode-from-target write.go TestSystemdCredentialFallbackModeNeverWiderThan0600 \
 	'		mode = 0o600' '		mode = t.Mode'
 mutate cred-fallback-excuses-untrusted systemdcred.go TestSystemdCredentialFlagDoesNotExcuseUntrustedBinary \
-	'path, present, err := findSystemdCreds()' 'path, present, err := findSystemdCreds()\n\tif err != nil \&\& h.plaintextFallback {\n\t\tpresent, err = false, nil\n\t}' 1
+	'path, present, err := findSystemdCreds()' 'path, present, err := findSystemdCreds()
+	if err != nil && h.plaintextFallback {
+		present, err = false, nil
+	}' 1
 
 # jsonQuoteBytes builds the secret's JSON string literal straight from its
 # []byte; these two mutants each switch off one class of required escaping.
 mutate no-json-quote-control jsonpath.go TestJSONQuoteBytesMatchesStandardLibraryStringEncoding \
 	'case c < 0x20:' 'case false:'
 mutate no-json-quote-quote-backslash jsonpath.go TestJSONQuoteBytesMatchesStandardLibraryStringEncoding \
-	"case c == '\"' || c == '\\\\\\\\':" 'case false:'
+	"case c == '\"' || c == '\\\\':" 'case false:'
 
 # build owns three JSON-quoted copies of the value (quoted, compact,
 # indented) and wipes each; dropping any one wipe call is exactly the

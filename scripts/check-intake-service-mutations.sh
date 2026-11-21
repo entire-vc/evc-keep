@@ -14,7 +14,7 @@ fi
 python3 - <<'PY'
 import os, pathlib, re, shutil, subprocess, tempfile, sys
 sys.path.insert(0, str(pathlib.Path.cwd() / "scripts"))
-from intake_baseline_diagnostics import run_baseline
+from intake_baseline_diagnostics import designated_run_pattern, missing_passes, run_baseline
 apply_only = os.environ.get('MUTATION_APPLY_ONLY') == '1'
 def behavioral_failure(code, out, test, marker):
  if code == 0 or re.search(r'panic:|fatal error:|\[build failed\]|\[setup failed\]|--- SKIP|database operation deadline exceeded|create scratch database failed|open admin pool on scratch database failed|connection failed \(unclassified\)', out):
@@ -28,6 +28,9 @@ if not apply_only:
   raise SystemExit('FAIL service checker rejected behavioral control')
  print('ok   checker: behavioral witness required; infrastructure faults rejected',flush=True)
 root=pathlib.Path.cwd()
+import sys
+sys.path.insert(0, str(root / 'scripts/lib'))
+from mutation_edit import named_edit as mutation_edit
 files=subprocess.check_output(['git','ls-files','-co','--exclude-standard','-z']).decode().split('\0')
 mutations=[
  # Canonical wire properties have their own cheap, DB-independent witnesses.
@@ -99,10 +102,9 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-service-') as scratch:
  # Inherit the cache exported and owned by the shell wrapper.
  for name,file,before,after,pkg,test,marker in mutations:
   target=tree/file;source=(root/file).read_text()
-  if source.count(before)!=1:raise SystemExit('FAIL '+name+': mutation target is not unique')
-  target.write_text(source.replace(before,after,1))
+  target.write_text(mutation_edit(name, source, before, after, src=file))
   if name == 'descriptor-public-base64':
-   target.write_text(target.read_text().replace('"encoding/binary"', '"encoding/binary"\n\t"encoding/base64"', 1))
+   target.write_text(mutation_edit(name, target.read_text(), '"encoding/binary"', '"encoding/binary"\n\t"encoding/base64"'))
   secondary=None
   if name=='zero-root':
    # OpenLocal and the sealer constructor independently reject a zero key.
@@ -110,8 +112,7 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-service-') as scratch:
    secondary=tree/'internal/builtin/sealer/rootkey.go'
    secondary_source=secondary.read_text()
    guard='if nonzero == 0 {'
-   if secondary_source.count(guard)!=1:raise SystemExit('FAIL zero-root: sealer guard is not unique')
-   secondary.write_text(secondary_source.replace(guard,'if false && nonzero == 0 {',1))
+   secondary.write_text(mutation_edit(name, secondary_source, guard, 'if false && nonzero == 0 {', src=str(secondary)))
   try:
    if apply_only:
     print('ok   '+name+': applies',flush=True)
@@ -132,12 +133,34 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-service-') as scratch:
   # Migration controls rebuild the shared test schema; restore before baseline.
   r=run_baseline('schema-restore', ['go','test','-timeout','60s','-count=1','-run','^TestBuiltinStoreScopeMigration$','./internal/store'],cwd=tree,env=env,timeout=120)
   if r.returncode!=0:raise SystemExit('FAIL schema restore: canonical migration did not pass')
-  # cmd/keep-server/app alone runs ~170s with -race on a core runner and
-  # crosses 240s on the shared mutation runner; the budget is per package.
-  r=run_baseline('service', ['go','test','-race','-p','1','-timeout','480s','-count=1','-v','./internal/intake','./internal/builtin','./internal/api','./internal/catalog','./internal/store','./cmd/keep-server/app','./cmd/keep'],cwd=tree,env=env,timeout=900,prohibited_skips=('--- SKIP: TestIntake', '--- SKIP: TestSingleUse'))
+  # cmd/keep-server/app runs only the tests its mutants designate. The whole
+  # package (345 serial tests) exceeds the 480s package deadline under -race
+  # on the shared mutation runner; the core test shard keeps the whole package
+  # green with zero SKIPs on every merge request (check-no-silent-skip.sh).
+  # Here every designated test of the service packages must report PASS.
+  service_pkgs=('./internal/intake','./internal/builtin','./internal/api','./internal/catalog','./internal/store','./cmd/keep')
+  app_pkg='./cmd/keep-server/app'
+  designated={}
+  for _,_,_,_,pkg,test,_ in mutations:
+   if pkg in service_pkgs or pkg==app_pkg:designated.setdefault(pkg,set()).add(test)
+  all_designated=sorted(set().union(*designated.values()))
+  try:
+   designated_run_pattern(all_designated)
+   app_run=designated_run_pattern(designated.get(app_pkg,()))
+  except ValueError:
+   raise SystemExit('FAIL baseline: designated service tests are not plain test names')
+  skips=('--- SKIP: TestIntake', '--- SKIP: TestSingleUse')
+  r=run_baseline('service', ['go','test','-race','-p','1','-timeout','480s','-count=1','-v',*service_pkgs],cwd=tree,env=env,timeout=900,prohibited_skips=skips)
   out=r.stdout.decode(errors='replace')
+  if r.returncode==0:
+   r=run_baseline('service-app', ['go','test','-race','-p','1','-timeout','480s','-count=1','-v','-run',app_run,app_pkg],cwd=tree,env=env,timeout=600,prohibited_skips=skips)
+   out+=r.stdout.decode(errors='replace')
   if r.returncode!=0 or '--- SKIP: TestIntake' in out or '--- SKIP: TestSingleUse' in out:
    raise SystemExit('FAIL baseline: service tests did not pass')
+  missing=missing_passes(out,all_designated)
+  if missing:
+   for t in missing:print('FAIL baseline missing test: '+t,flush=True)
+   raise SystemExit('FAIL baseline: a designated service test did not run and pass')
   print('ok   baseline: PostgreSQL race tests passed with no intake skips',flush=True)
 PY
 

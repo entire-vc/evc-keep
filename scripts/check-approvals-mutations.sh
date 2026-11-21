@@ -22,6 +22,9 @@ import subprocess
 import sys
 
 root, work = map(Path, sys.argv[1:])
+import sys
+sys.path.insert(0, str(root / 'scripts/lib'))
+from mutation_edit import named_edit as mutation_edit
 D, A, N, M = 'internal/deployment', 'internal/api', 'internal/notify', 'internal/store/migrations/00028_rotate_audit_approval.sql'
 M18 = 'internal/store/migrations/00018_approvals.sql'
 # The approval trigger lives in 00028 (Up and Down both carry it); the
@@ -37,7 +40,7 @@ mutations = [
     ('already-decided', D + '/approval.go', '\tif status != "requested" {\n', '\tif false {\n', 'TestDecideApproveCreatesExactlyTheShownJob', D),
     ('shown-hash', D + '/approval.go', '!equalHash(stored, shown) || ', '', 'TestApprovalBoundToHashTargetSwapRunsNothing', D),
     ('recomputed-hash', D + '/approval.go', ' || !equalHash(stored, recomputed[:])', ' || false && !equalHash(stored, recomputed[:])', 'TestApprovalBoundToHashTargetSwapRunsNothing', D),
-    ('policy-recheck', D + '/approval.go', 'perr != nil || secret.provider', 'false && perr != nil || secret.provider', 'TestDecideApproveRechecksPolicyAndHost', D),
+    ('policy-recheck', D + '/approval.go', 'true); perr != nil || secret.provider', 'true); false && perr != nil || secret.provider', 'TestDecideApproveRechecksPolicyAndHost', D),
     ('frozen-approval-status', M, UPTAIL + "    END IF;\n    IF OLD.status <> 'requested' THEN", UPTAIL + "    END IF;\n    IF FALSE THEN", 'TestApprovalRowIsFrozenAfterDecision', D),
     ('frozen-approval-content', M, UPTAIL, "NEW.rotation_run_id) THEN\n        NULL;\n", 'TestApprovalContentIsImmutable', D),
     ('frozen-deployment-request', M18, "RAISE EXCEPTION 'deployment request is immutable';", 'RETURN NEW;', 'TestApprovalBoundToHashTargetSwapRunsNothing', D),
@@ -65,7 +68,7 @@ mutations = [
     ('session-token-expiry', I + '/session.go', '(tokenExpireAt != nil && !tokenExpireAt.After(now))', '(false && tokenExpireAt != nil && !tokenExpireAt.After(now))', 'TestSessionDiesWithItsExpiredToken', I),
     ('console-canary-view', A + '/console.go', 'RequestID: a.RequestID, Secret:', 'RequestID: a.RequestID + string(a.Requester.Via), Secret:', 'TestConsoleNeverRendersACanary', A),
     ('decide-rate-limit', D + '/approval.go', '\t\tif limited {\n', '\t\tif limited && false {\n', 'TestDecideApproveKeepsTheRateLimit', D),
-    ('decide-provider', D + '/approval.go', ' || secret.provider != runnerproto.ProviderBuiltin {', ' || secret.provider != runnerproto.ProviderBuiltin && false {', 'TestDecideApproveRefusesProviderTheRunnerCannotUse', D),
+    ('decide-provider', D + '/approval.go', 'true); perr != nil || secret.provider != runnerproto.ProviderBuiltin {', 'true); perr != nil || secret.provider != runnerproto.ProviderBuiltin && false {', 'TestDecideApproveRefusesProviderTheRunnerCannotUse', D),
     ('decide-audit-actor', D + '/approval.go', 'Actor:  audit.Actor{Type: audit.ActorUser, ID: in.ApproverID.String(), Via: audit.ViaConsole}', 'Actor:  audit.Actor{Type: audit.ActorUser, ID: in.OrgID.String(), Via: audit.ViaConsole}', 'TestDecideApproveCreatesExactlyTheShownJob', D),
     ('console-token-scope', A + '/console.go', 'if p.Scope != "" && p.Scope != scope.String()', 'if false && p.Scope != scope.String()', 'TestConsoleNarrowTokenDoesNotReachOtherScope', A),
     ('session-principal', I + '/session.go', 'p, err := r.livePrincipal(ctx, Kind(kind), org, principal, scope)', 'p, err := Principal{Kind: Kind(kind), ID: principal, OrgID: org, Scope: scope}, error(nil)', 'TestSessionDiesWithItsPrincipal', I),
@@ -105,12 +108,8 @@ if not apply_only:
     print('ok   baseline: green, nothing skipped')
 for name, rel, before, after, test, pkg in mutations:
     src = (root / rel).read_text()
-    if src.count(before) != 1:
-        print('FAIL ' + name + ': mutation target is not unique or moved', flush=True)
-        bad += 1
-        continue
     target = work / 'tree' / rel
-    target.write_text(src.replace(before, after, 1))
+    target.write_text(mutation_edit(name, src, before, after, src=rel))
     try:
         if apply_only:
             print('ok   ' + name + ': applies', flush=True)

@@ -81,7 +81,7 @@ type Approval struct {
 	ExpiresAt   time.Time
 	SecretName  string
 	Class       string
-	Kind        string // what is asked: deploy, exec or rotate
+	Kind        string // what is asked: deploy, exec, rotate or adopt
 	RequestID   string
 	Scope       tenancy.Scope // the secret's catalog scope, where the right to approve is checked
 }

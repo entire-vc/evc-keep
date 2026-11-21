@@ -28,12 +28,18 @@ import (
 const (
 	meshUICookie = "keep_mesh_ui"
 	meshUIPath   = "/mesh/ui"
-	// meshUIListLimit bounds one page of the secrets table.
-	meshUIListLimit = 200
 )
 
-// Key level names, as the sealer spells them. The set is closed.
-var keyLevelNames = []string{"user", "project", "workspace", "organization"}
+// keyLevelOption is one choice of the Key level screen: a level, as the sealer
+// spells it, and one line of what it means. The set of levels is closed.
+type keyLevelOption struct{ Name, Meaning string }
+
+var keyLevelOptions = []keyLevelOption{
+	{"user", "Each user’s secrets have their own key. Strongest separation."},
+	{"project", "One key per project."},
+	{"workspace", "One key per workspace."},
+	{"organization", "One key for the whole organization."},
+}
 
 // ErrKeyLevelWeakening is returned by a KeyLevelChanger that refused a change
 // to a coarser level the caller did not confirm.
@@ -69,21 +75,40 @@ type KeyLevelChanger interface {
 type meshUI struct {
 	m      *meshRoutes
 	logger *slog.Logger
-	cat    *catalog.Catalog
+	src    meshUISource
+	deps   meshUIDeps
+	add    meshUIAdder
+	// sessions resolves the request to a session (sessionOf on the server).
+	sessions func(*http.Request) (identity.Session, []string, bool, error)
 }
 
-func registerMeshUI(mux *http.ServeMux, logger *slog.Logger, m *meshRoutes, cat *catalog.Catalog) {
-	u := &meshUI{m: m, logger: logger, cat: cat}
+func registerMeshUI(mux *http.ServeMux, logger *slog.Logger, m *meshRoutes, cat *catalog.Catalog, deps meshUIDeps) *meshUI {
+	u := &meshUI{m: m, logger: logger, src: catalogSource{ir: m.ir, cat: cat}, deps: deps}
+	if deps.Input != nil {
+		u.add = catalogAdder{ir: m.ir, cat: cat, input: deps.Input, aud: m.aud}
+	}
+	u.sessions = u.sessionOf
+	u.register(mux)
+	return u
+}
+
+func (u *meshUI) register(mux *http.ServeMux) {
+	logger := u.logger
 	for _, e := range []struct {
 		method, pattern string
 		h               http.HandlerFunc
 	}{
 		{"GET", "/mesh/ui/secrets", u.secrets},
+		{"GET", "/mesh/ui/secrets/new", u.addPage},
+		{"POST", "/mesh/ui/secrets/new", u.addSecret},
+		{"GET", "/mesh/ui/secrets/{id}", u.secretPage},
+		{"POST", "/mesh/ui/secrets/{id}/input-link", u.secretInputLink},
 		{"GET", "/mesh/ui/settings", u.settings},
 		{"POST", "/mesh/ui/settings/key-level", u.changeKeyLevel},
 		{"POST", "/mesh/ui/session", u.session},
 		{"GET", "/mesh/ui/app.js", u.script},
 		{"GET", "/mesh/ui/app.css", u.style},
+		{"GET", "/mesh/ui/fonts/{name}", u.font},
 	} {
 		mux.Handle(e.method+" "+e.pattern, logged(e.pattern, logger, requireTLS(e.h).ServeHTTP))
 	}
@@ -121,14 +146,14 @@ func frameOrigins(meshURLs []string) []string {
 }
 
 // meshUICSP is the policy of every screen: one same-origin script and style
-// file, no inline code, no foreign origin, and embedding only by the Mesh
-// instances recorded at install.
+// file, fonts from the same origin, no inline code, no foreign origin, and
+// embedding only by the Mesh instances recorded at install.
 func meshUICSP(origins []string) string {
 	anc := "'none'"
 	if len(origins) > 0 {
 		anc = strings.Join(origins, " ")
 	}
-	return "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors " + anc
+	return "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors " + anc
 }
 
 func meshUIHeaders(w http.ResponseWriter, origins []string) {
@@ -146,9 +171,17 @@ type uiBase struct {
 	NeedLogin bool     // the page has no session; the script exchanges mesh.context
 	Toast     string
 	ToastLvl  string
-	Active    string
+	Active    string // the tab of the shell: secrets, settings; empty hides the tabs
 	CSRF      string
+	// The page head (template "page-head"): heading, one line under it and an
+	// optional link back to the parent page.
+	Title    string
+	Subtitle string
+	Back     uiLink
 }
+
+// uiLink is a link of the shell; Href is a path of this screen.
+type uiLink struct{ Href, Label string }
 
 func (b uiBase) OriginList() string { return strings.Join(b.Origins, " ") }
 
@@ -156,6 +189,11 @@ func (u *meshUI) render(w http.ResponseWriter, status int, name string, data any
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_ = meshUITemplates.ExecuteTemplate(w, name, data)
+}
+
+// unavailable renders the Unavailable screen in the shell.
+func (u *meshUI) unavailable(w http.ResponseWriter, status int, origins []string) {
+	u.render(w, status, "unavailable", uiBase{Origins: origins, Title: "Unavailable"})
 }
 
 // sessionOf resolves the cookie to a user session and the origins allowed to
@@ -192,7 +230,7 @@ func (u *meshUI) signedOut(w http.ResponseWriter, r *http.Request, tok string) {
 		}
 	}
 	meshUIHeaders(w, origins)
-	u.render(w, http.StatusUnauthorized, "signedout", uiBase{Origins: origins, NeedLogin: len(origins) > 0})
+	u.render(w, http.StatusUnauthorized, "signedout", uiBase{Origins: origins, NeedLogin: len(origins) > 0, Title: "Keep"})
 }
 
 func (u *meshUI) setCookie(w http.ResponseWriter, handle string) {
@@ -213,7 +251,7 @@ func (u *meshUI) secrets(w http.ResponseWriter, r *http.Request) {
 			return
 		case err != nil:
 			meshUIHeaders(w, nil)
-			u.render(w, http.StatusServiceUnavailable, "unavailable", uiBase{})
+			u.unavailable(w, http.StatusServiceUnavailable, nil)
 			return
 		}
 		u.setCookie(w, handle)
@@ -221,10 +259,10 @@ func (u *meshUI) secrets(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/mesh/ui/secrets", http.StatusSeeOther)
 		return
 	}
-	s, origins, ok, err := u.sessionOf(r)
+	s, origins, ok, err := u.sessions(r)
 	if err != nil {
 		meshUIHeaders(w, nil)
-		u.render(w, http.StatusServiceUnavailable, "unavailable", uiBase{})
+		u.unavailable(w, http.StatusServiceUnavailable, nil)
 		return
 	}
 	if !ok {
@@ -232,66 +270,7 @@ func (u *meshUI) secrets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meshUIHeaders(w, origins)
-	rows, truncated, err := u.secretRows(r.Context(), s.Principal, r.URL.Query().Get("q"), r.URL.Query().Get("class"))
-	if err != nil {
-		u.render(w, http.StatusServiceUnavailable, "unavailable", uiBase{Origins: origins})
-		return
-	}
-	u.render(w, http.StatusOK, "secrets", secretsView{uiBase: uiBase{Origins: origins, Active: "secrets", CSRF: s.CSRF},
-		Rows: rows, Truncated: truncated, Q: r.URL.Query().Get("q"), Class: r.URL.Query().Get("class")})
-}
-
-type secretsView struct {
-	uiBase
-	Rows      []secretRow
-	Truncated bool
-	Q, Class  string
-}
-
-// secretRow is the screen's whole view of a secret: the §4.3 fields only.
-type secretRow struct {
-	Name, Scope, Class, Version, Fingerprint, Status string
-	Length                                           int
-	HasVersion                                       bool
-}
-
-func (u *meshUI) secretRows(ctx context.Context, p identity.Principal, q, class string) ([]secretRow, bool, error) {
-	q = strings.ToLower(strings.TrimSpace(q))
-	scopes := []tenancy.Scope{tenancy.Org(p.OrgID), {Level: tenancy.LevelUser, ID: p.ID}}
-	var out []secretRow
-	truncated := false
-	for _, sc := range scopes {
-		perms, err := catalog.PermissionsAt(ctx, u.m.ir, tenancy.Context{Org: p.OrgID, Principal: principalToTenancy(p)}, sc)
-		if err != nil {
-			return nil, false, err
-		}
-		if !perms[identity.PermReadMetadata] {
-			continue
-		}
-		refs, err := u.cat.List(ctx, p.OrgID, sc)
-		if err != nil {
-			return nil, false, err
-		}
-		for _, ref := range refs {
-			if (q != "" && !strings.Contains(strings.ToLower(ref.Name), q)) || (class != "" && ref.Class != class) {
-				continue
-			}
-			if len(out) >= meshUIListLimit {
-				truncated = true
-				break
-			}
-			row := secretRow{Name: ref.Name, Scope: sc.String(), Class: ref.Class}
-			vs, err := u.cat.ListVersions(ctx, p.OrgID, ref.ID)
-			if err != nil {
-				return nil, false, err
-			}
-			if cur := newSecretVersions(vs); len(cur) > 0 {
-				row.HasVersion, row.Version, row.Fingerprint, row.Length, row.Status = true, cur[0].Version, cur[0].Fingerprint, cur[0].Length, cur[0].Status
-			}
-			out = append(out, row)
-		}
-	}
-	return out, truncated, nil
+	u.secretsPage(w, r, s, origins)
 }
 
 // session serves POST /mesh/ui/session: the script posts the context token
@@ -335,7 +314,7 @@ type settingsView struct {
 	Level     string
 	ChangedAt string
 	ChangedBy string
-	Levels    []string
+	Levels    []keyLevelOption
 	CanChange bool
 	IsAdmin   bool
 	Available bool
@@ -344,10 +323,12 @@ type settingsView struct {
 }
 
 func (u *meshUI) settingsView(w http.ResponseWriter, r *http.Request, s identity.Session, origins []string) (settingsView, bool) {
-	v := settingsView{uiBase: uiBase{Origins: origins, Active: "settings", CSRF: s.CSRF}, Levels: keyLevelNames}
+	v := settingsView{uiBase: uiBase{Origins: origins, Active: "settings", CSRF: s.CSRF, Title: "Key level",
+		Subtitle: "How many stores share one encryption key. Changing it re-wraps keys; values are never re-encrypted or shown."},
+		Levels: keyLevelOptions}
 	admin, err := u.isOrgAdmin(r.Context(), s.Principal)
 	if err != nil {
-		u.render(w, http.StatusServiceUnavailable, "unavailable", uiBase{Origins: origins})
+		u.unavailable(w, http.StatusServiceUnavailable, origins)
 		return v, false
 	}
 	v.IsAdmin = admin
@@ -355,7 +336,7 @@ func (u *meshUI) settingsView(w http.ResponseWriter, r *http.Request, s identity
 		v.Available = true
 		st, err := kl.Get(r.Context(), s.Principal.OrgID)
 		if err != nil {
-			u.render(w, http.StatusServiceUnavailable, "unavailable", uiBase{Origins: origins})
+			u.unavailable(w, http.StatusServiceUnavailable, origins)
 			return v, false
 		}
 		v.Level = st.Level
@@ -372,7 +353,7 @@ func (u *meshUI) settings(w http.ResponseWriter, r *http.Request) {
 	s, origins, ok, err := u.sessionOf(r)
 	if err != nil {
 		meshUIHeaders(w, nil)
-		u.render(w, http.StatusServiceUnavailable, "unavailable", uiBase{})
+		u.unavailable(w, http.StatusServiceUnavailable, nil)
 		return
 	}
 	if !ok {
@@ -394,7 +375,7 @@ func (u *meshUI) changeKeyLevel(w http.ResponseWriter, r *http.Request) {
 	s, origins, ok, err := u.sessionOf(r)
 	if err != nil {
 		meshUIHeaders(w, nil)
-		u.render(w, http.StatusServiceUnavailable, "unavailable", uiBase{})
+		u.unavailable(w, http.StatusServiceUnavailable, nil)
 		return
 	}
 	if !ok {
@@ -404,7 +385,7 @@ func (u *meshUI) changeKeyLevel(w http.ResponseWriter, r *http.Request) {
 	meshUIHeaders(w, origins)
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if !sameOrigin(r) || r.ParseForm() != nil || !csrfValue(r.PostForm.Get("csrf"), s) {
-		u.render(w, http.StatusForbidden, "unavailable", uiBase{Origins: origins})
+		u.unavailable(w, http.StatusForbidden, origins)
 		return
 	}
 	v, ok := u.settingsView(w, r, s, origins)
@@ -459,7 +440,7 @@ func (u *meshUI) style(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(meshUIStyle))
 }
 
-var meshUITemplates = template.Must(template.New("meshui").Parse(meshUIHTML))
+var meshUITemplates = template.Must(template.Must(template.New("meshui").Parse(meshUIHTML)).Parse(meshUIPagesHTML))
 
 // readContextBody reads {"token": "..."}: unknown fields and oversize bodies refused.
 func readContextBody(w http.ResponseWriter, r *http.Request) (string, bool) {

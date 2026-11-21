@@ -345,7 +345,7 @@ func TestClosedSchemaAndDowngrade(t *testing.T) {
 	}
 	must(t, rows.Err())
 	rows.Close()
-	want := []string{"id", "org_id", "secret_id", "version", "host", "target_kind", "target_path", "target_field", "consumer", "healthcheck_ref", "last_fp", "state", "created_at", "updated_at", "last_verified_at"}
+	want := []string{"id", "org_id", "secret_id", "version", "host", "target_kind", "target_path", "target_field", "consumer", "healthcheck_ref", "last_fp", "state", "created_at", "updated_at", "last_verified_at", "provenance", "adoption_runner_id", "attestation_job_id"}
 	sort.Strings(got)
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {

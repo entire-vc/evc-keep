@@ -12,11 +12,13 @@ const (
 	SystemdUnit  Kind = "systemd-unit"
 	Credential   Kind = "credential"
 	MCPConfig    Kind = "mcp-config"
+	YAMLScalar   Kind = "yaml-scalar"
 )
 
 // Rule comes from trusted local host policy. Names is an exact allowlist;
 // names parsed out of untrusted files cannot become output metadata.
-// Credential files require exactly one policy-supplied name.
+// Credential files require exactly one policy-supplied name. YAMLScalar names
+// are exact dotted fields; findings preserve the entire field.
 type Rule struct {
 	Glob  string
 	Kind  Kind

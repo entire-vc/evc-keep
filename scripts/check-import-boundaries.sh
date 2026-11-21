@@ -68,7 +68,6 @@ shard_take() {
 probe() {
 	shard_take || return 0
 	name=$1 rule=$2 dir=$3 import=$4 stub=${5:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	mkdir -p "$work/tree/$dir"
 	pkg=$(basename "$dir")
@@ -100,7 +99,6 @@ GO
 allow() {
 	shard_take || return 0
 	name=$1 dir=$2 import=$3 stub=${4:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	mkdir -p "$work/tree/$dir"
 	pkg=$(basename "$dir")
@@ -127,7 +125,6 @@ allow() {
 call() {
 	shard_take || return 0
 	name=$1 rule=$2 dir=$3 recv=$4 stmt=$5 expect=${6:-deny}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	mkdir -p "$work/tree/$dir"
 	# A receiver from internal/identity needs that package imported, unless
@@ -179,7 +176,6 @@ GO
 directive() {
 	shard_take || return 0
 	name=$1 pre=$2 dir=${3:-internal/catalog} symlink=${4:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	mkdir -p "$work/tree/$dir"
 	body=zz_boundary_probe.go
@@ -225,7 +221,6 @@ GO
 depdirective() {
 	shard_take || return 0
 	name=$1 rule=$2 dir=$3 import=$4 head=$5 tail=${6:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	mkdir -p "$work/tree/$dir"
 	{
@@ -281,7 +276,6 @@ check_enabled
 nocompile() {
 	shard_take || return 0
 	name=$1 expect=$2 body=$3 extra=${4:-}
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	mkdir -p "$work/tree/internal/zzbypass"
 	extraimp=
@@ -316,7 +310,6 @@ GO
 allow_test() {
 	shard_take || return 0
 	name=$1 dir=$2 import=$3
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	mkdir -p "$work/tree/$dir"
 	printf 'package %s\n\nimport _ "%s"\n' "$(basename "$dir")" "$import" >"$work/tree/$dir/zz_boundary_probe_test.go"
@@ -334,7 +327,6 @@ allow_test() {
 crypto_call() {
  shard_take || return 0
  name=$1 rule=$2 dir=$3 file=$4 import=$5 stmt=$6 expect=${7:-deny}
- rm -rf "$work/tree"
  mutation_snapshot "$work/tree"
  mkdir -p "$work/tree/$dir"
  imports=$(printf '%s' "$import" | tr ',' '\n')

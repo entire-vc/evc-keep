@@ -18,11 +18,14 @@ fail=0
 # mutate NAME PYTHON: PYTHON edits the string t (a copy of the source s).
 mutate() {
 	name=$1 prog=$2
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! SRC="$work/tree/$src" PROG="$prog" python3 -I -c '
-import os
+	if ! SRC="$work/tree/$src" PROG="$prog" NAME="$name" LIB="$root/scripts/lib" python3 -I -c '
+import os, sys
+sys.path.insert(0, os.environ["LIB"])
+from mutation_edit import named_edit
 p = os.environ["SRC"]
+def edit(text, old, new, occurrence=None):
+    return named_edit(os.environ["NAME"], text, old, new, occurrence, p)
 s = open(p).read()
 t = s
 exec(os.environ["PROG"])
@@ -50,31 +53,31 @@ open(p, "w").write(t)'; then
 # The unmutated packages must be green, or every red below proves nothing.
 mutation_apply_only || (cd "$root/$tdir" && go test -timeout 120s -count=1 $tpkg >"$work/base" 2>&1) || { echo "FAIL baseline is red"; exit 1; }
 
-mutate allowlist-dropped 't=s.replace("	if !slices.Contains(p.cfg.Allow, r.Lane) {", "	if !slices.Contains(p.cfg.Allow, r.Lane) && false {",1)'
-mutate allowlist-empty-lane-only 't=s.replace("	if !slices.Contains(p.cfg.Allow, r.Lane) {", "	if !slices.Contains(p.cfg.Allow, r.Lane) && r.Lane == \"\" {",1)'
-mutate log-token 't=s.replace("	resp, err := p.cfg.HTTP.Do(req)\n", "	p.cfg.Log.Info(\"auth\", \"token\", p.cfg.Token)\n	resp, err := p.cfg.HTTP.Do(req)\n",1)'
-mutate log-claim-token 't=s.replace("\"fingerprint\", shapedBy(fingerprint.Valid, r.Fingerprint))", "\"fingerprint\", shapedBy(fingerprint.Valid, r.Fingerprint), \"claim\", r.ClaimToken)",1)'
-mutate error-carries-body 't=s.replace("		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))\n		return fmt.Errorf(\"%s: status %d\", path, resp.StatusCode)", "		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))\n		return fmt.Errorf(\"%s: status %d: %s\", path, resp.StatusCode, b)",1)'
-mutate transport-error-text 't=s.replace("return fmt.Errorf(\"%s: %s\", path, transportCategory(ctx, err))", "return fmt.Errorf(\"%s: %s: %w\", path, transportCategory(ctx, err), err)",1)'
-mutate exit-code-ignored 't=s.replace("	if err != nil || code != 0 {\n		return ResultFailed", "	if err != nil {\n		return ResultFailed",1)'
-mutate unrecognised-output-ok 't=s.replace("	return ResultFailed // exit 0 with unrecognised output", "	return ResultOK // exit 0 with unrecognised output",1)'
-mutate follow-redirects 't=s.replace("	cfg.HTTP.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }\n", "",1)'
-mutate loop-stops-on-error 't=s.replace("			p.cfg.Log.Warn(\"poll failed\", \"err\", err.Error())\n", "			p.cfg.Log.Warn(\"poll failed\", \"err\", err.Error())\n			return\n",1)'
-mutate env-inherited 't=s.replace("	cmd.Env = []string{\"PATH=/usr/bin:/bin:/opt/homebrew/bin\", \"HOME=\" + homeOf()}\n", "",1)'
-mutate script-relative-accepted 't=s.replace("	if !filepath.IsAbs(cfg.Script) || filepath.Clean(cfg.Script) != cfg.Script {", "	if filepath.IsAbs(\"\") {",1)'
-mutate server-fields-unshaped 't=s.replace("	if ok(v) {", "	if ok != nil {",1)'
-mutate claim-token-unchecked 't=s.replace("	if !tokRe.MatchString(r.ClaimToken) {", "	if false {",1)'
-mutate bad-request-id-run 't=s.replace("		p.cfg.Log.Warn(\"bad request id, ignored\")\n		return nil", "		p.cfg.Log.Warn(\"bad request id, ignored\")",1)'
-mutate lane-logged-unshaped 't=s.replace("\"lane\", shaped(laneRe, r.Lane)", "\"lane\", r.Lane",1)'
-mutate remote-plain-http-accepted 't=s.replace("u.Scheme == \"http\" && isLoopback(u.Hostname())", "u.Scheme == \"http\"",1)'
-mutate empty-token-accepted 't=s.replace("	if cfg.Token == \"\" {", "	if false {",1)'
-mutate empty-allowlist-accepted 't=s.replace("	if len(cfg.Allow) == 0 {", "	if false {",1)'
-mutate allowlist-entry-unvalidated 't=s.replace("		if !laneRe.MatchString(l) {", "		if len(l) < 0 {",1)'
-mutate nothing-running-reported-ok 't=s.replace("	if nothing {\n		return ResultNothingRunning", "	if nothing {\n		return ResultOK",1)'
-mutate bearer-header-dropped 't=s.replace("	req.Header.Set(\"Authorization\", \"Bearer \"+p.cfg.Token)\n", "",1)'
+mutate allowlist-dropped 't=edit(s, "	if !slices.Contains(p.cfg.Allow, r.Lane) {", "	if !slices.Contains(p.cfg.Allow, r.Lane) && false {")'
+mutate allowlist-empty-lane-only 't=edit(s, "	if !slices.Contains(p.cfg.Allow, r.Lane) {", "	if !slices.Contains(p.cfg.Allow, r.Lane) && r.Lane == \"\" {")'
+mutate log-token 't=edit(s, "	resp, err := p.cfg.HTTP.Do(req)\n", "	p.cfg.Log.Info(\"auth\", \"token\", p.cfg.Token)\n	resp, err := p.cfg.HTTP.Do(req)\n")'
+mutate log-claim-token 't=edit(s, "\"fingerprint\", shapedBy(fingerprint.Valid, r.Fingerprint))", "\"fingerprint\", shapedBy(fingerprint.Valid, r.Fingerprint), \"claim\", r.ClaimToken)")'
+mutate error-carries-body 't=edit(s, "		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBody))\n		return fmt.Errorf(\"%s: status %d\", path, resp.StatusCode)", "		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))\n		return fmt.Errorf(\"%s: status %d: %s\", path, resp.StatusCode, b)")'
+mutate transport-error-text 't=edit(s, "return fmt.Errorf(\"%s: %s\", path, transportCategory(ctx, err))", "return fmt.Errorf(\"%s: %s: %w\", path, transportCategory(ctx, err), err)")'
+mutate exit-code-ignored 't=edit(s, "	if err != nil || code != 0 {\n		return ResultFailed", "	if err != nil {\n		return ResultFailed")'
+mutate unrecognised-output-ok 't=edit(s, "	return ResultFailed // exit 0 with unrecognised output", "	return ResultOK // exit 0 with unrecognised output")'
+mutate follow-redirects 't=edit(s, "	cfg.HTTP.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }\n", "")'
+mutate loop-stops-on-error 't=edit(s, "			p.cfg.Log.Warn(\"poll failed\", \"err\", err.Error())\n", "			p.cfg.Log.Warn(\"poll failed\", \"err\", err.Error())\n			return\n")'
+mutate env-inherited 't=edit(s, "	cmd.Env = []string{\"PATH=/usr/bin:/bin:/opt/homebrew/bin\", \"HOME=\" + homeOf()}\n", "")'
+mutate script-relative-accepted 't=edit(s, "	if !filepath.IsAbs(cfg.Script) || filepath.Clean(cfg.Script) != cfg.Script {", "	if filepath.IsAbs(\"\") {")'
+mutate server-fields-unshaped 't=edit(s, "	if ok(v) {", "	if ok != nil {")'
+mutate claim-token-unchecked 't=edit(s, "	if !tokRe.MatchString(r.ClaimToken) {", "	if false {")'
+mutate bad-request-id-run 't=edit(s, "		p.cfg.Log.Warn(\"bad request id, ignored\")\n		return nil", "		p.cfg.Log.Warn(\"bad request id, ignored\")")'
+mutate lane-logged-unshaped 't=edit(s, "\"lane\", shaped(laneRe, r.Lane)", "\"lane\", r.Lane")'
+mutate remote-plain-http-accepted 't=edit(s, "u.Scheme == \"http\" && isLoopback(u.Hostname())", "u.Scheme == \"http\"")'
+mutate empty-token-accepted 't=edit(s, "	if cfg.Token == \"\" {", "	if false {")'
+mutate empty-allowlist-accepted 't=edit(s, "	if len(cfg.Allow) == 0 {", "	if false {")'
+mutate allowlist-entry-unvalidated 't=edit(s, "		if !laneRe.MatchString(l) {", "		if len(l) < 0 {")'
+mutate nothing-running-reported-ok 't=edit(s, "	if nothing {\n		return ResultNothingRunning", "	if nothing {\n		return ResultOK")'
+mutate bearer-header-dropped 't=edit(s, "	req.Header.Set(\"Authorization\", \"Bearer \"+p.cfg.Token)\n", "")'
 src=plugins/mesh/cmd/keep-lane-poller/main.go
-mutate token-file-group-readable 't=s.replace("fi.Mode().Perm()&^0o600 != 0", "fi.Mode().Perm()&0o007 != 0",1)'
-mutate token-file-owner-exec 't=s.replace("fi.Mode().Perm()&^0o600 != 0", "fi.Mode().Perm()&0o077 != 0",1)'
-mutate token-file-error-echoes-content 't=s.replace("return \"\", fmt.Errorf(\"token file must be a single KEEP_POLLER_TOKEN=<token> line or the bare token\")", "return \"\", fmt.Errorf(\"token file must be a single KEEP_POLLER_TOKEN=<token> line or the bare token, got %q\", c)",1)'
-mutate started-logs-token 't=s.replace("log.Info(\"started\", \"lanes\"", "log.Info(\"started\", \"token\", token, \"lanes\"",1)'
+mutate token-file-group-readable 't=edit(s, "fi.Mode().Perm()&^0o600 != 0", "fi.Mode().Perm()&0o007 != 0")'
+mutate token-file-owner-exec 't=edit(s, "fi.Mode().Perm()&^0o600 != 0", "fi.Mode().Perm()&0o077 != 0")'
+mutate token-file-error-echoes-content 't=edit(s, "return \"\", fmt.Errorf(\"token file must be a single KEEP_POLLER_TOKEN=<token> line or the bare token\")", "return \"\", fmt.Errorf(\"token file must be a single KEEP_POLLER_TOKEN=<token> line or the bare token, got %q\", c)")'
+mutate started-logs-token 't=edit(s, "log.Info(\"started\", \"lanes\"", "log.Info(\"started\", \"token\", token, \"lanes\"")'
 exit $fail

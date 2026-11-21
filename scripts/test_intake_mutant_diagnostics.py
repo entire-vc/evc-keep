@@ -18,7 +18,7 @@ class MutantDiagnostics(unittest.TestCase):
             root = Path(tmp)
             (root / 'scripts/lib').mkdir(parents=True)
             for path in ('scripts/lib/gocache.sh', 'scripts/temp-workspace.sh',
-                         'scripts/mutation-helpers.sh', 'scripts/intake_mutant_diagnostics.py'):
+                         'scripts/mutation-helpers.sh', 'scripts/lib/mutation_edit.py', 'scripts/lib/mutation_snapshot.py', 'scripts/intake_mutant_diagnostics.py'):
                 shutil.copyfile(ROOT / path, root / path)
             (root / 'go.mod').write_text('module probe\n')
             (root / 'web/intake').mkdir(parents=True)

@@ -25,6 +25,10 @@ const (
 	StateDeploying   State = "deploying"
 	StateVerifying   State = "verifying"
 	StateRevokingOld State = "revoking_old"
+	// StateRollingBack: a DualKey run failed after its layout began; the
+	// carriers that took the new version are put back on the old one and only
+	// then is the new key ended. The run keeps the class of the failure.
+	StateRollingBack State = "rolling_back"
 	StateDone        State = "done"
 	StateFailed      State = "failed"
 )
@@ -49,8 +53,9 @@ const (
 	// ClassOriginalKeyUnknown: the run is done, but the provider key that stood
 	// behind the old version was not known, so it was not revoked.
 	ClassOriginalKeyUnknown Class = "original_key_unknown"
-	// ClassRollbackUnconfirmed: a failed prepare could not confirm that the new
-	// key it had issued was ended.
+	// ClassRollbackUnconfirmed: a failed run could not confirm that its carriers
+	// are back on the old version, or that the new key it had issued was ended;
+	// the new key is then left alone.
 	ClassRollbackUnconfirmed Class = "rollback_unconfirmed"
 	// ClassPolicyDenied is reported, never stored in a run: the approval a
 	// prod rotation waited for was rejected or expired, so no run exists. It
@@ -152,8 +157,10 @@ type Carriers interface {
 	List(ctx context.Context, ref Ref) ([]Carrier, error)
 }
 
-// Deployer lays the new version out on one carrier. Idempotent per
-// (runID, carrier). The carrier id and version carry no value.
+// Deployer lays the named version out on one carrier. During a rollback
+// (IsRollback(ctx)) the version is the old one; a request id derived from the
+// run and carrier alone must then differ from the layout's. Idempotent per
+// (runID, carrier, rollback). The carrier id and version carry no value.
 //
 // Fencing: the ownership check before the call cannot make the call atomic, a
 // caller can stall between the two for longer than its lease. The context of
@@ -166,7 +173,9 @@ type Deployer interface {
 }
 
 // Verifier reads the carrier back: fingerprint and health. The carrier id and
-// version carry no value.
+// version carry no value. The version named is the one the carrier is expected
+// to hold: on a rollback (IsRollback(ctx)) it is the old version, and the
+// fingerprint reported is the old version's, never the new one's.
 type Verifier interface {
 	Verify(ctx context.Context, ref Ref, c Carrier, version string) (Report, error)
 }
@@ -183,6 +192,21 @@ type Revoker interface {
 // it never moves the record to an older version.
 type DeployedMarker interface {
 	MarkDeployed(ctx context.Context, ref Ref, runID uuid.UUID, version string) error
+}
+
+// Rollbacker is the optional half of Versions for a provider that keeps the
+// old key valid (DualKey). When a layout or a verification fails, the engine puts
+// the carriers back on the old version and only then asks the Rollbacker to end
+// the key it issued, so no live service is left holding a dead key.
+type Rollbacker interface {
+	// CanRollback tells whether the run issued a key of its own that can be
+	// ended: false for a forward-only provider and for a version a human
+	// entered (no key was issued).
+	CanRollback(ctx context.Context, ref Ref, runID uuid.UUID) (bool, error)
+	// RollbackNew ends the key the run issued, confirms it is no longer
+	// active and disables the new version, so the old one is current again. It
+	// is idempotent per runID. Any error means the key is not confirmed ended.
+	RollbackNew(ctx context.Context, ref Ref, runID uuid.UUID) error
 }
 
 // SupersedeChecker is the optional half of Versions that tells whether a version

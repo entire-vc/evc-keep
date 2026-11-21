@@ -57,6 +57,8 @@ type RotateResult struct {
 	ErrorClass  string          `json:"error_class,omitempty"`
 	Carriers    []RotateCarrier `json:"carriers,omitempty"`
 	Approval    *RotateApproval `json:"approval,omitempty"`
+	// IncidentOpened: the failed run left the previous version alive and opened an incident.
+	IncidentOpened bool `json:"incident_opened,omitempty"`
 }
 
 type rotateRoutes struct {
@@ -209,18 +211,21 @@ func (ro *rotateRoutes) status(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, apperr.ClassNotReady, rotateMessage("service unavailable"), rid)
 		return
 	}
-	out := RotateResult{OK: rep.Done, RequestID: run.String(), Approval: ro.approval(rep.Approval)}
+	out := RotateResult{OK: rep.Done, RequestID: run.String(), Approval: ro.approval(rep.Approval), IncidentOpened: rep.IncidentOpened}
 	if rep.Done {
 		out.Version, out.Fingerprint = rep.Version, rep.Fingerprint
 	}
-	if rep.Failed {
+	// A failed run whose incident is still being recorded is answered as in
+	// progress: the final answer of a failure carries its incident.
+	failed := rep.Failed && !rep.Settling
+	if failed {
 		out.ErrorClass = rotateClass(rep.Class)
 	}
 	for _, c := range rep.Carriers {
 		out.Carriers = append(out.Carriers, RotateCarrier{CarrierID: c.CarrierID, Phase: c.Phase, State: c.State})
 	}
 	code := http.StatusAccepted
-	if rep.Done || rep.Failed {
+	if rep.Done || failed {
 		code = http.StatusOK
 	}
 	writeJSON(w, code, out)

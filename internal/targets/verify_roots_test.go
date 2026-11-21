@@ -115,7 +115,7 @@ func TestVerifyCarrierAgentEnvSitsDirectlyInARoot(t *testing.T) {
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	deep := filepath.Join(sub, "sage.env")
+	deep := filepath.Join(sub, "agent.env")
 	if err := os.WriteFile(deep, []byte("MESH_AGENT_KEY="+f.target+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -168,9 +168,9 @@ func TestVerifyCarrierErrorsNameKindAndOrdinalOnly(t *testing.T) {
 	cs := f.agentCarriers(t)
 	good := f.fp(t, f.target)
 	f.write(t, ".mcp.json", "{not json")
-	f.write(t, "mesh-agents.json", `{"agents":[{"name":"Sage","agent_key":"x"},{"name":"Sage","agent_key":"y"}]}`)
+	f.write(t, "mesh-agents.json", `{"agents":[{"name":"Alpha","agent_key":"x"},{"name":"Alpha","agent_key":"y"}]}`)
 	f.write(t, "fiddler.json", `{"agents":"not-an-array"}`)
-	f.write(t, "sage.env", "MESH_AGENT_KEY=$(cmd)\n")
+	f.write(t, "agent.env", "MESH_AGENT_KEY=$(cmd)\n")
 
 	for i, c := range cs {
 		_, err := VerifyCarrier([]string{f.dir}, i+7, c, good, f.key)
@@ -269,7 +269,7 @@ func TestVerifyCarrierSwapAfterCheckStaysInRoot(t *testing.T) {
 	}
 	write(lane, f.target)
 	write(outside, f.others[0])
-	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Sage", LaneDir: lane, BinDir: lane, CfgDir: lane, EnvDir: lane, EnvFile: "sage.env"})
+	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Alpha", LaneDir: lane, BinDir: lane, CfgDir: lane, EnvDir: lane, EnvFile: "agent.env"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestVerifyCarrierLinksBelowTheRootNeverAnswerAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	mk := func(p string) meshkey.Carrier {
-		cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Sage", LaneDir: filepath.Dir(p), BinDir: filepath.Dir(p), CfgDir: filepath.Dir(p), EnvDir: filepath.Dir(p), EnvFile: "sage.env"})
+		cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Alpha", LaneDir: filepath.Dir(p), BinDir: filepath.Dir(p), CfgDir: filepath.Dir(p), EnvDir: filepath.Dir(p), EnvFile: "agent.env"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -359,7 +359,7 @@ func TestVerifyCarrierSiblingWithTheSamePrefixIsOutside(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sibling, ".mcp.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Sage", LaneDir: sibling, BinDir: sibling, CfgDir: sibling, EnvDir: sibling, EnvFile: "sage.env"})
+	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Alpha", LaneDir: sibling, BinDir: sibling, CfgDir: sibling, EnvDir: sibling, EnvFile: "agent.env"})
 	if err != nil {
 		t.Fatal(err)
 	}

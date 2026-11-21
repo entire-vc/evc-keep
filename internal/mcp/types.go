@@ -122,6 +122,8 @@ type RotateResult struct {
 	ErrorClass  string          `json:"error_class,omitempty"`
 	Carriers    []RotateCarrier `json:"carriers,omitempty"`
 	Approval    *DeployApproval `json:"approval,omitempty"`
+	// IncidentOpened: the failed run left the previous version alive and opened an incident.
+	IncidentOpened bool `json:"incident_opened,omitempty"`
 }
 
 // ErrorAnswer is the §4.3 Error row.

@@ -38,7 +38,7 @@ import (
 	"github.com/entire-vc/evc-keep/internal/notify"
 	"github.com/entire-vc/evc-keep/internal/obs"
 	"github.com/entire-vc/evc-keep/internal/registry"
-	"github.com/entire-vc/evc-keep/internal/restart"
+	"github.com/entire-vc/evc-keep/internal/rotation"
 	"github.com/entire-vc/evc-keep/internal/store"
 	"github.com/entire-vc/evc-keep/pkg/gatecard"
 	keepprovider "github.com/entire-vc/evc-keep/pkg/provider"
@@ -389,7 +389,7 @@ func runServe(ctx context.Context, logger *slog.Logger, opts Options) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	restarts := restart.NewRepo(pool)
+	restarts := restartQueue(pool, cfg.RestartLanes, logger)
 	if err := wireSelfRotate(expiryCtx, cfg, opts, local, restarts, logger); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -526,6 +526,7 @@ func meshDeps(cfg config.Config, pool *pgxpool.Pool, local *builtin.Local, outco
 	d := &api.MeshDeps{Vault: meshVault{local.MeshVault()}, Repo: repo,
 		Federation: meshext.NewFederation(pool, repo, identity.NewRepo(pool), meshext.NewVerifier(meshext.ExtensionID, nil)),
 		KeyLevels:  keyLevels, TrustedProxies: cfg.TrustedProxies}
+	d.Rotations = api.NewMeshUIRotations(rotation.NewRuns(pool))
 	if gates != nil { // a nil *Service in the interface would not be nil
 		d.Gates = gates
 	}

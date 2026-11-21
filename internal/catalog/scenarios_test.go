@@ -122,10 +122,14 @@ func (f *fixture) mustBind(scope tenancy.Scope, store Store) {
 	}
 }
 
+// mustRef gives every ref its own locator: an override of one name at
+// another scope in the same store is another value, and an active locator is
+// unique per store (migration 00069).
 func (f *fixture) mustRef(scope tenancy.Scope, name, class string) tenancy.SecretRef {
 	f.t.Helper()
 	s, err := f.cat.CreateRef(f.ctx, CreateRefInput{
-		Org: f.org.ID, Scope: scope, Name: name, Class: class, Type: "generic", ProviderRef: "ref:" + name,
+		Org: f.org.ID, Scope: scope, Name: name, Class: class, Type: "generic",
+		ProviderRef: "ref:" + string(scope.Level) + "/" + scope.ID.String() + "/" + name,
 	})
 	if err != nil {
 		f.t.Fatalf("create ref %s at %v: %v", name, scope, err)

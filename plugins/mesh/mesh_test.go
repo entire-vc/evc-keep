@@ -172,6 +172,158 @@ func TestBadKeyIDFromBackend(t *testing.T) {
 	}
 }
 
+// Only the exact entry "primary" is tolerated beside UUIDs in Mesh's list.
+func TestPrimaryIsExact(t *testing.T) {
+	for _, id := range []string{"pri", "primary2", "Primary", "p1"} {
+		s := newStub(t, uuid.NewString(), "v")
+		s.badID = id
+		p := newProvider(t, s, &bytes.Buffer{})
+		if _, ok, err := p.Current(context.Background(), "x"); ok || !errors.Is(err, mesh.ErrBadAnswer) {
+			t.Errorf("list entry %q accepted: %v %v", id, ok, err)
+		}
+	}
+}
+
+// The original key "primary" is the current key while it is the only active
+// one, under the plugin's alias (this replaces the earlier rule that an active
+// "primary" is never current, which left it unrevoked after a rotation). With a
+// second active key there is no current key, as before.
+func TestActivePrimaryIsCurrentAsAlias(t *testing.T) {
+	agent := uuid.NewString()
+	s := newStub(t, agent, "v")
+	s.primaryOn = true
+	p := newProvider(t, s, &bytes.Buffer{})
+	ctx := context.Background()
+	id, ok, err := p.Current(ctx, "x")
+	if err != nil || !ok || id != mesh.PrimaryAlias(agent) {
+		t.Fatalf("an only active primary is not current under its alias: %q %v %v", id, ok, err)
+	}
+	if !rotation.ValidKeyID(id) {
+		t.Fatalf("the alias is not a key id the core accepts: %q", id)
+	}
+	s.mu.Lock()
+	s.keys[uuid.NewString()] = "active"
+	s.mu.Unlock()
+	if id, ok, err := p.Current(ctx, "x"); err != nil || ok || id != "" {
+		t.Fatalf("primary and an issued key both active, still a current key: %q %v %v", id, ok, err)
+	}
+}
+
+// The alias is part of the ledger format: a run records it before Issue and
+// revokes by it later, possibly in another build. A changed namespace or name
+// would orphan those records, so the value is pinned. It is per agent.
+func TestPrimaryAliasGolden(t *testing.T) {
+	const agent = "6f0a3c1e-1b2d-4c3e-8f4a-5b6c7d8e9f00"
+	if got := mesh.PrimaryAlias(agent); got != "325d9dc1-7084-5031-a6eb-b4cc73d6a62c" {
+		t.Fatalf("PrimaryAlias changed: %s", got)
+	}
+	u := uuid.MustParse(mesh.PrimaryAlias(agent))
+	if u.Version() != 5 {
+		t.Fatalf("alias version %d, want 5 (name-based)", u.Version())
+	}
+	if mesh.PrimaryAlias(agent) == mesh.PrimaryAlias(uuid.NewString()) {
+		t.Fatal("two agents share an alias")
+	}
+}
+
+// Check and Revoke turn the alias back into "primary": the DELETE goes to
+// .../keys/primary, and Check reads the "primary" entry of the list.
+func TestPrimaryAliasCheckAndRevoke(t *testing.T) {
+	agent := uuid.NewString()
+	s := newStub(t, agent, "v")
+	s.primaryOn = true
+	s.keys[uuid.NewString()] = "active" // the new key, so primary is not the last one
+	p := newProvider(t, s, &bytes.Buffer{})
+	ctx := context.Background()
+	alias := mesh.PrimaryAlias(agent)
+
+	if st, err := p.Check(ctx, alias); err != nil || !st.Active {
+		t.Fatalf("Check(alias) before revoke: %+v %v", st, err)
+	}
+	if err := p.Revoke(ctx, alias); err != nil {
+		t.Fatalf("Revoke(alias): %v", err)
+	}
+	s.mu.Lock()
+	ids, on := append([]string(nil), s.delIDs...), s.primaryOn
+	s.mu.Unlock()
+	if len(ids) != 1 || ids[0] != "primary" || on {
+		t.Fatalf("DELETE ids %v, primary active %t", ids, on)
+	}
+	if st, err := p.Check(ctx, alias); err != nil || st.Active {
+		t.Fatalf("Check(alias) after revoke: %+v %v", st, err)
+	}
+}
+
+// Mesh refuses to end the last active key (409): that is an error, not "revoked".
+func TestPrimaryAliasRevokeLastKeyIsError(t *testing.T) {
+	agent := uuid.NewString()
+	s := newStub(t, agent, "v")
+	s.primaryOn = true
+	p := newProvider(t, s, &bytes.Buffer{})
+	if err := p.Revoke(context.Background(), mesh.PrimaryAlias(agent)); err == nil {
+		t.Fatal("a refused revoke of the last key reported success")
+	}
+	if !s.primaryOn {
+		t.Fatal("stub: primary ended")
+	}
+}
+
+// A 404 for "primary" is not believed: Mesh always lists the original key, so
+// the re-check after the 404 must find it under the alias and refuse.
+func TestPrimaryAliasRevoke404IsNotRevoked(t *testing.T) {
+	agent := uuid.NewString()
+	s := newStub(t, agent, "v")
+	s.primaryOn = true
+	s.keys[uuid.NewString()] = "active"
+	s.del404 = true
+	p := newProvider(t, s, &bytes.Buffer{})
+	if err := p.Revoke(context.Background(), mesh.PrimaryAlias(agent)); !errors.Is(err, rotation.ErrUnavailable) {
+		t.Fatalf("a 404 on a listed primary counted as revoked: %v", err)
+	}
+}
+
+// A Mesh key whose own id equals the alias would be taken for the original
+// key: the list is refused, and an issue answer naming the alias is a bad
+// answer that ends nothing (in particular not "primary").
+func TestPrimaryAliasCollisionRefused(t *testing.T) {
+	agent := uuid.NewString()
+	alias := mesh.PrimaryAlias(agent)
+	ctx := context.Background()
+
+	s := newStub(t, agent, "v")
+	s.badID = alias
+	p := newProvider(t, s, &bytes.Buffer{})
+	if _, _, err := p.Current(ctx, "x"); !errors.Is(err, mesh.ErrBadAnswer) {
+		t.Fatalf("a listed key with the alias id accepted: %v", err)
+	}
+	if _, err := p.Check(ctx, alias); !errors.Is(err, mesh.ErrBadAnswer) {
+		t.Fatalf("Check over a list with the alias id: %v", err)
+	}
+
+	s2 := newStub(t, agent, "v")
+	s2.primaryOn = true
+	s2.postBad = alias
+	p2 := newProvider(t, s2, &bytes.Buffer{})
+	if _, err := p2.Issue(ctx, rotation.IssueRequest{Subject: "x", RunID: uuid.New()}); !errors.Is(err, mesh.ErrBadAnswer) {
+		t.Fatalf("an issue answer naming the alias accepted: %v", err)
+	}
+	s2.mu.Lock()
+	defer s2.mu.Unlock()
+	if s2.delSeen != 0 || !s2.primaryOn {
+		t.Fatalf("a bad issue answer ended a key: DELETE %v, primary active %t", s2.delIDs, s2.primaryOn)
+	}
+}
+
+// revoked_at is null for an active key; an empty string is not "active".
+func TestEmptyRevokedAtIsNotActive(t *testing.T) {
+	s := newStub(t, uuid.NewString(), "v")
+	s.emptyRev = uuid.NewString()
+	p := newProvider(t, s, &bytes.Buffer{})
+	if id, ok, err := p.Current(context.Background(), "x"); err != nil || ok || id != "" {
+		t.Fatalf("a key with revoked_at \"\" counted as active: %q %v %v", id, ok, err)
+	}
+}
+
 func TestCurrentNoneActive(t *testing.T) {
 	agent := uuid.NewString()
 	s := newStub(t, agent, "v")

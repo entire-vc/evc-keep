@@ -20,6 +20,8 @@ const (
 	ActionExec Action = "exec"
 	// ActionVerify compares the target's fingerprint with the expected one.
 	ActionVerify Action = "verify"
+	// ActionAdopt attests an existing YAML scalar without writing or restarting.
+	ActionAdopt Action = "adopt"
 	// ActionDiscover asks the runner to inventory the carrier files its own
 	// host policy permits (a `discovery` section) and report path, name,
 	// fingerprint and length of each. It names no secret and no target: the
@@ -27,7 +29,7 @@ const (
 	ActionDiscover Action = "discover"
 )
 
-// TargetKind is a closed list of places a runner can write to. There is no
+// TargetKind is a closed list of places a runner can observe or write. There is no
 // network kind and there must never be one (R-POL-3): a value leaves the host
 // only through a provider, never through a target.
 type TargetKind string
@@ -39,12 +41,14 @@ const (
 	TargetSystemdCredential TargetKind = "systemd-credential" //nolint:gosec // G101: a target kind name, not a credential
 	TargetMCPConfig         TargetKind = "mcp-config"
 	TargetHermesConfig      TargetKind = "hermes-config"
+	// TargetYAMLScalar is read-only: an exact string scalar in a YAML mapping.
+	TargetYAMLScalar TargetKind = "yaml-scalar"
 )
 
 // TargetKinds lists every known kind.
 var TargetKinds = []TargetKind{
 	TargetEnvFile, TargetFile, TargetLaunchdEnv,
-	TargetSystemdCredential, TargetMCPConfig, TargetHermesConfig,
+	TargetSystemdCredential, TargetMCPConfig, TargetHermesConfig, TargetYAMLScalar,
 }
 
 func knownKind(k TargetKind) bool {
@@ -54,6 +58,24 @@ func knownKind(k TargetKind) bool {
 		}
 	}
 	return false
+}
+
+// SupportsAction declares the capabilities of a target job. Exec and discovery
+// have their own policy and do not operate on a Target.
+func (k TargetKind) SupportsAction(a Action) bool {
+	if !knownKind(k) {
+		return false
+	}
+	switch a {
+	case ActionDeploy:
+		return k != TargetYAMLScalar
+	case ActionVerify:
+		return true
+	case ActionAdopt:
+		return k == TargetYAMLScalar
+	default:
+		return false
+	}
 }
 
 // ProviderBuiltin is the provider whose value the server delivers to the
@@ -85,7 +107,8 @@ type Target struct {
 	Path string
 	// Field is the variable or key inside the file: an env name for
 	// env-file, launchd-env and hermes-config (a line in the profile's .env),
-	// a dotted key for mcp-config. Empty for file and systemd-credential.
+	// a dotted key for mcp-config or yaml-scalar. Empty for file and
+	// systemd-credential.
 	Field string
 	// Unit is the launchd label or systemd unit that consumes the target.
 	Unit string
@@ -122,7 +145,7 @@ type Job struct {
 	ExpectedVersion     string
 	ExpectedFingerprint string
 	Action              Action
-	// Target is set for deploy and verify, zero for exec.
+	// Target is set for deploy, verify and adopt, zero for exec.
 	Target Target
 	// Exec is set for exec only.
 	Exec     *Exec
@@ -187,9 +210,15 @@ func (j Job) Validate() error {
 		return invalid("job lifetime exceeds %s", MaxJobTTL)
 	}
 	switch j.Action {
-	case ActionDeploy, ActionVerify:
+	case ActionDeploy, ActionVerify, ActionAdopt:
+		if !j.Target.Kind.SupportsAction(j.Action) {
+			return invalid("target does not support this action")
+		}
 		if j.Exec != nil {
 			return invalid("exec is set on a %s job", j.Action)
+		}
+		if j.Action == ActionAdopt && (j.Target.Consumer != "" || j.Target.Unit != "") {
+			return invalid("consumer and unit are not used by an adopt job")
 		}
 		if j.Action == ActionVerify && j.Target.Consumer != "" {
 			// Check's consumer-allowlist gate sits after its ActionVerify
@@ -279,7 +308,7 @@ func (t Target) Validate() error {
 // inside the file.
 func kindHasField(k TargetKind) bool {
 	switch k {
-	case TargetEnvFile, TargetLaunchdEnv, TargetMCPConfig, TargetHermesConfig:
+	case TargetEnvFile, TargetLaunchdEnv, TargetMCPConfig, TargetHermesConfig, TargetYAMLScalar:
 		return true
 	}
 	return false
@@ -291,8 +320,8 @@ func (t Target) validateField() error {
 		if !envFieldRe.MatchString(t.Field) {
 			return invalid("field must be an environment variable name")
 		}
-	case TargetMCPConfig:
-		if !keyFieldRe.MatchString(t.Field) {
+	case TargetMCPConfig, TargetYAMLScalar:
+		if !keyFieldRe.MatchString(t.Field) || len(t.Field) > 256 {
 			return invalid("field must be a dotted key")
 		}
 	default:
@@ -334,9 +363,9 @@ func sortedKeys(m map[string]string) []string {
 func (j Job) NeedsValue() bool { return j.Action == ActionDeploy || j.Action == ActionExec }
 
 // NeedsFingerprintKey reports whether the runner is given the store's
-// fingerprint key, and no value, to do the job: a verify or a discover job. The key
+// fingerprint key, and no value, to do a verify, adopt or discover job. The key
 // lets the runner compute the fingerprint of what a carrier holds; nothing
 // else about the secret reaches the host.
 func (j Job) NeedsFingerprintKey() bool {
-	return j.Action == ActionVerify || j.Action == ActionDiscover
+	return j.Action == ActionVerify || j.Action == ActionDiscover || j.Action == ActionAdopt
 }

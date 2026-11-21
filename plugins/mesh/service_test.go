@@ -206,7 +206,7 @@ func TestRotateSelfCanaryDoesNotSurface(t *testing.T) {
 	}
 	r2 := newSelfRig(t, c.Value(0))
 	r2.s.mu.Lock()
-	r2.s.failTxt = `{"key":"` + c.Value(0) + `"}`
+	r2.s.failTxt = `{"api_key":"` + c.Value(0) + `"}`
 	r2.s.mu.Unlock()
 	r2.sink.failActivate = errors.New(c.Value(0))
 	_, err2 := mesh.RotateSelf(context.Background(), r2.p, r2.sink, r2.hook, uuid.New())

@@ -31,17 +31,26 @@ gspec.loader.exec_module(mutations)
 
 
 @functools.lru_cache(maxsize=None)
-def lint(content, ref):
+def lint_raw(content, ref):
     request = json.dumps({"content": content, "dry_run": True,
                           "include_jobs": True, "ref": ref})
     run = subprocess.run(["glab", "api", "-X", "POST", "-H", "Content-Type: application/json",
                           "projects/entire-vc%2Fevc-keep/ci/lint", "--input", "-"],
                          input=request, text=True, capture_output=True, check=True)
-    data = json.loads(run.stdout)
+    return json.loads(run.stdout)
+
+
+@functools.lru_cache(maxsize=None)
+def lint(content, ref):
+    data = lint_raw(content, ref)
     if not data["valid"] or data["errors"]:
         raise RuntimeError("GitLab rejected the simulated configuration")
     # No job may soft-pass, the selector included: its answer gates post-review jobs.
-    assert all(job["allow_failure"] is False for job in data["jobs"])
+    # The one exception is the manual backtest, soft by design and needed by no
+    # job (pinned by check_no_manual_jobs).
+    soft = sorted(job["name"] for job in data["jobs"]
+                  if job["allow_failure"] is not False and job["name"] != contracts.MR_BACKTEST)
+    assert not soft, soft
     return data
 
 
@@ -56,7 +65,7 @@ def main():
     mr_jobs = {job["name"] for job in expanded["jobs"]}
     post_review = set(mutations.ms.post_review_jobs(parent))
     mr_names = {re.sub(r" \d+/\d+$", "", n) for n in mr_jobs}
-    assert not {n for n in mr_names if "mutation" in n}, sorted(mr_names)
+    assert {n for n in mr_names if "mutation" in n} <= contracts.MR_JOBS, sorted(mr_names)
     assert not mr_names & post_review, mr_names & post_review
     assert not any(re.search(r"check-[\w-]*mutations\.sh", "\n".join(job["script"])) for job in expanded["jobs"])
     assert "release" not in mr_names
@@ -65,14 +74,19 @@ def main():
                                CI_OPEN_MERGE_REQUESTS="113")
     manual = lint(yaml.safe_dump(parent), ref)
     assert any(job["name"] == "full-tests" for job in manual["jobs"])
-    print("PASS manual parent with open MR: valid=true; full-tests trigger included")
+    manual_names = {re.sub(r" \d+/\d+$", "", job["name"]) for job in manual["jobs"]}
+    assert not manual_names & post_review, sorted(manual_names & post_review)
+    assert not any(re.search(r"check-[\w-]*mutations\.sh", "\n".join(job["script"])) for job in manual["jobs"])
+    print("PASS manual parent with open MR: valid=true; full-tests trigger included; no mutation job")
     # Before its MR exists GitLab does not define CI_OPEN_MERGE_REQUESTS at all.
     parent["variables"].update(CI_PIPELINE_SOURCE="push", CI_COMMIT_BRANCH="topic")
     del parent["variables"]["CI_OPEN_MERGE_REQUESTS"]
-    branch = lint(yaml.safe_dump(parent), ref)
-    jobs = {job["name"] for job in branch["jobs"]}
-    assert jobs == contracts.SCAN_ONLY_JOBS, jobs
-    print("PASS branch push before its MR exists: valid=true; jobs=" + ",".join(sorted(jobs)))
+    # workflow:rules filter it out: GitLab answers with no job (or with its
+    # "filtered out" error), never with a pipeline.
+    branch = lint_raw(yaml.safe_dump(parent), ref)
+    jobs = {job["name"] for job in branch.get("jobs") or []}
+    assert not jobs, sorted(jobs)
+    print("PASS branch push before its MR exists: no pipeline (" + "; ".join(branch.get("errors") or ["no jobs"]) + ")")
     # A push to the default branch runs no mutation job; the schedule runs all.
     every_mutation = {name + "-mutations" for name in contracts.MUTATIONS}
     parent["variables"].update(CI_COMMIT_BRANCH="main", CI_DEFAULT_BRANCH="main")
@@ -88,11 +102,9 @@ def main():
     main_data = lint(yaml.safe_dump(parent), ref)
     main_push = names(main_data)
     assert "full-tests" in main_push and "security-hygiene" in main_push, main_push
-    assert not main_push & every_mutation, sorted(main_push & every_mutation)
-    # The intake browser suites keep the main push they had inside intake-browser.
-    assert runners(main_data) == {contracts.INTAKE_MUTATIONS}, sorted(runners(main_data))
-    print("PASS main push: valid=true; ordinary checks present; mutation jobs=0; mutation scripts run only in "
-          + contracts.INTAKE_MUTATIONS)
+    assert not main_push & post_review, sorted(main_push & post_review)
+    assert not runners(main_data), sorted(runners(main_data))
+    print("PASS main push: valid=true; ordinary checks present; mutation jobs=0; mutation scripts=0")
     parent["variables"].update(CI_PIPELINE_SOURCE="schedule")
     sched_data = lint(yaml.safe_dump(parent), ref)
     scheduled = names(sched_data)
@@ -100,7 +112,8 @@ def main():
     assert "netns-mutation-run" in runners(sched_data), sorted(runners(sched_data))
     assert "release" not in scheduled
     print(f"PASS schedule: valid=true; all {len(post_review)} post-review jobs present")
-    # A release tag runs the full set like the schedule, then `release`.
+    # A release tag runs lint, tests and build, then `release`, which calls the
+    # nightly gate; no mutation job (they run once a night).
     # Lint evaluates workflow:rules against the real (branch) ref, where the
     # branch-push rule would match first; on a tag CI_COMMIT_BRANCH is unset and
     # it cannot. So this simulation keeps only the tag rule of the workflow (its
@@ -112,19 +125,20 @@ def main():
     assert len(tagged_parent["workflow"]["rules"]) == 1
     tag_data = lint(yaml.safe_dump(tagged_parent), ref)
     tagged = names(tag_data)
-    assert post_review <= tagged, sorted(post_review - tagged)
+    assert not tagged & post_review, sorted(tagged & post_review)
+    assert not runners(tag_data), sorted(runners(tag_data))
+    assert {"security-hygiene", "fmt-vet", "full-tests", "build"} <= tagged, sorted(tagged)
     assert not any(job["when"] == "manual" for job in tag_data["jobs"]), tagged
     release = [job for job in tag_data["jobs"] if job["name"] == "release"]
     assert len(release) == 1 and release[0]["stage"] == "release", release
     assert release[0]["when"] == "on_success" and not release[0].get("needs"), release
+    assert release[0]["script"][0] == contracts.RELEASE_GATE, release[0]["script"]
     stages = tagged_parent["stages"]
     assert stages[-1] == "release", stages
     late = [job["name"] for job in tag_data["jobs"] if job["name"] != "release" and job["stage"] == "release"]
     assert not late, late
-    mutation_jobs = [job for job in tag_data["jobs"] if job["stage"] == "post-review" or job["name"] in runners(tag_data)]
-    assert all(stages.index(job["stage"]) < stages.index("release") for job in mutation_jobs)
-    print(f"PASS release tag: valid=true; all {len(post_review)} post-review jobs present; "
-          f"release last, no needs, after {len(mutation_jobs)} mutation job instances")
+    print(f"PASS release tag: valid=true; 0 of {len(post_review)} post-review jobs; "
+          f"release last, no needs, nightly gate first ({len(tag_data['jobs'])} jobs)")
     # The child generator (no pipeline uses it now): everything, nothing, one job.
     config = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
     for label, chosen in (("all", sorted(post_review)), ("none", []), ("one", ["audit-mutations"])):

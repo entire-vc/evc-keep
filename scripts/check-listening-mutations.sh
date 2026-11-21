@@ -19,21 +19,20 @@ run='TestListeningLogMeansSocketsAreBound'
 fail=0
 # log-before-bind: move the announcement above the first net.Listen.
 name=log-before-bind
-rm -rf "$work/tree"
 mutation_snapshot "$work/tree"
 logpat='logger\.Info\(fmt\.Sprintf\("keep-server listening on'
 logline=$(grep -E "$logpat" "$root/$src" || true)
-# Two passes: the log line sits after the binds, so read it first, then drop the
-# original and print it once, right before the first net.Listen of serveBoth.
+# Move the unique log line to the uniquely anchored start of serveBoth.
+# Both literal edits refuse missing or ambiguous source.
 if [ "$(printf '%s\n' "$logline" | grep -c .)" != 1 ]; then
 	echo "FAIL $name: expected exactly one listening log line in $src — the source changed, update this script"
 	fail=1
-elif ! awk -v held="$logline" '
-	index($0, "keep-server listening on") { next }
-	/^func serveBoth\(/ { infn = 1 }
-	infn && !done && /net\.Listen\(/ { print held; done = 1 }
-	{ print }
-	END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+elif ! { mutation_edit "$root/$src" "$logline
+" '' >"$work/moved" &&
+	mutation_edit "$work/moved" 'func serveBoth(srv, tlsSrv *http.Server, logger *slog.Logger) int {
+	plain, err := net.Listen("tcp", srv.Addr)' "func serveBoth(srv, tlsSrv *http.Server, logger *slog.Logger) int {
+$logline
+	plain, err := net.Listen(\"tcp\", srv.Addr)" >"$work/tree/$src"; }; then
 	echo "FAIL $name: mutation did not apply — the source changed, update this script"
 	fail=1
 elif [ "$(grep -cE "$logpat" "$work/tree/$src")" != 1 ] ||

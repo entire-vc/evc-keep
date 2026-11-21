@@ -242,3 +242,30 @@ func TestRotateRefusesAnUnexpectedStatusCode(t *testing.T) {
 		}
 	}
 }
+
+// A failed run that left the previous version alive and opened an incident says
+// so: the agent sees a bool, nothing else about the incident.
+func TestRotateFailedRunReportsTheOpenIncident(t *testing.T) {
+	srv, _ := rotateServer(t, `{"ok":false,"request_id":"`+testRequest+`","error_class":"deploy_failed","incident_opened":true,"carriers":[{"carrier_id":"`+testRunnerID+`","phase":"deploy","state":"stale"}]}`)
+	got := answers(t, session(t, newTestServer(t, srv.URL, "tok"), call(1, "rotate", rotateArgs(nil))))
+	var res RotateResult
+	if err := json.Unmarshal([]byte(got[0].Result.Content[0].Text), &res); err != nil || got[0].Result.IsError || res.OK || !res.IncidentOpened {
+		t.Fatalf("got %+v err %v", res, err)
+	}
+	// Positive control: the same failure without the flag stays false.
+	srv2, _ := rotateServer(t, `{"ok":false,"request_id":"`+testRequest+`","error_class":"deploy_failed"}`)
+	got = answers(t, session(t, newTestServer(t, srv2.URL, "tok"), call(1, "rotate", rotateArgs(nil))))
+	res = RotateResult{}
+	if err := json.Unmarshal([]byte(got[0].Result.Content[0].Text), &res); err != nil || res.IncidentOpened {
+		t.Fatalf("flag set without an incident: %+v err %v", res, err)
+	}
+}
+
+// The field is a bool: a text in its place is a broken server and refused whole.
+func TestRotateRefusesATextIncidentField(t *testing.T) {
+	srv, _ := rotateServer(t, `{"ok":false,"request_id":"`+testRequest+`","error_class":"deploy_failed","incident_opened":"opened because kc123"}`)
+	got := answers(t, session(t, newTestServer(t, srv.URL, "tok"), call(1, "rotate", rotateArgs(nil))))
+	if !got[0].Result.IsError || strings.Contains(got[0].Result.Content[0].Text, "kc123") {
+		t.Fatalf("got %+v", got[0])
+	}
+}

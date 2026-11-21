@@ -447,6 +447,37 @@ func TestVerifyExpectsLatestEnabledVersion(t *testing.T) {
 	}
 }
 
+// A rotation that put its carriers back on the old version reads them against
+// that version while the newer one is still enabled; an unpinned request keeps
+// expecting the newest, and the pin is part of what the request id is bound to.
+func TestVerifyPinnedVersionIsTheOneExpected(t *testing.T) {
+	f := newFixture(t)
+	f.carrier(t, "test-host", "/srv/a")
+	if _, err := f.pool.Exec(f.ctx, `INSERT INTO secret_versions(id,org_id,secret_id,provider_version,fingerprint,length,disabled,created_at) VALUES($1,$2,$3,'v2','kfp1:k1:cccccccccccccccc',12,false,now()+interval '1 second')`,
+		mustID(t), f.org, f.secret); err != nil {
+		t.Fatal("insert version")
+	}
+	pinned := f.verifyRequest(t)
+	pinned.ProviderVersion = "v1"
+	rep, err := f.repo.SubmitVerify(f.ctx, pinned)
+	if err != nil || rep.Version != "v1" || rep.Fingerprint != "kfp1:k1:abcdefghijklmnop" {
+		t.Fatal("a pinned verification must expect the pinned version")
+	}
+	if rep2, err := f.repo.SubmitVerify(f.ctx, f.verifyRequest(t)); err != nil || rep2.Version != "v2" {
+		t.Fatal("an unpinned verification must still expect the newest enabled version")
+	}
+	unpinned := pinned
+	unpinned.ProviderVersion = ""
+	if _, err := f.repo.SubmitVerify(f.ctx, unpinned); !errors.Is(err, ErrConflict) {
+		t.Fatal("the same request id with another pin is a conflict")
+	}
+	gone := f.verifyRequest(t)
+	gone.ProviderVersion = "v9"
+	if _, err := f.repo.SubmitVerify(f.ctx, gone); !errors.Is(err, ErrNotFound) {
+		t.Fatal("a pin on a version that does not exist or is disabled must not fall back to the newest")
+	}
+}
+
 func TestVerifyNetworkLookingTargetIsFailed(t *testing.T) {
 	f := newFixture(t)
 	c := f.carrier(t, "test-host", "/srv/host:8080/key")

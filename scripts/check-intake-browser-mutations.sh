@@ -21,15 +21,7 @@ mutate() {
  cp "$root"/scripts/lib/*.mjs "$work/tree/scripts/lib/"
  cp "$root/web/intake/testdata/rfc9180-x25519-aes256.json" "$work/tree/web/intake/testdata/"
  # Match the complete small module so a two-line reorder is one mutation.
- INTAKE_MUTATION_FROM="$from" INTAKE_MUTATION_TO="$to" awk '
-  BEGIN { from=ENVIRON["INTAKE_MUTATION_FROM"]; to=ENVIRON["INTAKE_MUTATION_TO"] }
-  { source=source $0 ORS }
-  END {
-   rest=source; while ((i=index(rest,from))) { count++; rest=substr(rest,i+length(from)) }
-   if(count!=1) exit 1
-   i=index(source,from)
-   printf "%s%s%s", substr(source,1,i-1), to, substr(source,i+length(from))
-  }' "$root/web/intake/hpke.js" > "$work/tree/web/intake/hpke.js" || { echo "FAIL $name: mutation did not apply — the source changed, update this script"; exit 1; }
+ mutation_edit "$root/web/intake/hpke.js" "$from" "$to" > "$work/tree/web/intake/hpke.js" || { echo "FAIL $name: mutation did not apply — the source changed, update this script"; exit 1; }
  # fixture-hash edits a fixture, not source: nothing to anchor in apply-only mode.
  if [ "$name" = fixture-hash ] && mutation_apply_only; then return; fi
  mutation_applied "$name" && return
@@ -87,17 +79,11 @@ mutate label "HPKE-v1" "HPKE-v0"
 mutate mode "new Uint8Array([0]),pskHash" "new Uint8Array([1]),pskHash"
 mutate nonce "sequence++" "0n"
 mutate context "concat(enc,recipient)" "concat(recipient,enc)"
-rm -rf "$work/tree"
-mkdir "$work/tree"
-(cd "$root" && tar --exclude=.git --exclude=.gocache --exclude=.gomodcache -cf - .) | (cd "$work/tree" && tar -xf -)
+mutation_snapshot "$work/tree"
 # Exercise the actual browser job entrypoint against the production header.
-python3 - "$work/tree/internal/api/intake.go" <<'PYHEADER'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]);s=p.read_text()
-old='w.Header().Set("Cache-Control", "no-store")'
-if s.count(old)!=1:raise SystemExit('FAIL no-store: mutation target is not unique')
-p.write_text(s.replace(old,'w.Header().Del("Cache-Control")',1))
-PYHEADER
+name=no-store
+mutation_edit "$work/tree/internal/api/intake.go" 'w.Header().Set("Cache-Control", "no-store")' 'w.Header().Del("Cache-Control")' >"$work/edited"
+mv "$work/edited" "$work/tree/internal/api/intake.go"
 if mutation_apply_only; then
  echo 'ok   no-store: applies'
 else
@@ -113,11 +99,7 @@ fi
 cp "$root/internal/api/intake.go" "$work/tree/internal/api/intake.go"
 cross_mutate() {
  name=$1 from=$2 to=$3
- awk -v from="$from" -v to="$to" '
-  { n=0; rest=$0; while ((i=index(rest,from))) { n++; rest=substr(rest,i+length(from)) }; count+=n }
-  (i=index($0,from)) {$0=substr($0,1,i-1) to substr($0,i+length(from))}
-  {print}
-  END {exit count!=1}' "$root/web/intake/hpke.js" > "$work/tree/web/intake/hpke.js" || { echo "FAIL $name: mutation did not apply — the source changed, update this script"; exit 1; }
+ mutation_edit "$root/web/intake/hpke.js" "$from" "$to" > "$work/tree/web/intake/hpke.js" || { echo "FAIL $name: mutation did not apply — the source changed, update this script"; exit 1; }
  mutation_applied "$name" && return
  if (cd "$work/tree" && go test -tags intake_browser -count=1 -run '^TestIntakeBrowserInteroperatesWithGo$' ./internal/builtin > "$work/cross-result" 2>&1); then
   echo "FAIL $name: Go accepted a broken browser request binding"; exit 1

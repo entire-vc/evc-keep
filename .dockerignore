@@ -6,3 +6,4 @@ web/node_modules
 *.env
 *.key
 *.pem
+scripts/testbed/out

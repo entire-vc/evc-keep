@@ -58,6 +58,7 @@ type resumable struct {
 	ref      Ref
 	id       uuid.UUID
 	attempts int
+	prev     State // the state the run was in before this sweep
 }
 
 // Resume relaunches every active run that nothing is driving: no goroutine of
@@ -79,6 +80,11 @@ func (s *Service) Resume(ctx context.Context) (int, error) {
 	for _, r := range given {
 		o, approval := s.originOf(ctx, r.ref, r.id)
 		s.recordOutcome(ctx, r.ref, r.id, o, approval, ClassInternalError)
+		if r.prev == StateRollingBack {
+			// The rollback never got an answer: the issued key stays (a live
+			// service may hold it) and the incident says so.
+			s.giveUpRollback(ctx, r)
+		}
 	}
 	runs, err := s.e.store.claimResumes(ctx, cfg, s.now(), s.inflightIDs())
 	if err != nil {
@@ -107,4 +113,16 @@ func (s *Service) originOf(ctx context.Context, ref Ref, id uuid.UUID) (Origin, 
 	o.Scope, o.Name = scope, name
 	approval, _ := uuid.Parse(appr)
 	return o, approval
+}
+
+// giveUpRollback opens the rollback_unconfirmed incident for a run that was
+// given up on while rolling back. The new key is not touched.
+func (s *Service) giveUpRollback(ctx context.Context, r resumable) {
+	if s.e.incident == nil {
+		return
+	}
+	if err := s.e.incident.Open(ctx, IncidentRecord{Ref: r.ref, RunID: r.id, Class: ClassRollbackUnconfirmed}); err != nil {
+		return
+	}
+	_ = s.e.store.markIncidentGivenUp(ctx, r.id)
 }

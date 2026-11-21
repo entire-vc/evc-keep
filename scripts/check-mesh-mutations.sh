@@ -20,24 +20,22 @@ pkg=./cmd/keep-server/app
 # mutate NAME FILE FROM TO TEST: replace one literal FROM with TO in FILE and
 # require TEST (package ./cmd/keep-server/app) to fail with a real --- FAIL.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 file=$2 from=$3 to=$4 test=$5
-	rm -rf "$work/tree"
+	# Apply-only: queued, checked against the source in one run at the end.
+	if mutation_apply_only; then
+		if [ -z "${6:-}" ]; then
+			mutation_batch "$file" "$from" "$to" "${mutation_occurrence:-}"
+		else
+			mutation_batch "$file" "$from" "$to" "${mutation_occurrence:-}" "$6" "$7" "$8" "${mutation_occurrence2:-}"
+		fi
+		return
+	fi
 	mutation_snapshot "$work/tree"
-	if ! python3 - "$work/tree/$file" "$from" "$to" "${6:-}" "${7:-}" "${8:-}" <<'PY'
-import sys
-p, a, b, f2, a2, b2 = sys.argv[1:]
-s = open(p).read()
-if s.count(a) < 1:
-    sys.exit(1)
-open(p, 'w').write(s.replace(a, b, 1))
-if f2:
-    q = p.rsplit('/tree/', 1)[0] + '/tree/' + f2
-    t = open(q).read()
-    if t.count(a2) < 1:
-        sys.exit(1)
-    open(q, 'w').write(t.replace(a2, b2, 1))
-PY
+	if ! { mutation_edit "$work/tree/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/edited" &&
+		mv "$work/edited" "$work/tree/$file" &&
+		{ [ -z "${6:-}" ] || { mutation_edit "$work/tree/$6" "$7" "$8" "${mutation_occurrence2:-}" >"$work/edited" && mv "$work/edited" "$work/tree/$6"; }; }; }
 	then
 		echo "FAIL $name: mutation did not apply, the source changed, update this script"
 		fail=1
@@ -69,6 +67,52 @@ if ! printf 'x kc%s-v2-secret x\n' 0123456789abcdef01234567 | grep -Eq "$canary_
 fi
 
 A=internal/api/mesh.go
+# Settings: snapshots must be applied, validated only after ownership, and
+# committed atomically with a fresh binding or store upgrade. Unknown values
+# must never be echoed on the response surface.
+S=internal/api/mesh_handshake.go
+mutate settings-ignored $S 'settings, hasSettings, settingsErr = meshext.ParseSettings(req.Settings)' 'settings, hasSettings, settingsErr = meshext.Settings{}, false, nil' TestMeshHandshakeRecordsApprovalsSetting
+MUTATION_OCCURRENCE=1 mutate settings-type-open internal/meshext/settings.go 'return Settings{}, false, ErrInvalidSettings' 'return Settings{}, false, nil' TestMeshHandshakeRecordsApprovalsSetting
+MUTATION_OCCURRENCE=3 mutate settings-bool-open internal/meshext/settings.go 'return Settings{}, false, ErrInvalidSettings' 'return Settings{}, false, nil' TestMeshHandshakeRecordsApprovalsSetting
+mutate settings-before-auth $S 'settings, hasSettings, settingsErr = meshext.ParseSettings(req.Settings)' 'settings, hasSettings, settingsErr = meshext.ParseSettings(req.Settings)
+		if settingsErr != nil { writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid mesh settings", requestID); return }' TestMeshHandshakeRecordsApprovalsSetting
+MUTATION_OCCURRENCE=1 mutate settings-binding-nonatomic internal/meshext/repo.go 'if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {' 'if err := error(nil); err != nil {' TestMeshHandshakeSettingsFailureIsAtomic
+MUTATION_OCCURRENCE=2 mutate settings-upgrade-nonatomic internal/meshext/repo.go 'if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {' 'if err := error(nil); err != nil {' TestMeshHandshakeSettingsFailureIsAtomic
+mutate settings-upgrade-org-unchecked $S '} else if live && pend.Org == org && m.meshSecretMatch' '} else if live && m.meshSecretMatch' TestMeshHandshakeRecordsApprovalsSetting
+mutate settings-upgrade-echo $S '			if !checkSettings() {' '			w.Header().Set("X-S", string(req.Settings))
+			if !checkSettings() {' TestMeshHandshakeSettingsValueNeverLeaks
+mutate settings-response-leak $S 'var req meshHandshakeRequest' 'w.Header().Set("X-Settings-Debug", string(body))
+	var req meshHandshakeRequest' TestMeshHandshakeSettingsValueNeverLeaks
+# Approvals channel (threat model §4.2.3): a change of approvals_via_mesh is
+# journaled in its own transaction with only the new value, and snapshots
+# apply in the order Mesh signed them.
+M=internal/meshext/settings.go
+mutate channel-journal-off $M '	if err := s.Journal(ctx, tx, org, s.Settings); err != nil {' '	if err := error(nil); err != nil {' TestMeshHandshakeJournalsApprovalsChannel
+mutate channel-journal-noop $S 'rec, err := m.journalApprovalsChannel(ctx, tx, org, ws, requestID, approvalsChannelReason(s))' 'rec, err := audit.Record{}, error(nil)' TestMeshHandshakeJournalsApprovalsChannel
+mutate channel-journal-error-ignored $M '		return fmt.Errorf("%w: %w", ErrSettingsJournal, err)' '		return nil' TestMeshApprovalsChannelJournalFailureRollsBack
+mutate channel-changed-from-rows $M '	if sameSetting(prev, s.Settings.ApprovalsViaMesh) {' '	if false {' TestMeshHandshakeJournalsApprovalsChannel
+mutate channel-journal-echo $S 'approvalsChannelReason(s))' 'audit.NewReason(string(req.Settings)))' TestMeshApprovalsChannelJournalHoldsNoSnapshotValue
+mutate channel-order-off $M ' AND (settings_signed_at IS NULL OR $4 >= settings_signed_at)`' '`' TestMeshHandshakeAppliesSnapshotsInSignedOrder
+mutate channel-equal-keeps-time $M ' AND (settings_signed_at IS NULL OR $4 >= settings_signed_at)`' ' AND (settings_signed_at IS NULL OR $4 >= settings_signed_at) AND approvals_via_mesh IS DISTINCT FROM $3`' TestMeshHandshakeAppliesSnapshotsInSignedOrder
+mutate channel-time-not-stored $M 'SET approvals_via_mesh = $3, settings_signed_at = $4' 'SET approvals_via_mesh = $3, settings_signed_at = settings_signed_at + 0 * $4' TestMeshHandshakeAppliesSnapshotsInSignedOrder
+mutate channel-time-unsigned $S 'snapshot = []meshext.Snapshot{{Settings: settings, SignedAt: secs,' 'snapshot = []meshext.Snapshot{{Settings: settings, SignedAt: m.now().Unix(),' TestMeshHandshakeAppliesSnapshotsInSignedOrder
+# Lock order: bind and upgrade journal the settings change only after seal,
+# which waits for the key-level lock; journaling first holds the audit chain
+# head a key-level change needs while it holds that lock.
+SEALFIRST='	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
+		return err
+	}'
+JOURNALFIRST='	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
+		return err
+	}
+	if err := seal(ctx); err != nil {
+		return err
+	}'
+MUTATION_OCCURRENCE=1 mutate channel-bind-journal-before-seal internal/meshext/repo.go "$SEALFIRST" "$JOURNALFIRST" 'TestMeshApprovalsChannelJournalAfterSealUnderKeyLevelChange/bind'
+MUTATION_OCCURRENCE=2 mutate channel-upgrade-journal-before-seal internal/meshext/repo.go "$SEALFIRST" "$JOURNALFIRST" 'TestMeshApprovalsChannelJournalAfterSealUnderKeyLevelChange/upgrade'
 # HMAC: the signature check, its no-op replacement, the timestamp window,
 # the workspace-bound lookup, the uniform answer for an unknown workspace.
 mutate hmac-check-off      $A 'if !valid {' 'if !valid && false {'                       TestMeshEventsRejectWrongSignatureAndCreateNoEffect
@@ -76,8 +120,8 @@ mutate hmac-compare-len    pkg/fingerprint/mac.go 'return hmac.Equal(tag, mac(v,
 mutate hmac-noop-call      $A 'valid, err := m.deps.Vault.VerifyEvent(r.Context(), org.String(), ws.String(), append([]byte(tsRaw+"."), body...), got)' 'valid, err := true, error(nil); _, _, _, _ = ws, org, got, tsRaw' TestMeshEventsRejectWrongSignatureAndCreateNoEffect
 mutate hmac-body-unbound   $A 'append([]byte(tsRaw+"."), body...)' '[]byte(tsRaw)'                  TestMeshEventsRejectWrongSignatureAndCreateNoEffect
 mutate hmac-ts-unbound     $A 'append([]byte(tsRaw+"."), body...)' 'body'                            TestMeshEventsRejectWrongSignatureAndCreateNoEffect
-mutate skew-window-off     $A 'if d := m.now().Sub(time.Unix(secs, 0)); d > meshMaxSkew || d < -meshMaxSkew {' 'if d := m.now().Sub(time.Unix(secs, 0)); d > 1<<62 {' TestMeshEventsRejectWrongSignatureAndCreateNoEffect
-mutate skew-future-bound-off $A '|| d < -meshMaxSkew {' '{'                                          TestMeshEventsRejectWrongSignatureAndCreateNoEffect
+MUTATION_OCCURRENCE=1 mutate skew-window-off     $A 'if d := m.now().Sub(time.Unix(secs, 0)); d > meshMaxSkew || d < -meshMaxSkew {' 'if d := m.now().Sub(time.Unix(secs, 0)); d > 1<<62 {' TestMeshEventsRejectWrongSignatureAndCreateNoEffect
+MUTATION_OCCURRENCE=1 mutate skew-future-bound-off $A '|| d < -meshMaxSkew {' '{'                                          TestMeshEventsRejectWrongSignatureAndCreateNoEffect
 # Signature form: Mesh sends bare lowercase hex, Keep's docs had "v1="; both
 # carry one MAC. Bare hex must not skip the MAC, must not be refused (the
 # defect: the old CutPrefix requirement), and the parser must not be a no-op.
@@ -108,7 +152,7 @@ mutate restore-skips-token internal/builtin/mesh_vault.go '		path, err := meshPa
 		}
 		path, err := meshPath(c.ws, kind)' TestMeshCheckpointRestoresEveryKind
 mutate meshpath-kind-open  internal/builtin/mesh_vault.go 'case MeshExtensionToken, MeshEventsSecret, MeshExtensionSigningSecret, MeshRotatorSigningSecret, MeshKeepSecret:' 'default:' TestMeshPathIsClosed
-mutate meshpath-ws-open    internal/builtin/mesh_vault.go 'if !meshWorkspaceRe.MatchString(workspace) {' 'if false {' TestMeshPathIsClosed
+MUTATION_OCCURRENCE=1 mutate meshpath-ws-open    internal/builtin/mesh_vault.go 'if !meshWorkspaceRe.MatchString(workspace) {' 'if false {' TestMeshPathIsClosed
 pkg=./pkg/fingerprint
 mutate verify-mac-unkeyed  pkg/fingerprint/mac.go 'm := hmac.New(sha256.New, key)' 'm := hmac.New(sha256.New, []byte("k")); _ = key' TestVerifyMAC
 # The window digest: compared over all 32 bytes, and compared at all.
@@ -119,7 +163,7 @@ pkg=./cmd/keep-server/app
 mutate audit-ok-off        $A '	m.audit(r, p, requestID, audit.StatusOK, audit.ErrClassNone)' '	_ = audit.StatusOK' TestMeshInstallSealsAndAudits
 mutate audit-denied-off    $A '		m.audit(r, p, requestID, audit.StatusFailed, audit.ErrClassPermissionDenied)
 		writeError(w, http.StatusNotFound' '		writeError(w, http.StatusNotFound' TestMeshInstallSealsAndAudits
-mutate no-store-off        $A '	w.Header().Set("Cache-Control", "no-store")' '	_ = w' TestMeshInstallSealsAndAudits
+MUTATION_OCCURRENCE=1 mutate no-store-off        $A '	w.Header().Set("Cache-Control", "no-store")' '	_ = w' TestMeshInstallSealsAndAudits
 mutate token-not-sealed    $A 'err = m.deps.Vault.Put(r.Context(), org, wss, meshKindToken, string(req.ExtensionToken))' 'err = error(nil)' TestMeshInstallSealsAndAudits
 mutate reinstall-restore-off $A '		_ = cp.Restore(r.Context())' '		_ = r' TestMeshFailedReinstallKeepsPreviousCredentials
 mutate checkpoint-empty    internal/builtin/mesh_vault.go '		cp.prior[kind] = v' '		v.Wipe()' TestMeshFailedReinstallKeepsPreviousCredentials
@@ -156,17 +200,17 @@ mutate mesh-url-open       internal/meshext/repo.go 'case "https":
 		return true' 'case "https", "ftp":
 		return true' TestMeshInstallAuthorizationAndOwnership
 mutate url-creds-allowed   internal/meshext/repo.go 'u.Host == "" || u.User != nil ||' 'u.Host == "" ||' TestMeshInstallAuthorizationAndOwnership
-mutate unknown-fields-ok   $A '	dec.DisallowUnknownFields()
+MUTATION_OCCURRENCE=1 mutate unknown-fields-ok   $A '	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req)' '	if err := dec.Decode(&req)'                                           TestMeshInstallAuthorizationAndOwnership
 mutate vault-put-skips     internal/builtin/mesh_vault.go '	b := []byte(value)' '	if kind == MeshEventsSecret {
 		return nil
 	}
 	b := []byte(value)' TestMeshInstallAuthorizationAndOwnership
-mutate wrong-secret-kind   internal/builtin/mesh_vault.go 'for _, kind := range []string{MeshEventsSecret, MeshExtensionSigningSecret} {' 'for _, kind := range []string{MeshKeepSecret} {' TestMeshEventReplayDoesNotDuplicateEffect
+MUTATION_OCCURRENCE=1 mutate wrong-secret-kind   internal/builtin/mesh_vault.go 'for _, kind := range []string{MeshEventsSecret, MeshExtensionSigningSecret} {' 'for _, kind := range []string{MeshKeepSecret} {' TestMeshEventReplayDoesNotDuplicateEffect
 # Leaks: each plants a leak on a different surface; the canary test must see it.
-mutate leak-token-header   $A '	w.Header().Set("Cache-Control", "no-store")' '	w.Header().Set("X-Debug", string(req.ExtensionToken))' TestMeshCredentialsNeverLeak
+MUTATION_OCCURRENCE=1 mutate leak-token-header   $A '	w.Header().Set("Cache-Control", "no-store")' '	w.Header().Set("X-Debug", string(req.ExtensionToken))' TestMeshCredentialsNeverLeak
 mutate leak-secret-error   $A 'writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid mesh install fields", requestID)' 'writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid mesh install fields "+string(req.EventsEndpointSecret), requestID)' TestMeshCredentialsNeverLeak
-mutate leak-keep-secret-hdr $A '	w.Header().Set("Cache-Control", "no-store")' '	w.Header().Set("X-Keep", keepSecret)'     TestMeshCredentialsNeverLeak
+MUTATION_OCCURRENCE=1 mutate leak-keep-secret-hdr $A '	w.Header().Set("Cache-Control", "no-store")' '	w.Header().Set("X-Keep", keepSecret)'     TestMeshCredentialsNeverLeak
 mutate leak-event-body-log $A '	ev, err := meshext.ParseEvent(body, ws, m.now(), r.Header.Get(meshHeaderEvent), r.Header.Get(meshHeaderDelivery))' '	w.Header().Set("X-Echo", string(body))
 	ev, err := meshext.ParseEvent(body, ws, m.now(), r.Header.Get(meshHeaderEvent), r.Header.Get(meshHeaderDelivery))'                                                                                  TestMeshCredentialsNeverLeak
 mutate manifest-event-drift mesh-extension.json '"task.gate.decided"]' '"task.gate.decided", "extra.event"]' TestMeshManifestMatchesServer
@@ -187,6 +231,13 @@ mutate rotator-schema-unchecked cmd/keep-server/app/mesh_manifest_test.go 'var m
 mutate rotator-api-capability-unknown $RT '"agent_keys:read"' '"agent_keys:bogus"' TestMeshManifestValidAgainstMeshSchema
 mutate manifest-description-dropped mesh-extension.json '"description": "Store and distribute secrets to people and agents; values never enter model context.",' '' TestMeshManifestValidAgainstMeshSchema
 mutate manifest-api-capability-unknown mesh-extension.json '"agent_keys:read"' '"agent_keys:bogus"' TestMeshManifestValidAgainstMeshSchema
+mutate manifest-comments-write mesh-extension.json '"tasks:write"]' '"tasks:write", "comments:write"]' TestMeshManifestDeclaresOnlyUsedRights
+mutate manifest-secrets-write mesh-extension.json '"tasks:write"]' '"tasks:write", "secrets:write"]' TestMeshManifestDeclaresOnlyUsedRights
+mutate manifest-any-extra-right mesh-extension.json '"tasks:write"]' '"tasks:write", "docs:read"]' TestMeshManifestDeclaresOnlyUsedRights
+mutate manifest-used-right-dropped mesh-extension.json ', "tasks:write"]' ']' TestMeshManifestDeclaresOnlyUsedRights
+mutate manifest-exact-check-off cmd/keep-server/app/mesh_manifest_test.go 'if !slices.Equal(api, keepAPIRights) {' 'if false {' TestMeshManifestDeclaresOnlyUsedRights mesh-extension.json '"tasks:write"]' '"tasks:write", "docs:read"]'
+mutate manifest-member-check-off cmd/keep-server/app/mesh_manifest_test.go 'if !slices.Contains(keepAPIRights, r) {' 'if false {' TestMeshManifestDeclaresOnlyUsedRights mesh-extension.json '"tasks:write"]' '"tasks:write", "docs:read"]'
+mutate manifest-allowlist-widened cmd/keep-server/app/mesh_manifest_test.go '"agent_keys:read", "agents:read", "members:read"' '"agent_keys:read", "agents:read", "comments:write", "members:read"' TestMeshManifestDeclaresOnlyUsedRights mesh-extension.json '"tasks:write"]' '"tasks:write", "comments:write"]'
 mutate manifest-sidebar-title mesh-extension.json '"title": "Keep"' '"title": "Secrets"' TestMeshManifestMatchesServer
 mutate manifest-sidebar-path mesh-extension.json '"path": "/mesh/ui/secrets"' '"path": "/mesh/ui/keep"' TestMeshManifestMatchesServer
 mutate manifest-project-level mesh-extension.json '"project": false' '"project": true' TestMeshManifestMatchesServer
@@ -275,7 +326,7 @@ mutate secret-tls-off-put  internal/api/router.go 'requireTLS(http.HandlerFunc(m
 mutate secret-tls-off-resolve internal/api/router.go 'requireTLS(http.HandlerFunc(mr.handleResolveSecret))' 'http.HandlerFunc(mr.handleResolveSecret)' TestMeshSecretRoutesGated
 mutate secret-ns-shared    internal/builtin/mesh_vault.go 'return "mesh/" + workspace + "/secrets/" + ref, nil' 'return "mesh/secrets/" + ref, nil' TestMeshSecretNamespaceIsolation
 mutate secret-ns-root      internal/builtin/mesh_vault.go 'return "mesh/" + workspace + "/secrets/" + ref, nil' 'return "mesh/" + workspace + "/" + ref, nil' TestMeshSecretNamespaceIsolation
-mutate secret-ref-open     internal/builtin/mesh_vault.go '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' '^.*$' TestMeshSecretRefIsClosed internal/api/mesh.go '		default:
+MUTATION_OCCURRENCE2=1 mutate secret-ref-open     internal/builtin/mesh_vault.go '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' '^.*$' TestMeshSecretRefIsClosed internal/api/mesh.go '		default:
 			return false' '		default:'
 mutate secret-dotdot-open  internal/builtin/mesh_vault.go ' || strings.Contains(ref, "..") {' ' || (strings.Contains(ref, "..") && false) {' TestMeshSecretRefIsClosed internal/api/mesh.go 'strings.Contains(ref, "..") {' 'false {'
 mutate secret-notfound-503 internal/builtin/mesh_vault.go 'if errors.Is(err, provider.ErrNotFound) || errors.Is(err, provider.ErrDisabled) {
@@ -431,26 +482,28 @@ mutate hs-skew-off          $HS '	if d := m.now().Sub(time.Unix(secs, 0)); d > m
 	got, err := hex.DecodeString' $H
 mutate hs-extension-open    $HS 'if err != nil || (req.ExtensionID != meshext.ExtensionID && !rotator) ||' 'if err != nil ||' $H
 mutate hs-short-secret      $HS 'len(req.SigningSecret) < meshMinSigningSecret ||' 'len(req.SigningSecret) < 1 ||' $H
-mutate hs-window-expiry-off $R '`DELETE FROM mesh_pending_installs WHERE expires_at <= now()`' '`DELETE FROM mesh_pending_installs WHERE false`' $H "$R" ' AND secret_sha256 = $4 AND expires_at > now()`' ' AND secret_sha256 = $4`'
+MUTATION_OCCURRENCE2=2 mutate hs-window-expiry-off $R '`DELETE FROM mesh_pending_installs WHERE expires_at <= now()`' '`DELETE FROM mesh_pending_installs WHERE false`' $H "$R" ' AND secret_sha256 = $4 AND expires_at > now()`' ' AND secret_sha256 = $4`'
 # An expired window and its digest are deleted: on lookup, on opening any
 # window, and by the periodic sync round.
 mutate drop-expired-off     $R '`DELETE FROM mesh_pending_installs WHERE expires_at <= now()`' '`DELETE FROM mesh_pending_installs WHERE false`' $H
-mutate drop-expired-live-off $R '	if err := r.DropExpiredPending(ctx); err != nil {
+MUTATION_OCCURRENCE=1 mutate drop-expired-live-off $R '	if err := r.DropExpiredPending(ctx); err != nil {
 		return Pending{}, false, err
 	}' '' $H
-mutate drop-expired-open-off $R '	if err := r.DropExpiredPending(ctx); err != nil {
+MUTATION_OCCURRENCE=1 mutate drop-expired-open-off $R '	if err := r.DropExpiredPending(ctx); err != nil {
 		return time.Time{}, err
 	}' '' $H
 mutate drop-expired-sync-off cmd/keep-server/app/mesh_sync.go '	if err := repo.DropExpiredPending(ctx); err != nil {' '	if err := error(nil); err != nil {' TestMeshSyncRoundDropsExpiredWindows
 mutate drop-expired-wire-off cmd/keep-server/app/mesh_sync.go '		meshSyncRound(ctx, repo, f, log)' '		repo.ReconcileAll(ctx, f, log)' TestMeshSyncLoopDropsExpiredWindows
-mutate hs-window-reusable   $R 'DELETE FROM mesh_pending_installs
+MUTATION_OCCURRENCE=1 mutate hs-window-reusable   $R 'DELETE FROM mesh_pending_installs
  WHERE workspace_id = $1 AND org_id' 'UPDATE mesh_pending_installs SET opened_at = opened_at
  WHERE workspace_id = $1 AND org_id' $H
 mutate hs-bind-no-events    $HS 'meshext.ModeExtension, func(ctx context.Context) error {
 		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)' 'meshext.ModeExtension, func(ctx context.Context) error {
 		return nil' $H
 mutate hs-bind-no-audit     $HS '	}
+	logJournaled()
 	m.audit(r, installer, requestID, audit.StatusOK, audit.ErrClassNone)' '	}
+	logJournaled()
 	_ = installer' $H
 mutate hs-upgrade-no-events $HS '		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)' '		return nil' TestMeshHandshakeUpgradesStoreBinding
 # UpgradeStore (repo layer): each clause of the two statements and the seal
@@ -570,8 +623,14 @@ mutate up-meshurl-off     $U "AND mode = \$5 AND rtrim(mesh_url, '/') = rtrim(\$
 mutate up-seal-noop       $U '	if err := seal(ctx); err != nil {
 		return err
 	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("meshext: upgrade: %w", err)' '	if err := error(nil); err != nil {
+		return err
+	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -579,8 +638,14 @@ mutate up-seal-noop       $U '	if err := seal(ctx); err != nil {
 mutate up-seal-ignored    $U '	if err := seal(ctx); err != nil {
 		return err
 	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("meshext: upgrade: %w", err)' '	_ = seal(ctx)
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("meshext: upgrade: %w", err)' TestUpgradeStoreRefusals
 pkg=./cmd/keep-server/app
@@ -607,7 +672,7 @@ mutate hs-refusal-log       $HS '	if !live || !m.meshSecretMatch(pend.SecretSHA2
 # The secret is sealed only after the window is spent, and a failed seal
 # binds nothing.
 B=TestMeshHandshakeBindConsumesWindowBeforeSealing
-mutate hs-seal-before-consume $R '	tag, err := tx.Exec(ctx, `
+MUTATION_OCCURRENCE=1 MUTATION_OCCURRENCE2=1 mutate hs-seal-before-consume $R '	tag, err := tx.Exec(ctx, `
 DELETE FROM mesh_pending_installs' '	if err := seal(ctx); err != nil {
 		return err
 	}
@@ -615,29 +680,38 @@ DELETE FROM mesh_pending_installs' '	if err := seal(ctx); err != nil {
 DELETE FROM mesh_pending_installs' $B "$R" '	if err := seal(ctx); err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {' '	if err := tx.Commit(ctx); err != nil {'
+	if err := setBindingSettings(' '	if err := setBindingSettings('
 # Include the bind-specific commit error so the earlier BindRotator callback
 # cannot capture this mutation.
 mutate hs-seal-error-ignored  $R '	if err := seal(ctx); err != nil {
+		return err
+	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("meshext: bind: %w", err)' '	if err := seal(ctx); err != nil && false {
 		return err
 	}
+	if err := setBindingSettings(ctx, tx, workspace, p.Org, settings); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("meshext: bind: %w", err)' $B
 mutate hs-seal-outside-tx     $HS '	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(ctx context.Context) error {
 		return m.deps.Vault.Put(ctx, pend.Org.String(), ws.String(), meshKindEvents, signingSecret)
-	}); err != nil {' '	if err := m.deps.Vault.Put(r.Context(), pend.Org.String(), ws.String(), meshKindEvents, signingSecret); err != nil {
+	}, snapshot...); err != nil {' '	if err := m.deps.Vault.Put(r.Context(), pend.Org.String(), ws.String(), meshKindEvents, signingSecret); err != nil {
 		writeError(w, http.StatusInternalServerError, apperr.ClassInternal, "internal error", requestID)
 		return
 	}
-	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(context.Context) error { return nil }); err != nil {' $B
-# BindPending refuses a window that expired after the lookup on its own.
-mutate hs-bind-expiry-off     $R 'DELETE FROM mesh_pending_installs
+	if err := m.deps.Repo.BindPending(r.Context(), ws, pend, meshext.ModeExtension, func(context.Context) error { return nil }, snapshot...); err != nil {' $B
+# BindPending refuses a window that expired after the lookup on its own,
+# with the expired-window cleanup intact: the witness is the subtest that
+# reaches BindPending without LivePending, so a red from the cleanup cannot
+# stand in for it (hs-window-expiry-off covers the cleanup).
+MUTATION_OCCURRENCE=1 mutate hs-bind-expiry-off     $R 'DELETE FROM mesh_pending_installs
  WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()`' 'DELETE FROM mesh_pending_installs
- WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4`' $B
+ WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4`' $B/expired_after_lookup
 # The route and handler guards: TLS, limiter, lock, no-store, org match,
 # journal of a refused window.
 G=TestMeshHandshakeGuards
@@ -651,10 +725,10 @@ mutate hs-no-store-off        $HS '	m.audit(r, installer, requestID, audit.Statu
 mutate pending-no-store-off   $HS '	m.auditAction(r, p, requestID, audit.ActionMeshInstallPending, audit.StatusOK, audit.ErrClassNone)
 	w.Header().Set("Cache-Control", "no-store")' '	m.auditAction(r, p, requestID, audit.ActionMeshInstallPending, audit.StatusOK, audit.ErrClassNone)' $G
 mutate pending-org-match-off  $RT 'chain(requireTLS, authenticate(ir, logger, false), identity.RequireOrgMatch("org_id"))(http.HandlerFunc(mr.handlePendingInstall))' 'chain(requireTLS, authenticate(ir, logger, false))(http.HandlerFunc(mr.handlePendingInstall))' $G
-mutate pending-denied-no-audit $HS '		m.auditAction(r, p, requestID, audit.ActionMeshInstallPending, audit.StatusFailed, audit.ErrClassPermissionDenied)
+MUTATION_OCCURRENCE=1 mutate pending-denied-no-audit $HS '		m.auditAction(r, p, requestID, audit.ActionMeshInstallPending, audit.StatusFailed, audit.ErrClassPermissionDenied)
 		writeError(w, http.StatusNotFound' '		writeError(w, http.StatusNotFound' $G
 W=TestMeshPendingInstallWindow
-mutate pending-admin-off    $HS '		m.auditAction(r, p, requestID, audit.ActionMeshInstallPending, audit.StatusFailed, audit.ErrClassPermissionDenied)
+MUTATION_OCCURRENCE=1 mutate pending-admin-off    $HS '		m.auditAction(r, p, requestID, audit.ActionMeshInstallPending, audit.StatusFailed, audit.ErrClassPermissionDenied)
 		writeError(w, http.StatusNotFound' '		_ = admin
 	}
 	if false {
@@ -678,7 +752,7 @@ mutate pending-digest-b64    $HS '	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated' TestMeshHandshakeSecretNeverLeaks internal/api/mesh_handshake.go '	"encoding/hex"' '	"encoding/base64"
 	"encoding/hex"'
-mutate pending-digest-prefix $HS 'RequestID: requestID})
+MUTATION_OCCURRENCE=1 mutate pending-digest-prefix $HS 'RequestID: requestID})
 }' 'RequestID: requestID[:0] + req.SigningSecretSHA256[:16]})
 }' TestMeshHandshakeSecretNeverLeaks
 mutate pending-unknown-fields $HS '	dec.DisallowUnknownFields()' '	_ = dec' $W
@@ -756,7 +830,7 @@ mutate delivery-unlocked       internal/meshext/repo.go 'SELECT pg_advisory_lock
 # A delivery and a reinstall take one workspace lock: under a second name a
 # delivery seals mid-reinstall and the failed reinstall's rollback restores
 # the older token.
-mutate delivery-own-lock       internal/meshext/repo.go '	conn, unlock, err := r.lock(ctx, workspaceLock, workspace)' '	conn, unlock, err := r.lock(ctx, "mesh-token:", workspace)' TestMeshTokenDeliveryWaitsForFailingReinstall
+MUTATION_OCCURRENCE=1 mutate delivery-own-lock       internal/meshext/repo.go '	conn, unlock, err := r.lock(ctx, workspaceLock, workspace)' '	conn, unlock, err := r.lock(ctx, "mesh-token:", workspace)' TestMeshTokenDeliveryWaitsForFailingReinstall
 # Waiting deliveries count against the lock slots: without the bound each
 # holds a connection and the lock owner waits forever for one to seal on.
 mutate delivery-pool-unbounded internal/meshext/repo.go 'lockSlots: make(chan struct{}, n)}' 'lockSlots: make(chan struct{}, n+64)}' TestMeshTokenWaitingDeliveriesDoNotExhaustThePool
@@ -959,7 +1033,8 @@ mutate rot-window-single-use $R 'DELETE FROM mesh_rotator_pending_installs
  WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now()' 'DELETE FROM mesh_rotator_pending_installs
  WHERE workspace_id = $1 AND org_id = $2 AND opened_by = $3 AND secret_sha256 = $4 AND expires_at > now() AND false' $T
 if mutation_apply_only; then
-	:
+	# The queued mutants against the tree as it is; $root is only read.
+	mutation_batch_run "$root" || fail=1
 elif (cd "$root" && go test -count=1 -p 1 -json -run 'TestMesh' ./cmd/keep-server/app ./internal/meshext >"$work/base" 2>&1) && ! grep -q -- '--- SKIP' "$work/base" && [ "$(grep -c -- '--- PASS' "$work/base")" -ge 35 ]; then
 	echo "ok   baseline: Mesh tests green on the real code, none skipped"
 else

@@ -18,7 +18,7 @@ class HpkeDiagnostics(unittest.TestCase):
             (root / 'scripts/lib').mkdir(parents=True)
             # Everything the real gate sources or imports; a list of names goes stale
             # (mutation-helpers.sh was added later and the probe died before the gate ran).
-            names = ['scripts/lib/gocache.sh', 'scripts/temp-workspace.sh', 'scripts/mutation-helpers.sh',
+            names = ['scripts/lib/gocache.sh', 'scripts/temp-workspace.sh', 'scripts/mutation-helpers.sh', 'scripts/lib/mutation_edit.py', 'scripts/lib/mutation_snapshot.py',
                      'scripts/intake_mutant_diagnostics.py', 'scripts/check-intake-browser.mjs']
             names += sorted(str(p.relative_to(ROOT)) for p in (ROOT / 'scripts/lib').glob('*.mjs'))
             for name in names:

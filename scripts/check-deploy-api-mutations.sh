@@ -20,6 +20,9 @@ import subprocess
 import sys
 
 root, work = map(Path, sys.argv[1:])
+import sys
+sys.path.insert(0, str(root / 'scripts/lib'))
+from mutation_edit import named_edit as mutation_edit
 env = os.environ.copy()
 apply_only = os.environ.get('MUTATION_APPLY_ONLY') == '1'
 
@@ -142,11 +145,7 @@ failed = False
 for name, rel, before, after, package, test in mutations:
     path = work / 'tree' / rel
     original = (root / rel).read_text()
-    if original.count(before) != 1:
-        print('FAIL ' + name + ': mutation target is not unique - the source changed, update this script')
-        failed = True
-        continue
-    path.write_text(original.replace(before, after, 1))
+    path.write_text(mutation_edit(name, original, before, after, src=rel))
     try:
         if apply_only:
             print('ok   ' + name + ': applies', flush=True)

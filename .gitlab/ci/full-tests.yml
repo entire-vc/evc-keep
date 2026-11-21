@@ -167,4 +167,4 @@ intake-browser:
     - ./scripts/check-intake-browser.sh
     # The Mesh screen in a real browser, framed from another origin. The proof it
     # can fail (check-mesh-ui-browser-mutations.sh) runs in intake-browser-mutations.
-    - go test -race -tags mesh_ui_browser -timeout 240s -count=1 -run '^TestMeshUIBrowserScenario$' ./cmd/keep-server/app
+    - go test -race -tags mesh_ui_browser -timeout 240s -count=1 -run '^TestMeshUIBrowser(Scenario|RotationRun|YAMLAdoption)$' ./cmd/keep-server/app

@@ -79,26 +79,19 @@ name="" want="" needle="" broken=0 expect=clean
 # narrower rule — this comment is that limitation, recorded up front.
 LEAK_RE='[a-z2-7]{52}|[A-Za-z0-9+/]{72,}|[0-9a-f]{64}'
 
-# mask - blot out anything LEAK_RE-shaped in a line meant only to help a
-# maintainer see WHY a mutant did not match (build failure, wrong test,
-# missing needle) — printed straight from `go test -v` output, before this
-# script's own leak check further down ever runs on it. The classes mirror
-# LEAK_RE with the case spelled out explicitly instead of relying on a
-# case-insensitive sed flag: portable across the sed this script actually
-# runs under (BSD locally, busybox in the golang:1.25-alpine CI image).
-mask() {
-	sed -E 's/[A-Za-z2-7]{52,}|[A-Za-z0-9+\/]{72,}|[0-9a-fA-F]{64}/<token-shaped>/g'
-}
+# A diagnostic line meant to help a maintainer see WHY a mutant did not match
+# (build failure, SQL error, wrong test, missing needle) is never copied from
+# `go test -v` output: scripts/test-result-names.sh prints only test names
+# declared in the tree, package paths and counts, none of them from the log.
 
 # begin NAME WANT [NEEDLE] — start a mutant: a fresh copy of the tree.
 begin() {
 	name=$1 want=$2 needle=${3:-} broken=0
 	if ! mutation_selected; then broken=1; return; fi
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 }
 
-# edit FILE FROM TO — replace the first literal FROM with TO in
+# edit FILE FROM TO [OCCURRENCE] — replace a named literal FROM with TO in
 # internal/identity/FILE of the copy (or in FILE itself when it is given as an
 # internal/... or test/... path). May be repeated for one mutant.
 edit() {
@@ -107,12 +100,7 @@ edit() {
 	internal/* | test/*) src=$1 ;;
 	*) src=$pkg/$1 ;;
 	esac
-	# ENVIRON, not `awk -v`: -v interprets backslash escapes (\n would become a newline).
-	if ! FROM=$2 TO=$3 awk '
-		BEGIN { from = ENVIRON["FROM"]; to = ENVIRON["TO"] }
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$work/tree/$src" >"$work/edited"; then
+	if ! mutation_edit "$work/tree/$src" "$2" "$3" "${4:-}" >"$work/edited"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		broken=1
@@ -151,19 +139,23 @@ judge_run() {
 		exit 1
 	elif grep -q -e '\[build failed\]' -e '\[setup failed\]' "$work/out"; then
 		echo "FAIL $name: red only because the mutant does not build:"
-		grep -e 'build failed' -e '\.go:[0-9]*:[0-9]*:' "$work/out" | head -3 | mask
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	elif [ "${SQLERR_OK:-}" != 1 ] && grep -q 'SQLSTATE 42' "$work/out"; then
 		echo "FAIL $name: red because of a SQL syntax/schema error, not the removed protection:"
-		grep 'SQLSTATE 42' "$work/out" | head -2 | mask
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	elif ! grep -F -q -- "--- FAIL: $want" "$work/out"; then
 		echo "FAIL $name: red, but not on $want (the wrong attack caught it):"
-		grep -- '--- FAIL' "$work/out" | head -3 | mask
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	elif [ -n "$needle" ] && ! grep -F -q -- "$needle" "$work/out"; then
 		echo "FAIL $name: $want went red, but not on [$needle]:"
-		grep -F -- '_test.go' "$work/out" | head -3 | mask
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	elif leak=$(grep -E '^[[:space:]]' "$work/out" | grep -E -i -o -e "$LEAK_RE" | head -1) && [ -n "$leak" ]; then
 		# The failure text of a red run is what lands in a CI log: it must not
@@ -187,8 +179,9 @@ judge_run() {
 
 # mutate NAME FILE WANT FROM TO [NEEDLE] — one-edit mutant.
 mutate() {
+	mutation_take_occurrences
 	begin "$1" "$3" "${6:-}"
-	edit "$2" "$4" "$5"
+	edit "$2" "$4" "$5" "${mutation_occurrence:-}"
 	run
 }
 
@@ -230,9 +223,9 @@ run
 mutate db-error-is-401           middleware.go $T 'writeNotReady(w, requestID)' 'writeUnauthenticated(w, requestID)' 'dead database must answer 503'
 # the database error Authenticate returns on a dead pool must never carry the
 # token it was asked to check — the "db-down-error" surface must see it plain
-mutate db-error-echoes-token     repo.go    $T 'return Principal{}, fmt.Errorf("identity: authenticate: %w", err)' 'return Principal{}, fmt.Errorf("identity: authenticate: %w: %s", err, Reveal(token))' 'surface "db-down-error"'
+MUTATION_OCCURRENCE=1 mutate db-error-echoes-token     repo.go    $T 'return Principal{}, fmt.Errorf("identity: authenticate: %w", err)' 'return Principal{}, fmt.Errorf("identity: authenticate: %w: %s", err, Reveal(token))' 'surface "db-down-error"'
 # stdout, the log package and slog's default — each on the path it was missed on
-mutate issue-prints-token        repo.go    $T 'hash := HashToken(token)' 'fmt.Println(Reveal(token)); hash := HashToken(token)' 'surface "stdout+stderr+log"'
+MUTATION_OCCURRENCE=1 mutate issue-prints-token        repo.go    $T 'hash := HashToken(token)' 'fmt.Println(Reveal(token)); hash := HashToken(token)' 'surface "stdout+stderr+log"'
 begin authenticate-log-printf-token $T 'surface "stdout+stderr+log"'
 edit repo.go '"io"' '"io"
 	"log"'
@@ -333,12 +326,12 @@ edit test/security/identity_attack_test.go '"encoding/base32"' '"crypto/sha256"
 edit test/security/identity_attack_test.go 't.Errorf("canary %s found on surface %q (%d bytes of text; not printed)", c.name, s.label, len(s.text))' 't.Errorf("canary %s found on surface %q hash=%x", c.name, s.label, sha256.Sum256([]byte(issued[identity.KindAgent].Token)))'
 run leak
 # The needle-mismatch branch above (a mutant's own `begin`/`mutate` NEEDLE not
-# found in `$work/out`) is diagnostic, not a verdict: it greps the raw `go
+# found in `$work/out`) is diagnostic, not a verdict: it once grepped the raw `go
 # test -v` output for any line mentioning `_test.go`, which is every single
-# t.Errorf/t.Fatalf line go test prints — so before `mask` it was just as able
+# t.Errorf/t.Fatalf line go test prints — so it was once just as able
 # to print a live token as the "does not build" and "wrong attack" branches
 # above it, and LEAK_RE's own check further below never runs for a needle
-# miss (this branch returns first). Prove `mask` actually closes it: the same
+# miss (this branch returns first). Prove the names-only report closes it: the same
 # live-token edit as leakre-catches-uppercased-leak just above, but with a
 # NEEDLE this run's output will never contain, so it is this branch — not the
 # LEAK_RE branch `run leak` above already covers — that has to catch it.

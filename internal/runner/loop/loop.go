@@ -22,11 +22,13 @@ import (
 type Runner struct {
 	Transport Transport
 	// Me is the runner's own identity from its enrollment, never from a job.
-	Me       runnerproto.Identity
-	Keys     runnerproto.TrustedKeys
-	Policy   runnerproto.HostPolicy
-	Journal  runnerproto.Journal
-	Limiter  *runnerproto.Limiter
+	Me      runnerproto.Identity
+	Keys    runnerproto.TrustedKeys
+	Policy  runnerproto.HostPolicy
+	Journal runnerproto.Journal
+	Limiter *runnerproto.Limiter
+	// Discover caps discover jobs per hour; nil refuses them.
+	Discover *runnerproto.DiscoverLimiter
 	Delivery *ecdh.PrivateKey
 	Outbox   *Outbox
 	// Deploy carries the Apply seams; Key is set per job.
@@ -148,6 +150,13 @@ func (r *Runner) recoverStarted() error {
 		if p.Closed {
 			continue
 		}
+		if p.IsDiscover {
+			if err := r.Outbox.CloseDiscover(p.JobID, failDiscover(runnerproto.ErrClassInternal)); err != nil {
+				return err
+			}
+			r.Log.Warn("runner.job", "job_id", p.JobID, "status", "interrupted", "error_class", string(runnerproto.ErrClassInternal))
+			continue
+		}
 		if err := r.Outbox.Close(p.JobID, runnerproto.Result{ErrorClass: runnerproto.ErrClassInternal}); err != nil {
 			return err
 		}
@@ -167,7 +176,11 @@ func (r *Runner) flush(ctx context.Context) error {
 		if !p.Closed {
 			continue
 		}
-		switch err := r.Transport.SendResult(ctx, p.JobID, p.Result); {
+		send := func() error { return r.Transport.SendResult(ctx, p.JobID, p.Result) }
+		if p.IsDiscover {
+			send = func() error { return r.Transport.SendDiscoverResult(ctx, p.JobID, p.Discover) }
+		}
+		switch err := send(); {
 		case err == nil:
 		case errors.Is(err, ErrRefused):
 			r.Log.Warn("runner.result", "job_id", p.JobID, "status", "refused")
@@ -187,13 +200,16 @@ func (r *Runner) flush(ctx context.Context) error {
 // A job whose outcome cannot be put on disk returns ErrOutbox: the loop must
 // not go on running jobs it cannot report.
 func (r *Runner) handle(ctx context.Context, sj runnerproto.SignedJob) error {
-	bf := &beginFirst{r: r}
+	bf := &beginFirst{r: r, discover: isDiscoverPayload(sj.Payload)}
 	j, err := runnerproto.VerifyJob(sj, r.Keys, r.Me, r.now(), bf)
 	if err != nil {
 		if bf.failed {
 			return ErrOutbox
 		}
 		return r.reject(sj, err)
+	}
+	if j.Action == runnerproto.ActionDiscover {
+		return r.closeDiscover(ctx, j)
 	}
 	res := r.execute(ctx, j)
 	if err := r.Outbox.Close(j.JobID, res); err != nil {
@@ -214,12 +230,17 @@ func (r *Runner) handle(ctx context.Context, sj runnerproto.SignedJob) error {
 // other order would leave a claimed job nobody reports. A claim that fails
 // takes the entry back, unless the entry belonged to an earlier run of the job.
 type beginFirst struct {
-	r      *Runner
-	failed bool // the outbox itself refused the entry
+	r        *Runner
+	failed   bool // the outbox itself refused the entry
+	discover bool // the entry is of a discover job
 }
 
 func (b *beginFirst) Claim(jobID string, notAfter, now time.Time) error {
-	if err := b.r.Outbox.Begin(jobID); err != nil {
+	begin := b.r.Outbox.Begin
+	if b.discover {
+		begin = b.r.Outbox.BeginDiscover
+	}
+	if err := begin(jobID); err != nil {
 		b.failed = !errors.Is(err, os.ErrExist)
 		b.r.Log.Error("runner.job", "job_id", jobID, "status", "outbox", "error_class", string(runnerproto.ErrClassInternal))
 		return fmt.Errorf("%w: outbox", runnerproto.ErrReplay)
@@ -249,7 +270,13 @@ func (r *Runner) reject(sj runnerproto.SignedJob, cause error) error {
 		r.Log.Warn("runner.job", "status", "rejected", "error_class", string(class))
 		return nil
 	}
-	if err := r.Outbox.CloseIfAbsent(j.JobID, runnerproto.Result{ErrorClass: class}); errors.Is(err, os.ErrExist) {
+	var closeErr error
+	if j.Action == runnerproto.ActionDiscover {
+		closeErr = r.Outbox.CloseDiscoverIfAbsent(j.JobID, discoverClass(class))
+	} else {
+		closeErr = r.Outbox.CloseIfAbsent(j.JobID, runnerproto.Result{ErrorClass: class})
+	}
+	if err := closeErr; errors.Is(err, os.ErrExist) {
 		// The job already has an outcome; a later rejection must not touch it.
 		r.Log.Warn("runner.job", "job_id", j.JobID, "status", "rejected", "error_class", string(class))
 		return nil
@@ -266,13 +293,13 @@ func fail(c runnerproto.ErrorClass) runnerproto.Result { return runnerproto.Resu
 // execute is the ordered part: policy and limit before the value, the value's
 // HMAC before the write.
 func (r *Runner) execute(ctx context.Context, j runnerproto.Job) runnerproto.Result {
-	if j.Action != runnerproto.ActionDeploy && j.Action != runnerproto.ActionExec && j.Action != runnerproto.ActionVerify {
+	if j.Action != runnerproto.ActionDeploy && j.Action != runnerproto.ActionExec && j.Action != runnerproto.ActionVerify && j.Action != runnerproto.ActionAdopt {
 		return fail(runnerproto.ErrClassInvalidJob)
 	}
 	if err := runnerproto.Check(j, r.Policy); err != nil {
 		return fail(runnerproto.ClassOf(err))
 	}
-	if j.Action == runnerproto.ActionVerify {
+	if j.Action == runnerproto.ActionVerify || j.Action == runnerproto.ActionAdopt {
 		return r.verify(ctx, j)
 	}
 	var plan execrun.Plan
@@ -318,7 +345,8 @@ func (r *Runner) execute(ctx context.Context, j runnerproto.Job) runnerproto.Res
 	return deploy.Apply(ctx, j, r.Policy, v, deps)
 }
 
-// verify answers a verify job: does the carrier hold the expected version?
+// verify answers a verify or adoption job: does the carrier hold the expected
+// version? Both use the same read-only target reader and never restart a unit.
 // Order matters. The file's real owner is read first (lstat, no link followed)
 // and an agent-owned or unreadable file is refused before the server is asked
 // for anything, so a verify job cannot make this host an oracle for the
@@ -395,4 +423,19 @@ func (r *Runner) runExec(ctx context.Context, j runnerproto.Job, plan execrun.Pl
 		return fail(runnerproto.ErrClassInternal)
 	}
 	return res
+}
+
+// closeDiscover runs a verified discover job to a closed report in the outbox.
+func (r *Runner) closeDiscover(ctx context.Context, j runnerproto.Job) error {
+	res := r.executeDiscover(ctx, j)
+	if err := r.Outbox.CloseDiscover(j.JobID, res); err != nil {
+		r.Log.Error("runner.job", "job_id", j.JobID, "status", "outbox", "error_class", string(runnerproto.ErrClassInternal))
+		return ErrOutbox
+	}
+	status := "ok"
+	if !res.OK {
+		status = "failed"
+	}
+	r.Log.Info("runner.job", "job_id", j.JobID, "status", status, "error_class", string(res.ErrorClass), "findings", len(res.Findings))
+	return nil
 }

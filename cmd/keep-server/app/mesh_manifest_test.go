@@ -124,6 +124,45 @@ func TestMeshRotatorManifestIsNarrow(t *testing.T) {
 	}
 }
 
+// keepAPIRights are the Mesh rights Keep uses, each for a call or a data set
+// it actually takes (README, Permissions): the hierarchy snapshot and its
+// parts, agent-key metadata, and the confirmation card. A right Keep does not
+// use is not asked for: Mesh maps no route to secrets:write, Keep writes no
+// comment, and the reverse direction (Mesh storing its x-secret settings in
+// Keep) is Keep's own API, signed with the install's events secret, and needs
+// no right in Mesh.
+var keepAPIRights = []string{
+	"agent_keys:read", "agents:read", "members:read", "projects:read", "tasks:write", "workspaces:read",
+}
+
+// unusedRights are the rights the manifest once declared without a use; the
+// test names them so a return is reported by name.
+var unusedRights = []string{"comments:write", "secrets:write"}
+
+func TestMeshManifestDeclaresOnlyUsedRights(t *testing.T) {
+	m := readManifestCaps(t, keepManifestPath)
+	api := slices.Clone(m.Capabilities.API)
+	sort.Strings(api)
+	if !slices.Equal(api, keepAPIRights) {
+		t.Errorf("keep api %v, want exactly %v", m.Capabilities.API, keepAPIRights)
+	}
+	// Independent of the exact comparison: every declared right is one Keep
+	// uses, so switching either check off still leaves an extra right red.
+	for _, r := range m.Capabilities.API {
+		if !slices.Contains(keepAPIRights, r) {
+			t.Errorf("keep manifest declares %q, which is not a right Keep uses", r)
+		}
+	}
+	for _, r := range unusedRights {
+		if slices.Contains(m.Capabilities.API, r) {
+			t.Errorf("keep manifest declares %q, which Keep does not use", r)
+		}
+		if slices.Contains(keepAPIRights, r) {
+			t.Errorf("%q is listed both as used and as unused", r)
+		}
+	}
+}
+
 // TestReadmeDescribesEveryManifestPermission holds the catalog rule that the
 // README says what Keep does with each right it asks for: every API right,
 // event and UI slot of the keep manifest has its own row in the Permissions

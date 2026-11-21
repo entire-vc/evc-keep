@@ -115,21 +115,22 @@ if ! mutation_apply_only && [ -z "${KEEP_DATABASE_URL:-}" ]; then
 fi
 
 fail=0
+server_wants=
 
 # mutate NAME FILE PKG FROM TO WANT: FILE is repo-root-relative (mutations
-# span three packages). Replaces the first literal occurrence of FROM with
+# span three packages). Replaces the only or explicitly named literal occurrence of FROM with
 # TO in a scratch copy and requires `go test -run WANT` in PKG to go red.
 # Naming the test is the point: a mutant that turns some unrelated test red
 # proves nothing about the guard it is meant to exercise. A WANT that
 # matches nothing, or whose test SKIPs, is a failure too, not a pass.
 mutate() {
+	mutation_take_occurrences
 	name=$1 src=$2 pkg=$3 from=$4 to=$5 want=$6
-	rm -rf "$work/tree"
+	case $pkg in
+	./cmd/keep-server/...) server_wants="${server_wants:+$server_wants|}$want" ;;
+	esac
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -166,7 +167,7 @@ mutate restart-keystore internal/builtin/store.go ./internal/builtin/orgpki/... 
  'FROM keep_kek WHERE false AND org_id = $1 AND id = $2' \
  '^TestIssueRunnerCert_PersistsAcrossRestart$'
 
-mutate ca-process-output "$orgpki" ./internal/builtin/orgpki/... \
+MUTATION_OCCURRENCE=1 mutate ca-process-output "$orgpki" ./internal/builtin/orgpki/... \
  'defer wipe(caPriv)' \
  'defer wipe(caPriv); fmt.Printf("%x", caPriv)' \
  '^TestCAPrivateKeyNeverLeaksInServerProcess$'
@@ -225,7 +226,7 @@ mutate tls-config cmd/keep-server/app/runners.go ./cmd/keep-server/... \
  'if false {' \
  '^TestServerTLSRequiresExplicitCertificateOrDevelopmentFlag$'
 
-mutate ca-reason "$mtls" ./internal/mtls/... \
+MUTATION_OCCURRENCE=1 mutate ca-reason "$mtls" ./internal/mtls/... \
  'return Principal{}, "chain_verification_failed", errChainVerification' \
  'return Principal{}, "unknown_org", errChainVerification' \
  '^TestRequireMTLS_MissingCAAndBadChainShareAuthenticationReason$'
@@ -568,7 +569,7 @@ mutate single-doc-runner "$runnerenroll" ./cmd/keep-runner/... \
 	'^TestEnrollSingleJSONDocument$'
 
 # Call sites: one caller goes back to a bare single Decode.
-mutate single-doc-keep-site-success "$keeprunnercli" ./cmd/keep/... \
+MUTATION_OCCURRENCE=1 mutate single-doc-keep-site-success "$keeprunnercli" ./cmd/keep/... \
 	'decodeBounded(resp.Body, &res)' \
 	'json.NewDecoder(resp.Body).Decode(&res)' \
 	'^TestRunnerSingleJSONDocument$'
@@ -580,7 +581,7 @@ mutate single-doc-runner-site-error "$runnerenroll" ./cmd/keep-runner/... \
 
 # Call-site mutations: the shared helper stays intact, one caller goes back to
 # an unbounded decoder.
-mutate body-keep-site-success "$keeprunnercli" ./cmd/keep/... \
+MUTATION_OCCURRENCE=1 mutate body-keep-site-success "$keeprunnercli" ./cmd/keep/... \
 	'decodeBounded(resp.Body, &res)' \
 	'json.NewDecoder(resp.Body).Decode(&res)' \
 	'^TestRunnerResponseBodyLimit$'
@@ -617,13 +618,13 @@ mutate stdin-cap-raised "$runnerenroll" ./cmd/keep-runner/... \
 	'^TestEnrollStdinBoundary$'
 
 mutate stdin-refusal-echo "$runnerenroll" ./cmd/keep-runner/... \
-	'the token\\n", maxEnrollTokenBytes)' \
-	'the token\\n", maxEnrollTokenBytes); fmt.Fprintln(os.Stderr, string(tokenBytes[:8]))' \
+	'the token\n", maxEnrollTokenBytes)' \
+	'the token\n", maxEnrollTokenBytes); fmt.Fprintln(os.Stderr, string(tokenBytes[:8]))' \
 	'^TestEnrollStdinBoundary$'
 
 mutate stdin-refusal-echo-hex "$runnerenroll" ./cmd/keep-runner/... \
-	'the token\\n", maxEnrollTokenBytes)' \
-	'the token\\n", maxEnrollTokenBytes); fmt.Fprintf(os.Stderr, "%x\\n", tokenBytes[:12])' \
+	'the token\n", maxEnrollTokenBytes)' \
+	'the token\n", maxEnrollTokenBytes); fmt.Fprintf(os.Stderr, "%x\n", tokenBytes[:12])' \
 	'^TestEnrollStdinBoundary$'
 
 # keep-runner enroll never prints server text: not the decoder's error, not
@@ -696,7 +697,7 @@ mutate listen-first-not-released "$keepserver" ./cmd/keep-server/... \
 	'_ = plain.Close()' \
 	'_ = 0' \
 	'^TestServeBothBindFailureIsStaticAndReleasesFirstListener$'
-mutate listen-failure-echoes-error "$keepserver" ./cmd/keep-server/... \
+MUTATION_OCCURRENCE=1 mutate listen-failure-echoes-error "$keepserver" ./cmd/keep-server/... \
 	'logger.Error("keep-server stopped", "error_class", "listen_failed")' \
 	'logger.Error("keep-server stopped: "+err.Error(), "error_class", "listen_failed")' \
 	'^TestServeBothBindFailureIsStaticAndReleasesFirstListener$'
@@ -715,7 +716,7 @@ mutate host-attrs-override "$runnersapi" ./internal/api/... \
  'dec.DisallowUnknownFields()' \
  '_ = dec' \
  '^TestEnrollBindsDeliveryTrustFromIssuer$'
-mutate delivery-key-save internal/runner/credential.go ./internal/runner/... \
+MUTATION_OCCURRENCE=1 mutate delivery-key-save internal/runner/credential.go ./internal/runner/... \
  'if c.DeliveryKey != nil {' \
  'if false && c.DeliveryKey != nil {' \
  '^TestDeliveryKeyRoundTripAndRedaction$'
@@ -723,11 +724,11 @@ mutate delivery-key-format internal/runner/credential.go ./internal/runner/... \
  'func (c Credential) Format(f fmt.State, verb rune) { _, _ = fmt.Fprint(f, c.String()) }' \
  'func (c Credential) Format(f fmt.State, verb rune) { _, _ = fmt.Fprint(f, fmt.Sprintf("%x", c.DeliveryKey.Bytes())) }' \
  '^TestDeliveryKeyRoundTripAndRedaction$'
-mutate delivery-org-scope "$registry" ./internal/registry/... \
+MUTATION_OCCURRENCE=1 mutate delivery-org-scope "$registry" ./internal/registry/... \
  'FROM runners WHERE id = $1 AND org_id = $2 AND revoked_at IS NULL AND cert_not_after > now()' \
  'FROM runners WHERE id = $1 AND ($2::uuid IS NOT NULL) AND revoked_at IS NULL AND cert_not_after > now()' \
  '^TestDeliveryTrustIsOrgScopedAndImmutableOnRenewal$'
-mutate delivery-revoked "$registry" ./internal/registry/... \
+MUTATION_OCCURRENCE=1 mutate delivery-revoked "$registry" ./internal/registry/... \
  'FROM runners WHERE id = $1 AND org_id = $2 AND revoked_at IS NULL AND cert_not_after > now()' \
  'FROM runners WHERE id = $1 AND org_id = $2 AND (revoked_at IS NULL OR true) AND cert_not_after > now()' \
  '^TestDeliveryTrustRejectsRevokedRunnerAndUnknownAttrsForProd$'
@@ -789,12 +790,34 @@ mutation_apply_only && exit "$fail"
 # schema reset races orgpki's/registry's/enrolltoken's tests reading the real
 # tables from a different package binary running at the same time — the same
 # class of failure check-no-silent-skip.sh's own -p 1 exists for.
+#
+# cmd/keep-server/... runs only the tests its mutants designate. The whole
+# package (cmd/keep-server/app: 341 serial tests, about 400s) alone outgrew
+# go test's 600s package deadline on a loaded runner, and a longer deadline
+# does not fit the job's 19m beside the mutants. The whole package stays
+# proven green with zero SKIPs by the core test shard on every merge request
+# (check-no-silent-skip.sh); here each designated test must report PASS.
 if (cd "$root" && KEEP_DATABASE_URL="$KEEP_DATABASE_URL" go test -count=1 -p 1 -v \
-	./internal/builtin/... ./internal/runner/ ./internal/runner/discover/... ./cmd/keep-server/... \
+	./internal/builtin/... ./internal/runner/ ./internal/runner/discover/... \
 	./internal/mtls/... ./internal/registry/... ./internal/enrolltoken/... ./internal/api/... \
 	./cmd/keep/... ./cmd/keep-runner/... \
-	>"$work/baseline_out" 2>&1); then
-	if grep -q -- '--- SKIP' "$work/baseline_out"; then
+	>"$work/baseline_out" 2>&1 &&
+	KEEP_DATABASE_URL="$KEEP_DATABASE_URL" go test -count=1 -p 1 -v -run "$server_wants" ./cmd/keep-server/... \
+	>>"$work/baseline_out" 2>&1); then
+	server_missing=$(printf '%s\n' "$server_wants" | tr '|' '\n' | sed 's/^\^//; s/\$$//' | sort -u |
+		while read -r test; do
+			# A plain top-level name only: anything else would be read as a
+			# regex by grep, so it counts as not proven.
+			case $test in
+			('' | *[!A-Za-z0-9_]*) echo "$test" ;;
+			(*) grep -q -- "^--- PASS: $test (" "$work/baseline_out" || echo "$test" ;;
+			esac
+		done)
+	if [ -z "$server_wants" ] || [ -n "$server_missing" ]; then
+		echo "FAIL baseline: a designated cmd/keep-server test did not run and pass"
+		printf '%s\n' "$server_missing" | sed -n 's/^\(Test[A-Za-z0-9_]*\)$/FAIL baseline missing test: \1/p'
+		fail=1
+	elif grep -q -- '--- SKIP' "$work/baseline_out"; then
 		echo "FAIL baseline: a real test SKIPped — that is not a proven pass"
 		fail=1
 	else
@@ -814,6 +837,10 @@ else
 	done
 	if grep -q 'panic: test timed out' "$work/baseline_out"; then
 		echo "FAIL baseline: test process exceeded its deadline"
+		# Name what ran out of time: the package path and the top-level
+		# tests go test lists as still running. Names only, never output.
+		sed -n 's/^FAIL	\(github\.com\/entire-vc\/evc-keep\/[A-Za-z0-9_./-]*\)	[0-9.]*s$/FAIL baseline package: \1/p' "$work/baseline_out"
+		sed -n 's/^		\(Test[A-Za-z0-9_]*\) ([0-9hms.]*)$/FAIL baseline running test: \1/p' "$work/baseline_out"
 	fi
 	fail=1
 fi

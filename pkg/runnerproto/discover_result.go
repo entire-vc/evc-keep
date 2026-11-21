@@ -102,7 +102,7 @@ func (f DiscoverFinding) validate() error {
 		}
 	}
 	switch {
-	case !envFieldRe.MatchString(f.Name) && !nameRe.MatchString(f.Name):
+	case !envFieldRe.MatchString(f.Name) && !nameRe.MatchString(f.Name) && (len(f.Name) > 256 || !keyFieldRe.MatchString(f.Name)):
 		return ErrInvalidDiscoverResult
 	case !fingerprint.Valid(f.Fingerprint):
 		return ErrInvalidDiscoverResult

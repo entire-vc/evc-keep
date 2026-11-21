@@ -27,6 +27,10 @@ type engineFakes struct {
 	revokeErr error
 	revokes   int
 	prepares  int
+	// inIncident, when set, receives one signal as Open starts and Open then
+	// waits for openGate: the run row is failed, the incident not yet recorded.
+	inIncident chan struct{}
+	openGate   chan struct{}
 }
 
 func engineCarrier(n int) string { return fmt.Sprintf("00000000-0000-4000-8000-%012d", n) }
@@ -54,7 +58,13 @@ func (f *engineFakes) Revoke(context.Context, rotation.Ref, uuid.UUID, string) e
 	f.revokes++
 	return f.revokeErr
 }
-func (f *engineFakes) Open(context.Context, rotation.IncidentRecord) error    { return nil }
+func (f *engineFakes) Open(context.Context, rotation.IncidentRecord) error {
+	if f.inIncident != nil {
+		f.inIncident <- struct{}{}
+		<-f.openGate
+	}
+	return nil
+}
 func (f *engineFakes) Resolve(context.Context, rotation.IncidentRecord) error { return nil }
 
 func (f *engineFakes) deps() rotation.Deps {
@@ -92,6 +102,40 @@ func startRun(t *testing.T, f *rotateFixture) string {
 		t.Fatalf("start: %d %s", rec.Code, rec.Body.String())
 	}
 	return got.RequestID
+}
+
+// A failed run is answered as finished only once its incident is recorded:
+// between the failed state and the incident flag the status stays 202, so a
+// caller polling to the first 200 never reads a rollback without its incident.
+func TestRotate_FailedRunIsFinalOnlyWithItsIncident(t *testing.T) {
+	fakes := &engineFakes{deployErr: map[string]error{engineCarrier(2): errors.New("deploy failed")},
+		inIncident: make(chan struct{}, 1), openGate: make(chan struct{})}
+	svc := rotation.NewService(rotation.New(testPool(t), fakes.deps())).WithJournal(audit.NewJournal(testPool(t)))
+	f := newRotateFixture(t, svc, nil)
+	f.router = NewRouter(obs.New(f.logbuf), f.pool, Deps{Rotations: svc, Catalog: unlimitedCatalog})
+	id := startRun(t, f)
+	select {
+	case <-fakes.inIncident:
+	case <-time.After(30 * time.Second):
+		close(fakes.openGate)
+		t.Fatal("the run never reached its incident")
+	}
+	rec := f.do(http.MethodGet, f.path+"/"+id, f.bearer, nil)
+	close(fakes.openGate)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("the run failed but its incident is not recorded yet: want 202, got %d %s", rec.Code, rec.Body.String())
+	}
+	var mid RotateResult
+	dec := json.NewDecoder(bytes.NewReader(rec.Body.Bytes()))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&mid); err != nil || mid.OK || mid.ErrorClass != "" || mid.IncidentOpened || mid.Version != "" || mid.Fingerprint != "" {
+		t.Fatalf("an unfinished run names no outcome: %+v %v", mid, err)
+	}
+	res, _ := f.poll(id)
+	svc.Wait()
+	if res.OK || res.ErrorClass != "deploy_failed" || !res.IncidentOpened {
+		t.Fatalf("the final answer of a failed run carries its incident: %+v", res)
+	}
 }
 
 // One failing carrier: the run fails, no version or fingerprint is reported,

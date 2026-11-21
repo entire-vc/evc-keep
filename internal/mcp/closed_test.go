@@ -35,7 +35,7 @@ var closedAnswers = []struct {
 	{reflect.TypeOf(CarrierVerifyResult{}), names("ok", "request_id", "fingerprint", "version", "carriers")},
 	{reflect.TypeOf(CarrierRow{}), names("id", "host", "runner_id", "target", "status", "last_verified_at", "fingerprint_match", "error_class")},
 	{reflect.TypeOf(CarrierTarget{}), names("kind", "path")},
-	{reflect.TypeOf(RotateResult{}), names("ok", "request_id", "fingerprint", "version", "error_class", "carriers", "approval")},
+	{reflect.TypeOf(RotateResult{}), names("ok", "request_id", "fingerprint", "version", "error_class", "carriers", "approval", "incident_opened")},
 	{reflect.TypeOf(RotateCarrier{}), names("carrier_id", "phase", "state")},
 	{reflect.TypeOf(ErrorAnswer{}), names("error_class", "message", "request_id")},
 	// Tool envelopes: lists of closed objects, nothing else.

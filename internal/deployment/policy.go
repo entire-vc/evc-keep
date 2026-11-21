@@ -40,6 +40,47 @@ type Policy struct {
 	// without a human, when the template declares network none. Without a
 	// matching rule an exec request waits for approval, like a deployment.
 	ExecRules []ExecRule `json:"exec_rules,omitempty"`
+	// AdoptionRules allow an exact read-only destination, independently of
+	// every deployment rule. Production still needs a bound human approval.
+	AdoptionRules []AdoptionRule `json:"adoption_rules,omitempty"`
+}
+
+// AdoptionRule admits one secret on one enrolled runner and one exact YAML
+// field. It never grants a directory, another field, or a write operation.
+type AdoptionRule struct {
+	SecretID uuid.UUID              `json:"secret_id"`
+	RunnerID uuid.UUID              `json:"runner_id"`
+	Kind     runnerproto.TargetKind `json:"kind"`
+	Path     string                 `json:"path"`
+	Field    string                 `json:"field"`
+}
+
+// EvaluateAdoption keeps the production host restrictions of deployment.
+// Without an exact adoption rule a human must approve this frozen request.
+// A human approval is the authorization for that one destination and version;
+// an older approval or an ordinary deployment rule cannot authorize it.
+func EvaluateAdoption(p Policy, host Host, secretID uuid.UUID, class string, target runnerproto.Target) (Decision, error) {
+	if secretID == uuid.Nil || !validPolicy(p) || !validAdoptionTarget(target) {
+		return "", ErrInvalidArgument
+	}
+	if class == "prod" {
+		if !host.AttributesKnown || host.UIDShared {
+			return "", ErrPolicyDenied
+		}
+		return ApprovalRequired, nil
+	}
+	for _, rule := range p.AdoptionRules {
+		if rule.SecretID == secretID && rule.RunnerID.String() == host.ID && rule.Kind == target.Kind && rule.Path == target.Path && rule.Field == target.Field {
+			return Allow, nil
+		}
+	}
+	return ApprovalRequired, nil
+}
+
+func validAdoptionTarget(target runnerproto.Target) bool {
+	return target.Kind.SupportsAction(runnerproto.ActionAdopt) && target.Validate() == nil &&
+		!networkTarget(target) && target.Consumer == "" && target.Unit == "" &&
+		target.Mode == 0o600 && target.UID == 0 && target.GID == 0
 }
 
 // ExecRule has the same host selectors as Rule. A network template is never
@@ -156,6 +197,7 @@ func validLabels(labels map[string]string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -192,6 +234,17 @@ func validPolicy(p Policy) bool {
 			(rule.RunnerID == "" && len(rule.Labels) == 0) || !validLabels(rule.Labels) {
 			return false
 		}
+	}
+	if len(p.AdoptionRules) > 128 {
+		return false
+	}
+	seen := make(map[AdoptionRule]bool, len(p.AdoptionRules))
+	for _, rule := range p.AdoptionRules {
+		target := runnerproto.Target{Kind: rule.Kind, Path: rule.Path, Field: rule.Field, Mode: 0o600}
+		if rule.SecretID == uuid.Nil || rule.RunnerID == uuid.Nil || !validAdoptionTarget(target) || seen[rule] {
+			return false
+		}
+		seen[rule] = true
 	}
 	return true
 }

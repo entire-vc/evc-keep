@@ -36,32 +36,21 @@ MUTATIONS = {"public-hygiene", "execpolicy", "sealer", "fingerprint", "runnerpro
 # check_mutation_batch names: every other job opens its rules with this one.
 BATCH_IF = '$KEEP_MUTATION_BATCH == "true"'
 BATCH_NEVER = {"if": BATCH_IF, "when": "never"}
-# Rules shared by jobs that run in every pipeline except a scan-only branch push
-# and the mutation batch.
-FULL_PIPELINE_ONLY = [BATCH_NEVER, {"if": '$KEEP_BRANCH_PUSH_SCAN_ONLY == "true"', "when": "never"},
-                      {"when": "on_success"}]
+# Rules shared by jobs that run in every pipeline except the mutation batch.
+FULL_PIPELINE_ONLY = [BATCH_NEVER, {"when": "on_success"}]
 # fmt-vet: the same, but it runs in the batch too (tenancy-mutations reads its artifact).
 FMT_VET_RULES = FULL_PIPELINE_ONLY[1:]
-# The same, for mutation jobs: never on a merge request (mutation suites are not
-# a merge condition); a push to the default branch does not run them (the
-# nightly schedule does); everywhere else they run at once.
 MAIN_PUSH_IF = '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
 MR_IF = '$CI_PIPELINE_SOURCE == "merge_request_event"'
-MUTATION_RULES = [BATCH_NEVER, {"if": '$KEEP_BRANCH_PUSH_SCAN_ONLY == "true"', "when": "never"},
-                  {"if": MR_IF, "when": "never"},
-                  {"if": MAIN_PUSH_IF, "when": "never"},
-                  {"when": "on_success"}]
-# Mutation jobs that run only in schedules and on release tags.
+SCHEDULE_IF = '$CI_PIPELINE_SOURCE == "schedule"'
 TAG_IF = "$CI_COMMIT_TAG"
-SCHEDULE_RULES = [BATCH_NEVER, {"if": MR_IF, "when": "never"},
-                  {"if": '$CI_PIPELINE_SOURCE == "schedule"'},
-                  {"if": TAG_IF}]
-# The intake browser suites: like MUTATION_RULES, but they keep the push to the
-# default branch they had inside the test child's intake-browser job.
+# The one rule list of every mutation job (owner decision of 16.11.2026: one
+# pass, at night): the nightly schedule and nothing else. Not on a merge
+# request, the push to the default branch, a release tag, or a web, api or
+# trigger pipeline; the batch runs its own child (scripts/generate-mutation-pipeline.py).
+MUTATION_RULES = [BATCH_NEVER, {"if": SCHEDULE_IF}]
+# The intake browser suites run on their own keep-intake runner, under the same rules.
 INTAKE_MUTATIONS = "intake-browser-mutations"
-INTAKE_RULES = [BATCH_NEVER, {"if": '$KEEP_BRANCH_PUSH_SCAN_ONLY == "true"', "when": "never"},
-                {"if": MR_IF, "when": "never"},
-                {"when": "on_success"}]
 # The mutation batch: its range job, the trigger of its child pipeline, and the
 # job that keeps the commit the post-review jobs last passed on.
 RANGE_JOB, BATCH_TRIGGER, GREEN_JOB = "mutation-range", "mutations-batch", "mutation-green"
@@ -75,25 +64,31 @@ REMOVED_MR_MUTATION_JOBS = ("mutation-range-mr", "start-mutations", "mutations-m
 MR_BACKTEST = "mutation-backtest"
 MR_JOBS = {MR_BACKTEST}
 TRIGGERS = (BATCH_TRIGGER,)
-# Publishes a release on a tag; needs every mutation job of the tag pipeline.
+# Publishes a release on a tag, once the nightly gate passed.
 RELEASE_JOB = "release"
-SCAN_ONLY_JOBS = {"security-hygiene", "secret-scan-scope-selftest"}
-
-
-def unconditional(job):
-    """True when a job runs in every full pipeline (no narrower rules)."""
-    return job.get("rules", FULL_PIPELINE_ONLY) in (FULL_PIPELINE_ONLY, MUTATION_RULES)
+RELEASE_GATE = "python3 scripts/release-nightly-gate.py"
+RELEASE_VARIABLES = {"GIT_DEPTH": 0}
+RELEASE_BEFORE_SCRIPT = ["apk add --no-cache curl git python3"]
+PREDEFINED_VARIABLE = re.compile(r"(CI|GITLAB)_")
+# The secret-scan gates of every pipeline but the schedule-only branch scan.
+SECURITY_JOBS = {"security-hygiene", "secret-scan-scope-selftest"}
+# The daily scan of every branch outside the default branch, which replaced the
+# scan-only push pipeline of a non-default branch.
+BRANCH_SCAN_JOB = "branch-secret-scan"
+BRANCH_SCAN_SCRIPT = "./scripts/scan-branch-secrets.sh"
+BRANCH_SCAN_SELFTEST = "./scripts/check-branch-secret-scan-selftest.sh"
 
 
 def check_mutations_never_on_mr(config):
-    """Every mutation job: never created on an MR, automatic in schedules and on
-    tags, absent on a main push; none is filtered by changed paths."""
-    for name in sorted(MUTATIONS) + ["netns-mutation-run"]:
-        job = config[name if name == "netns-mutation-run" else name + "-mutations"]
-        assert job["rules"] in (MUTATION_RULES, SCHEDULE_RULES), name
+    """Every mutation job uses the one schedule-only rule list: automatic in the
+    nightly schedule, absent everywhere else; none is filtered by changed paths."""
+    assert config[".mutation-rules"]["rules"] == MUTATION_RULES, config[".mutation-rules"]["rules"]
+    assert ".mutation-schedule-rules" not in config, "a second mutation rule anchor is back"
+    for name in sorted(MUTATIONS) + ["netns-mutation-run", INTAKE_MUTATIONS]:
+        job = config[name if name in ("netns-mutation-run", INTAKE_MUTATIONS) else name + "-mutations"]
+        assert job["rules"] == MUTATION_RULES, (name, job["rules"])
         assert job.get("when", "on_success") == "on_success", name
         assert job.get("allow_failure", False) is False, name
-    assert config[INTAKE_MUTATIONS]["rules"] == INTAKE_RULES
     for name, job in config.items():
         if isinstance(job, dict) and job.get("stage") == "post-review":
             assert not any("changes" in r for r in job.get("rules", [])), name
@@ -173,20 +168,32 @@ def check_no_mutation_on_mr(config):
         assert not (pipeline_jobs(config, context) or set()) & set(REMOVED_MR_MUTATION_JOBS), context
 
 
+TAG = {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_TAG": "v1.0.0", "CI_PIPELINE_SOURCE": "push"}
+
+
+def every_mutation_job(config):
+    """Every mutation job, discovered rather than listed: effective tags include
+    keep-mutations, the name ends with -mutations, or the netns run."""
+    return {name for name, job in config.items()
+            if isinstance(job, dict) and not name.startswith(".") and name not in ("workflow", "default", "variables")
+            and ("keep-mutations" in (effective_job(config, job).get("tags") or [])
+                 or name.endswith("-mutations") or name == "netns-mutation-run")}
+
+
 def tag_mutation_jobs(config):
-    """The mutation jobs of a release tag pipeline: every post-review job, and any
-    other job whose script runs a mutation suite."""
-    tag = {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_TAG": "v1.0.0", "CI_PIPELINE_SOURCE": "push"}
-    jobs = pipeline_jobs(config, tag) or set()
-    return jobs, {name for name in jobs if config[name].get("stage") == "post-review"} | mutation_runners(config, jobs)
+    """The jobs of a release tag pipeline, and those of them that run a mutation
+    suite: a post-review job, a mutation job, or any job whose script runs one."""
+    jobs = pipeline_jobs(config, TAG) or set()
+    return jobs, ({name for name in jobs if config[name].get("stage") == "post-review"}
+                  | (jobs & every_mutation_job(config)) | mutation_runners(config, jobs))
 
 
 def check_release(config):
     """`release` runs only on a tag, alone in the last stage, without `needs`, so
-    it starts only after every job of the earlier stages succeeded; every mutation
-    job of the tag pipeline is among them and none can fail softly. (A `needs`
-    list of the mutation jobs is refused by GitLab: shards count one by one, and
-    there are more than 50.)"""
+    it starts only after every job of the earlier stages succeeded, none of them
+    soft. The tag pipeline runs no mutation suite (they run once a night): before
+    publishing, `release` runs the nightly gate over the whole history, and the
+    publishing call comes after it in the same job."""
     stages = config["stages"]
     assert stages[-1] == RELEASE_JOB and stages.count(RELEASE_JOB) == 1, stages
     job = config[RELEASE_JOB]
@@ -196,19 +203,157 @@ def check_release(config):
     assert job.get("interruptible") is False
     # Any `needs` (even `[]`) makes it start as soon as those are done, not the rest.
     assert "needs" not in job, job.get("needs")
+    # The gate: its own script line, first, before the line that publishes; a
+    # full clone (an ancestor needs the history) with git and python3.
+    script = [str(line) for line in job["script"]]
+    assert script[0] == RELEASE_GATE, script
+    assert sum(RELEASE_GATE in line for line in script) == 1, script
+    assert len(script) == 2 and "/releases" in script[1] and "curl --fail-with-body" in script[1], script
+    for soft in ("|| true", "|| :", "set +e", "allow_failure", "exit 0"):
+        assert soft not in "\n".join(script), soft
+    # Pinned exactly: an extra variable (CI_COMMIT_SHA, CI_DEFAULT_BRANCH, the
+    # token) points the gate at another commit, and an extra before_script line
+    # can rewrite the gate file or re-shallow the clone before the gate runs.
+    assert job.get("variables") == RELEASE_VARIABLES, job.get("variables")
+    # Global variables reach `release` too and outrank the predefined ones: a
+    # global CI_COMMIT_SHA, CI_DEFAULT_BRANCH, CI_PROJECT_ID, CI_API_V4_URL or
+    # CI_JOB_TOKEN would point the gate at another commit, branch or project.
+    # `extends` would bring variables of a template past the pin above.
+    assert not [k for k in config.get("variables") or {} if PREDEFINED_VARIABLE.match(str(k))], config.get("variables")
+    assert "extends" not in job, job.get("extends")
+    assert job.get("before_script") == RELEASE_BEFORE_SCRIPT, job.get("before_script")
+    assert "after_script" not in job
+    gate = (ROOT / "scripts/release-nightly-gate.py").read_text()
+    assert "--is-ancestor" in gate and "source=schedule" in gate and "mutation-batch" in gate
     jobs, mutation = tag_mutation_jobs(config)
     assert RELEASE_JOB in jobs
-    assert len(mutation) > 30, mutation
+    assert not mutation, sorted(mutation)
     for name in jobs - {RELEASE_JOB}:
         other = config[name]
         assert other.get("stage", "test") in stages[:-1], (name, other.get("stage"))
         assert other.get("allow_failure", False) is False, name
         assert other.get("when", "on_success") == "on_success", name
-    for name in mutation:
-        assert stages.index(config[name]["stage"]) < stages.index(RELEASE_JOB), name
     for name, other in config.items():
         if name != RELEASE_JOB and isinstance(other, dict):
             assert other.get("stage") != RELEASE_JOB, name
+
+
+CHANGELOG_SCRIPT = ROOT / "scripts" / "changelog-section.sh"
+SAMPLE_CHANGELOG = """# Changelog
+
+## [9.9.1]
+
+- marker-new-one
+
+### Breaking changes
+
+- marker-new-two
+
+## [9.9.0]
+
+- marker-old
+"""
+SAMPLE_SECTION = "- marker-new-one\n\n### Breaking changes\n\n- marker-new-two"
+
+
+def changelog_section(version, text=None, path=None):
+    """Runs scripts/changelog-section.sh on `text` (or the file `path`)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        if path is None:
+            path = Path(tmp) / "CHANGELOG.md"
+            path.write_text(text)
+        return subprocess.run(["sh", str(CHANGELOG_SCRIPT), version, str(path)],
+                              capture_output=True, text=True)
+
+
+def run_release_job(job, changelog, tag):
+    """Runs the publishing step after the nightly gate, in a checkout holding
+    `changelog` and the extraction script. Only the external Releases API is
+    replaced by a curl stub. The gate and its position are checked separately
+    by check_release and test_release_nightly_gate.py."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp)
+        (tree / "scripts").mkdir()
+        shutil.copy(CHANGELOG_SCRIPT, tree / "scripts" / "changelog-section.sh")
+        (tree / "CHANGELOG.md").write_text(changelog)
+        (tree / "bin").mkdir()
+        record = tree / "curl.args"
+        stub = tree / "bin" / "curl"
+        stub.write_text('#!/bin/sh\nfor a in "$@"; do printf \'%s\\0\' "$a"; done > "$CURL_RECORD"\n')
+        stub.chmod(0o755)
+        env = {"PATH": f"{tree / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+               "CI_COMMIT_TAG": tag, "CI_JOB_TOKEN": "job-token-stub",  # pragma: allowlist secret
+               "CI_API_V4_URL": "https://gitlab.invalid/api/v4", "CI_PROJECT_ID": "1",
+               "CI_COMMIT_SHA": "0" * 40, "CURL_RECORD": str(record)}
+        script = "\n".join(job["script"][1:])
+        run = subprocess.run(["sh", "-c", script], cwd=tree, env=env, capture_output=True, text=True)
+        args = record.read_text().split("\0")[:-1] if record.exists() else None
+        return run.returncode, args
+
+
+def check_release_notes(config):
+    """The `release` job describes the release with the tag's section of
+    CHANGELOG.md, verbatim, and publishes nothing for a tag without one. The
+    job's own script is run against a sample changelog with curl stubbed."""
+    check_release(config)
+    job = config[RELEASE_JOB]
+    # The section is read from the tag's checkout, so the job must check it out.
+    assert job.get("variables", {}).get("GIT_STRATEGY", "fetch") != "none", job.get("variables")
+    assert job["before_script"] == RELEASE_BEFORE_SCRIPT, job["before_script"]
+    code, args = run_release_job(job, SAMPLE_CHANGELOG, "9.9.1")
+    assert code == 0 and args is not None, code
+    descriptions = [a for a in args if a.startswith("description=")]
+    assert descriptions == ["description=" + SAMPLE_SECTION], descriptions
+    assert "tag_name=9.9.1" in args and "name=9.9.1" in args, args
+    # A refusal by the Releases API (an existing release, missing rights) is a red job.
+    assert "--fail-with-body" in args, args
+    # No section, or an empty one, stops the job before curl is ever called.
+    for changelog, tag in ((SAMPLE_CHANGELOG, "9.9.2"),
+                           (SAMPLE_CHANGELOG.replace("- marker-old", ""), "9.9.0"),
+                           ("", "9.9.1")):
+        code, args = run_release_job(job, changelog, tag)
+        assert code != 0 and args is None, (tag, code, args)
+
+
+def check_changelog_has_manifest_version(root=ROOT):
+    """The version in mesh-extension.json has its own non-empty section in
+    CHANGELOG.md, so the tag of that version gets a release description."""
+    import json
+    version = json.loads((root / "mesh-extension.json").read_text())["version"]
+    run = changelog_section(version, path=root / "CHANGELOG.md")
+    assert run.returncode == 0 and run.stdout.strip(), (version, run.stderr)
+
+
+# Every pipeline kind but the nightly schedule: none may start a mutation suite.
+NON_SCHEDULE_CONTEXTS = {
+    "merge request": MR,
+    "merge request, KEEP_FULL_CI": MR | {"KEEP_FULL_CI": "1"},
+    "merge request, full-ci label": MR | {"CI_MERGE_REQUEST_LABELS": "full-ci"},
+    **{f"main {source}": {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_BRANCH": "main", "CI_COMMIT_REF_NAME": "main",
+                          "CI_PIPELINE_SOURCE": source} for source in ("push", "web", "api", "trigger")},
+    **{f"topic {source}": {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_BRANCH": "topic", "CI_COMMIT_REF_NAME": "topic",
+                           "CI_PIPELINE_SOURCE": source} for source in ("web", "api", "trigger")},
+    "release tag": TAG,
+}
+
+
+def check_mutations_only_in_schedule(config):
+    """Owner decision of 16.11.2026: mutation suites run once a night. No pipeline
+    but the schedule holds a job on the keep-mutations runner, a job running a
+    check-*-mutations.sh script, or any mutation job; the schedule holds every one.
+    (The hand-started batch is pinned by check_mutation_batch.)"""
+    every = every_mutation_job(config)
+    assert len(every) > 40 and INTAKE_MUTATIONS in every and "netns-mutation-run" in every, sorted(every)
+    for label, context in NON_SCHEDULE_CONTEXTS.items():
+        jobs = pipeline_jobs(config, context)
+        assert jobs is not None, label
+        on_runner = {name for name in jobs
+                     if "keep-mutations" in (effective_job(config, config[name]).get("tags") or [])}
+        assert not on_runner, (label, "keep-mutations runner", sorted(on_runner))
+        assert not mutation_runners(config, jobs), (label, "mutation script", sorted(mutation_runners(config, jobs)))
+        assert not jobs & every, (label, sorted(jobs & every))
+    schedule = pipeline_jobs(config, MAIN | {"CI_PIPELINE_SOURCE": "schedule"})
+    assert schedule is not None and every <= schedule, sorted(every - (schedule or set()))
 
 
 CRANE_PIN = r"gcr\.io/go-containerregistry/crane:debug@sha256:[0-9a-f]{64}"
@@ -411,7 +556,7 @@ def check_post_review_artifacts(config):
 def check_netns_mutation_run_manual_on_mr(config):
     """The netns mutation run is a mutation job too: never on an MR, automatic in schedules and on tags."""
     job = config["netns-mutation-run"]
-    assert job["rules"] == SCHEDULE_RULES
+    assert job["rules"] == MUTATION_RULES
     assert job.get("allow_failure", False) is False and job.get("when", "on_success") == "on_success"
 
 
@@ -447,13 +592,40 @@ def check_mutation_runner(config):
                     assert rule.get("when") == "never", name
 
 
+def filter_drivers(root=ROOT):
+    """Drivers that report through scripts/test-result-names.sh (python3)."""
+    return {p.name for p in (root / "scripts").glob("check-*.sh")
+            if "test-result-names.sh" in p.read_text()}
+
+
+def check_filter_has_python(config, drivers):
+    """A job running such a driver on the alpine Go image (no python3) installs
+    it; else the filter exits 127 and a red mutant is reported with no names."""
+    seen = set()
+    for name, job in config.items():
+        if name.startswith(".") or not isinstance(job, dict):
+            continue
+        script = "\n".join(str(line) for line in job.get("script", []))
+        used = {d for d in drivers if d in script}
+        if not used:
+            continue
+        seen |= used
+        if job.get("extends") != ".go-module-cache" or "image" in job:
+            continue  # bookworm and browser images ship python3
+        apk = [shlex.split(str(line)) for line in job.get("before_script", []) if str(line).startswith("apk add")]
+        assert any("python3" in words for words in apk), f"{name}: runs {sorted(used)} without python3"
+    assert drivers and seen, "no job runs a driver that reports through test-result-names.sh"
+
+
 def check_mesh_plugin_mutations(config):
     """The plugin's mutation script runs in shards after review, with the other
     mutation suites, blocking, and with a 40% margin under the job timeout per shard."""
     plugin, job = config["mesh-plugin"], config["mesh-plugin-mutations"]
     assert not mutation_runners(config, ["mesh-plugin"]), plugin["script"]
     assert "go test -race" in "\n".join(plugin["script"])
-    assert job["rules"] == config[".mutation-schedule-rules"]["rules"], job["rules"]
+    assert any(service.get("alias") == "postgres" for service in plugin.get("services", [])), "workspace approval test needs PostgreSQL"
+    assert plugin.get("variables", {}).get("KEEP_DATABASE_URL"), "workspace approval test must not skip"
+    assert job["rules"] == config[".mutation-rules"]["rules"], job["rules"]
     assert job["stage"] == "post-review"
     assert job["parallel"] == 3 and job["timeout"] == "20m"
     assert job.get("allow_failure", False) is False and job.get("when", "on_success") == "on_success"
@@ -549,6 +721,11 @@ def check_config(config, driver):
     assert gate["image"] == {"name": "$GITLEAKS_IMAGE", "entrypoint": [""]}
     assert gate["variables"]["GIT_DEPTH"] == 0
     assert gate["tags"] == ["ci-fast"]  # light gate: fast-lane runner
+    # The merged-parent lookup needs curl and jq; without them the check
+    # excuses nothing and a stacked merge request stays red.
+    assert gate["before_script"][0] == "apk add --no-cache curl jq", gate.get("before_script")
+    hygiene_mutations = config.get("public-hygiene-mutations", {}).get("before_script", [""])
+    assert hygiene_mutations[0].split()[3:] == ["git", "nodejs", "python3", "curl", "jq"], hygiene_mutations
     assert gate["script"] == [driver]
     assert "rules" not in gate and "only" not in gate and "except" not in gate
     assert gate.get("allow_failure", False) is False
@@ -561,7 +738,7 @@ def check_config(config, driver):
     calls = [line for line in driver.splitlines() if line.startswith("./scripts/")]
     assert calls == ["./scripts/" + name for name in GATES]
     assert "||" not in driver and "set +e" not in driver
-    for name in ("fmt-vet", "golangci-lint", "import-boundaries", "ci-selftests"):
+    for name in ("fmt-vet", "golangci-lint", "import-boundaries"):
         assert config[name]["stage"] == "lint", name
     for name in ("fmt-vet", "golangci-lint"):
         assert config[name]["tags"] == ["ci-fast"], name  # light lint gate: fast lane
@@ -571,7 +748,7 @@ def check_config(config, driver):
     scope = config["secret-scan-scope-selftest"]
     assert scope["stage"] == "security"
     assert scope["image"] == gate["image"]
-    assert scope["script"] == ["./scripts/check-secret-scan-scope.sh"]
+    assert scope["script"] == ["./scripts/check-secret-scan-scope.sh", BRANCH_SCAN_SELFTEST]
     assert scope["tags"] == ["ci-fast"]
     assert scope.get("allow_failure", False) is False
     assert scope["rules"] == [
@@ -587,13 +764,10 @@ def check_config(config, driver):
     assert mr["if"] == '$CI_PIPELINE_SOURCE == "merge_request_event"'
     assert mr["auto_cancel"]["on_new_commit"] == "interruptible"
     assert workflow["rules"][4] == {
-        "if": '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"',
-        "when": "never"}
-    assert workflow["rules"][5] == {
-        "if": '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"',
-        "variables": {"KEEP_BRANCH_PUSH_SCAN_ONLY": "true"}}
-    assert workflow["rules"][6:] == [{"if": "$CI_COMMIT_BRANCH"},
+        "if": '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"', "when": "never"}
+    assert workflow["rules"][5:] == [{"if": "$CI_COMMIT_BRANCH"},
                                      {"if": TAG_IF, "auto_cancel": {"on_new_commit": "none"}}]
+    check_branch_secret_scan(config)
     trigger = config["full-tests"]
     assert trigger["trigger"]["strategy"] == "depend"
     assert trigger.get("allow_failure", False) is False
@@ -609,6 +783,8 @@ def check_config(config, driver):
     assert generator["artifacts"]["paths"] == ["full-tests.generated.yml", "mutation-canary.decision"]
     check_selftests_job(config)
     check_import_boundaries_job(config)
+    check_rotation_testbed_job(config)
+    check_rotation_testbed_mesh_job(config)
     assert "full-tests.generated.yml" in generator["artifacts"]["paths"]
     assert {name.removesuffix("-mutations") for name in config
             if name.endswith("-mutations") and name != INTAKE_MUTATIONS} == MUTATIONS
@@ -619,12 +795,16 @@ def check_config(config, driver):
     check_no_mutation_on_mr(config)
     check_mutation_backtest(config)
     check_release(config)
+    check_release_notes(config)
+    check_changelog_has_manifest_version()
+    check_mutations_only_in_schedule(config)
     check_mutation_fan_out_cap(config)
     check_post_review_artifacts(config)
     check_netns_mutation_run_manual_on_mr(config)
     check_mutation_runner(config)
     check_mesh_plugin_mutations(config)
     check_mesh_mutations_limits(config)
+    check_filter_has_python(config, filter_drivers())
     capture = config["providertest-mutations"]
     assert capture["stage"] == "post-review"
     assert capture["script"] == ["timeout -k 10s 9m ./scripts/check-providertest-mutations.sh"]
@@ -670,9 +850,13 @@ SELFTESTS = [
     "python3 scripts/test_mutation_select.py",
     "./scripts/check-mutation-select-redrun.sh",
     "python3 scripts/test_intake_hpke_mutant_diagnostics.py",
+    "python3 scripts/test_upgrade_rollback_output_leak.py",
+    "python3 scripts/test_driver_output_leak.py",
+    "python3 scripts/test_release_nightly_gate.py",
+    "python3 scripts/test_quickstart_output_leak.py",
+    "python3 scripts/test_public_hygiene_merged_parent.py",
 ]
-SELFTESTS_APK = "apk add --no-cache bash git python3 py3-yaml perl tar"
-SCAN_ONLY_NEVER = {"if": '$KEEP_BRANCH_PUSH_SCAN_ONLY == "true"', "when": "never"}
+SELFTESTS_APK = "apk add --no-cache bash git python3 py3-yaml perl tar curl jq"
 # Go sources test_mutation_shards.py copies for the identity-attack suite.
 IDENTITY_ATTACK_SOURCES = [
     "internal/identity/" + name for name in
@@ -719,6 +903,11 @@ def selftest_sources(root=ROOT):
         assert found, suite
         sources |= found
     sources |= {str(p.relative_to(root)) for p in (root / "cmd/keep").glob("*test.go")}
+    # test_quickstart_output_leak.py: the page the red runs mutate and tests
+    # whose declared names the result filter may print.
+    sources.add("docs/quickstart.md")
+    sources |= {str(p.relative_to(root)) for p in (root / "test/e2e").glob("*_test.go")}
+    sources.add("test/quickstart/leak_test.go")
     return sources
 
 
@@ -726,7 +915,12 @@ def check_selftests_job(config):
     """ci-selftests: a light lint gate off the fmt-vet critical path that still
     runs everywhere it ran before, except on an MR that touches none of its inputs."""
     job = config["ci-selftests"]
-    assert job["stage"] == "lint" and job["tags"] == ["docker", "ci-burst"]
+    assert job["tags"] == ["docker", "ci-burst"]
+    # Four nodes from the test stage, needing nothing: it neither waits for the
+    # lint stage nor holds the test stage (dispatch_ci_selftests.py shards it).
+    assert job.get("stage") == "test", job.get("stage")
+    assert job.get("needs") == [], job.get("needs")
+    assert job.get("parallel") == 4, job.get("parallel")
     assert job["extends"] == ".go-module-cache"
     assert job["before_script"] == [SELFTESTS_APK], job["before_script"]
     assert job["script"] == ["python3 scripts/test_ci_selftests_dispatcher.py",
@@ -741,7 +935,9 @@ def check_selftests_job(config):
                      "catalog_mutant", "runnerproto", "tenancy", "cli_witnesses",
                      "approvals", "builtin_job_cache", "baseline_diag", "w3_stubs",
                      "dispatch_baseline", "mutation_select", "mutation_select_redrun",
-                     "intake_hpke_mutant")
+                     "intake_hpke_mutant", "upgrade_rollback_output",
+                     "driver_output_leak", "release_nightly_gate", "quickstart_output_leak",
+                     "public_hygiene_parent")
     expected_commands = []
     for name, command in zip(command_names, SELFTESTS, strict=True):
         words = shlex.split(command)
@@ -753,12 +949,12 @@ def check_selftests_job(config):
     assert ast.literal_eval(commands) == tuple(expected_commands)
     assert not set(SELFTESTS) & set(config["fmt-vet"]["script"])
     assert job.get("allow_failure", False) is False and job.get("when", "on_success") == "on_success"
-    assert "needs" not in job and "dependencies" not in job
+    assert "dependencies" not in job
     rules = job["rules"]
-    assert rules[:2] == [BATCH_NEVER, SCAN_ONLY_NEVER], rules
-    assert rules[2] == {"if": MR_IF + " && $KEEP_FULL_CI"}, rules
-    assert set(rules[3]) == {"if", "changes"} and rules[3]["if"] == MR_IF, rules
-    assert rules[4:] == [{"if": MR_IF, "when": "never"}, {"when": "on_success"}], rules
+    assert rules[:1] == [BATCH_NEVER], rules
+    assert rules[1] == {"if": MR_IF + " && $KEEP_FULL_CI"}, rules
+    assert set(rules[2]) == {"if", "changes"} and rules[2]["if"] == MR_IF, rules
+    assert rules[3:] == [{"if": MR_IF, "when": "never"}, {"when": "on_success"}], rules
     changes = mr_changes(job)
     paths = {".gitlab-ci.yml", ".gitlab/ci/full-tests.yml", "go.mod", "go.sum",
              "scripts/mutation-helpers.sh", "scripts/lib/gocache.sh"}
@@ -772,6 +968,227 @@ def check_selftests_job(config):
             continue
         needs = [n["job"] if isinstance(n, dict) else n for n in other.get("needs", [])]
         assert "ci-selftests" not in needs + list(other.get("dependencies", [])), name
+
+
+ROTATION_TESTBED = "rotation-testbed"
+ROTATION_TESTBED_ARTIFACTS = ["testbed-out/receipt.json", "testbed-out/scan.result", "testbed-out/scan.control"]
+ROTATION_TESTBED_PATHS = ["scripts/testbed/**/*", "internal/rotation/**/*", "cmd/keep-server/**/*",
+                          "cmd/keep-runner/**/*", "cmd/keep/**/*", "internal/runner/**/*",
+                          "internal/carriers/**/*", "internal/targets/**/*", "pkg/rotation/**/*",
+                          "Dockerfile", ".gitlab-ci.yml", "go.mod", "go.sum"]
+
+
+ROTATION_TESTBED_OTHER_SOURCES = ("web", "api", "trigger", "pipeline", "parent_pipeline", "chat",
+                                  "external", "webide", "ondemand_dast_scan")
+
+
+def check_rotation_testbed_job(config):
+    """The rotation testbed runs by itself, on the privileged runner, whenever
+    its paths change, fails the pipeline when it fails, and uploads only the
+    receipt and the scan logs (the out directory holds needles and input links)."""
+    assert ROTATION_TESTBED in config, "rotation-testbed job is missing"
+    job = config[ROTATION_TESTBED]
+    assert job["tags"] == ["keep-netns"] and job["stage"] == "test", job
+    assert job["resource_group"] == "keep-rotation-testbed"
+    assert job.get("allow_failure", False) is False
+    assert job.get("when", "on_success") == "on_success"
+    assert job["image"] == "docker:27-cli"
+    assert job["services"] == [{"name": "docker:27-dind", "alias": "docker", "command": ["--tls=false"]}]
+    assert job["variables"]["DOCKER_HOST"] == "tcp://docker:2375"
+    assert job["variables"]["DOCKER_TLS_CERTDIR"] == ""
+    assert job["variables"]["TESTBED_OUT"] == "$CI_PROJECT_DIR/testbed-out"
+    minutes = int(str(job["timeout"]).removesuffix("m"))
+    assert 0 < minutes <= 30, job["timeout"]
+    rules = job["rules"]
+    assert rules[:1] == [BATCH_NEVER], rules
+    assert {"if": '$CI_PIPELINE_SOURCE == "schedule"'} in rules, rules
+    assert {"if": MAIN_PUSH_IF} in rules, rules
+    for rule in rules:
+        assert rule.get("when", "on_success") != "manual", rule
+    # Outside merge requests the privileged testbed starts only from a schedule
+    # or a push to the default branch: not from web, api, trigger or a topic push.
+    def runs(ref, source):
+        rule = first_rule(rules, ref | {"CI_PIPELINE_SOURCE": source})
+        return rule is not None and rule.get("when", "on_success") != "never"
+    for source in ROTATION_TESTBED_OTHER_SOURCES + ("push", "schedule"):
+        assert runs(MAIN, source) == (source in ("push", "schedule")), ("main", source, rules)
+        assert runs(TOPIC, source) == (source == "schedule"), ("topic", source, rules)
+    mr = [r for r in rules if r.get("if") == MR_IF]
+    assert len(mr) == 1 and "when" not in mr[0] and "changes" in mr[0], rules
+    missing = uncovered(mr_changes(job), set(ROTATION_TESTBED_PATHS))
+    assert not missing, missing
+    # The single steps exit 0 whatever the rotation answered; only `all` checks
+    # both scenarios and fails on a broken property.
+    assert job["script"] == ["./scripts/testbed/rotation.sh all"], job["script"]
+    assert job.get("after_script") == ["./scripts/testbed/rotation.sh down"], job.get("after_script")
+    artifacts = job["artifacts"]
+    assert artifacts["when"] == "always" and artifacts["expire_in"] == "14 days", artifacts
+    assert artifacts["paths"] == ROTATION_TESTBED_ARTIFACTS, artifacts["paths"]
+    assert "exclude" not in artifacts and "untracked" not in artifacts, artifacts
+    # Artifacts of earlier stages are unpacked into the checkout as untracked
+    # files, and the receipt then says working_tree_dirty=true. The job reads
+    # none of them.
+    assert job.get("dependencies") == [], job.get("dependencies")
+    for need in job.get("needs", []):
+        assert isinstance(need, dict) and need.get("artifacts") is False, need
+    for name, other in config.items():
+        if not isinstance(other, dict):
+            continue
+        needs = [n["job"] if isinstance(n, dict) else n for n in other.get("needs", [])]
+        assert ROTATION_TESTBED not in needs + list(other.get("dependencies", [])), name
+
+
+ROTATION_TESTBED_MESH = "rotation-testbed-mesh"
+ROTATION_TESTBED_MESH_ARTIFACTS = ["testbed-mesh-out/receipt.json", "testbed-mesh-out/scan.result",
+                                   "testbed-mesh-out/scan.control"]
+ROTATION_TESTBED_MESH_PATHS = ROTATION_TESTBED_PATHS + ["plugins/mesh/**/*", "internal/deployment/**/*"]
+MESH_FETCH = ('git -C "$TESTBED_MESH_SRC" fetch -q --depth 1 '
+              '"${CI_REPOSITORY_URL%/$CI_PROJECT_PATH.git}/entire-vc/evc-mesh.git" "$TESTBED_MESH_SHA"')
+MESH_PIN_CHECK = 'test "$(git -C "$TESTBED_MESH_SRC" rev-parse HEAD)" = "$TESTBED_MESH_SHA"'
+ROTATION_TESTBED_MESH_VARIABLES = {"DOCKER_HOST", "DOCKER_TLS_CERTDIR", "TESTBED_OUT", "TESTBED_MESH_SRC",
+                                   "TESTBED_MESH_SHA"}
+# What would put the job token (it is in CI_REPOSITORY_URL) or a stand value into
+# the public job log: a shell, git or curl trace, or the runner's debug trace.
+TRACE_WORDS = re.compile(r"GIT_TRACE|GIT_CURL_VERBOSE|CI_DEBUG_TRACE|CI_DEBUG_SERVICES|SHELLOPTS|BASH_ENV"
+                         r"|BASH_XTRACEFD|\bENV\s*[:=]|\bxtrace\b|\bset\s+[-+]o\s+verbose\b"
+                         r"|\bcurl\b[^|;&]*(?:\s-[A-Za-z]*v|--verbose|--trace)")
+# The short flags of `set` and of a shell started by name: x (xtrace) or v
+# (verbose) anywhere among them, in any case and any grouping, is a trace.
+SHELL_FLAGS = re.compile(r"\b(?:set|shopt|(?:ba|da)?sh)((?:\s+[-+][A-Za-z]+)+)")
+# The scripts the Mesh testbed job runs, found rather than listed, so a new one
+# is covered; their text must not turn a trace on either.
+ROTATION_TESTBED_MESH_SCRIPTS = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "scripts/testbed").rglob("*.sh"))
+
+
+def logical_lines(lines):
+    """Shell logical lines: the input (lines, or job steps that may hold several
+    lines each) split on newlines, with every backslash-newline continuation
+    joined, so `curl \\` followed by `-v ...` is one line to the trace check."""
+    return re.sub(r"\\\n", " ", "\n".join(lines)).split("\n")
+
+
+def traced(lines):
+    """The logical lines that turn a trace on; comment lines do not count."""
+    out = []
+    for line in logical_lines(lines):
+        if line.lstrip().startswith("#"):
+            continue
+        flags = [f for m in SHELL_FLAGS.finditer(line) for f in m.group(1).split() if not f.startswith("--")]
+        if TRACE_WORDS.search(line) or any(set(f[1:].lower()) & {"x", "v"} for f in flags):
+            out.append(line)
+    return out
+
+
+def unignored_testbed_dirs(config, gitignore):
+    """Paths inside the build directory that the rotation testbed jobs write to
+    (TESTBED_OUT, TESTBED_MESH_SRC) and that the given .gitignore does not ignore:
+    each would make the receipt's working_tree_dirty true for the wrong reason.
+    Returns (in-tree dirs found, git status lines they caused)."""
+    dirs = []
+    for name in (ROTATION_TESTBED, ROTATION_TESTBED_MESH):
+        variables = config[name].get("variables", {})
+        for key in ("TESTBED_OUT", "TESTBED_MESH_SRC"):
+            value = str(variables.get(key, ""))
+            if value.startswith("$CI_PROJECT_DIR/"):
+                dirs.append(value.removeprefix("$CI_PROJECT_DIR/"))
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True)
+        Path(tmp, ".gitignore").write_text(gitignore)
+        for d in dirs:
+            Path(tmp, d, "sub").mkdir(parents=True, exist_ok=True)
+            Path(tmp, d, "sub", "f").write_text("")
+        status = subprocess.run(["git", "-C", tmp, "status", "--porcelain", "--untracked-files=all"],
+                                capture_output=True, text=True, check=True).stdout
+    return dirs, [line[3:] for line in status.splitlines() if line[3:] != ".gitignore"]
+
+
+def check_rotation_testbed_mesh_job(config):
+    """The testbed with a disposable Mesh runs by itself on the privileged
+    runner, builds Mesh from a pinned evc-mesh commit fetched with the job token,
+    runs both scenarios with their checks (`all --mesh`), fails the pipeline
+    when it fails, and uploads only the receipt and the scan logs."""
+    assert ROTATION_TESTBED_MESH in config, "rotation-testbed-mesh job is missing"
+    job = config[ROTATION_TESTBED_MESH]
+    assert job["tags"] == ["keep-netns"] and job["stage"] == "test", job
+    assert job["resource_group"] == "keep-rotation-testbed"
+    # No artifact of an earlier job lands in the tree: the receipt records
+    # working_tree_dirty, and a downloaded file would make the tree dirty.
+    assert job.get("dependencies") == [], job.get("dependencies", "<unset>")
+    assert "needs" not in job, job["needs"]
+    assert job.get("allow_failure", False) is False
+    assert job.get("when", "on_success") == "on_success"
+    assert job["image"] == "docker:27-cli"
+    assert job["services"] == [{"name": "docker:27-dind", "alias": "docker", "command": ["--tls=false"]}]
+    variables = job["variables"]
+    assert variables["DOCKER_HOST"] == "tcp://docker:2375"
+    assert variables["DOCKER_TLS_CERTDIR"] == ""
+    assert variables["TESTBED_OUT"] == "$CI_PROJECT_DIR/testbed-mesh-out"
+    # In the build directory: the after_script container (rotation.sh down) needs it.
+    assert variables["TESTBED_MESH_SRC"] == "$CI_PROJECT_DIR/.testbed-mesh-src"
+    # A commit, never a branch or a tag: the receipt names what it stands on.
+    assert re.fullmatch(r"[0-9a-f]{40}", str(variables.get("TESTBED_MESH_SHA", ""))), variables
+    # A closed list: no trace switch (GIT_TRACE, CI_DEBUG_TRACE ...) rides in here.
+    assert set(variables) == ROTATION_TESTBED_MESH_VARIABLES, sorted(variables)
+    assert not traced(f"{k}: {v}" for k, v in config.get("variables", {}).items()), config.get("variables")
+    minutes = int(str(job["timeout"]).removesuffix("m"))
+    assert 0 < minutes <= 30, job["timeout"]
+    rules = job["rules"]
+    assert rules[:1] == [BATCH_NEVER], rules
+    assert {"if": '$CI_PIPELINE_SOURCE == "schedule"'} in rules, rules
+    assert {"if": MAIN_PUSH_IF} in rules, rules
+    for rule in rules:
+        assert rule.get("when", "on_success") != "manual", rule
+    # Outside merge requests the privileged stand starts only from a schedule or a
+    # push to the default branch: not from web, api, trigger or a topic push.
+    def runs(ref, source):
+        rule = first_rule(rules, ref | {"CI_PIPELINE_SOURCE": source})
+        return rule is not None and rule.get("when", "on_success") != "never"
+    for source in ROTATION_TESTBED_OTHER_SOURCES + ("push", "schedule"):
+        assert runs(MAIN, source) == (source in ("push", "schedule")), ("main", source, rules)
+        assert runs(TOPIC, source) == (source == "schedule"), ("topic", source, rules)
+    mr = [r for r in rules if r.get("if") == MR_IF]
+    assert len(mr) == 1 and "when" not in mr[0] and "changes" in mr[0], rules
+    missing = uncovered(mr_changes(job), set(ROTATION_TESTBED_MESH_PATHS))
+    assert not missing, missing
+    before = job["before_script"]
+    # The fetch is by the pinned commit, and what was checked out is that commit.
+    assert MESH_FETCH in before and MESH_PIN_CHECK in before, before
+    assert before.index(MESH_FETCH) < before.index(MESH_PIN_CHECK), before
+    assert not any("CI_JOB_TOKEN" in line or "PRIVATE-TOKEN" in line for line in before), before
+    assert job["script"] == ["./scripts/testbed/rotation.sh all --mesh"], job["script"]
+    assert job.get("after_script") == ["./scripts/testbed/rotation.sh down"], job.get("after_script")
+    steps = before + job["script"] + job["after_script"]
+    assert not traced(steps), traced(steps)
+    for path in ROTATION_TESTBED_MESH_SCRIPTS:
+        lines = (ROOT / path).read_text().splitlines()
+        assert not traced(lines), (path, traced(lines))
+    artifacts = job["artifacts"]
+    assert artifacts["when"] == "always" and artifacts["expire_in"] == "14 days", artifacts
+    assert artifacts["paths"] == ROTATION_TESTBED_MESH_ARTIFACTS, artifacts["paths"]
+    assert "exclude" not in artifacts and "untracked" not in artifacts, artifacts
+    for name, other in config.items():
+        if not isinstance(other, dict):
+            continue
+        needs = [n["job"] if isinstance(n, dict) else n for n in other.get("needs", [])]
+        assert ROTATION_TESTBED_MESH not in needs + list(other.get("dependencies", [])), name
+
+
+def check_rotation_testbed_out_ignored(config, gitignore):
+    """The job's TESTBED_OUT lies inside the checkout; git must ignore it, or the
+    stand's own output makes every CI receipt say working_tree_dirty=true."""
+    out = config[ROTATION_TESTBED]["variables"]["TESTBED_OUT"]
+    prefix = "$CI_PROJECT_DIR/"
+    assert out.startswith(prefix) and "$" not in out[len(prefix):], out
+    rel = out[len(prefix):].strip("/")
+    assert rel and not rel.startswith(".."), out
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True)
+        Path(tmp, ".gitignore").write_text(gitignore)
+        for name in ROTATION_TESTBED_ARTIFACTS + [rel + "/runs/01-meta.json"]:
+            path = rel + "/" + name.split("/", 1)[1] if name.startswith("testbed-out/") else name
+            done = subprocess.run(["git", "-C", tmp, "check-ignore", "-q", "--no-index", path],
+                                  capture_output=True)
+            assert done.returncode == 0, ("not ignored by git", path)
 
 
 IMPORT_BOUNDARIES = "scripts/check-import-boundaries.sh"
@@ -1067,13 +1484,60 @@ def effective_scripts(config, name):
     return "\n".join(str(x) for key in ("before_script", "script", "after_script") for x in job.get(key) or [])
 
 
+def job_variable_values(config, name):
+    """Values of the global and the effective job variables, as one text: a
+    script path can reach the shell through a variable (`sh -c "$S"`)."""
+    values = {**(config.get("variables") or {}), **(effective_job(config, config[name]).get("variables") or {})}
+    return "\n".join(str(v.get("value", "") if isinstance(v, dict) else v) for v in values.values())
+
+
 def mutation_runners(config, jobs):
-    """Jobs among `jobs` whose effective scripts run a mutation suite, whatever the job is called."""
-    return {name for name in jobs if re.search(r"check-[\w-]*mutations\.sh", effective_scripts(config, name))}
+    """Jobs among `jobs` whose effective scripts or variables name a mutation suite, whatever the job is called."""
+    return {name for name in jobs if re.search(r"check-[\w-]*mutations\.sh", "\n".join(
+        (effective_scripts(config, name), job_variable_values(config, name))))}
 
 
 ANCHORS_JOB = "mutant-anchors"
 ANCHORS_MR_RUN = "MUTANT_ANCHORS_BASE=$CI_MERGE_REQUEST_DIFF_BASE_SHA timeout -k 10s 12m ./scripts/check-mutant-anchors.sh"
+# Every suite, outside a merge request: 500-530s green, two main runs stopped at
+# 12m. The job timeout stays above the inner budget so the driver, not the
+# runner, ends the run and names the unfinished suites.
+ANCHORS_MAIN_RUN = "timeout -k 10s 20m ./scripts/check-mutant-anchors.sh --all"
+ANCHORS_JOB_TIMEOUT = "25m"
+
+
+# An install line the mutation editor's python3 may ride on: the whole line is
+# one of these commands and a list of bare package names, nothing before it,
+# nothing after it. A prefix (`exit 0; `, `: && `) or a suffix is no match.
+EDITOR_INSTALL_LINES = (
+    re.compile(r"(apk add --no-cache)((?: [a-z0-9][a-z0-9.+_-]*)+)"),
+    re.compile(r"(apt-get update -qq && apt-get install -y -qq(?: --no-install-recommends)?)"
+               r"((?: [a-z0-9][a-z0-9.+_-]*)+)"),
+)
+
+
+def editor_install_line(line):
+    """(command, packages) of a whole install line, or None."""
+    for shape in EDITOR_INSTALL_LINES:
+        match = shape.fullmatch(str(line))
+        if match:
+            return match.group(1), match.group(2).split()
+    return None
+
+
+def check_mutation_editor_runtime(config):
+    """Every consumer of the shared editor or the tree snapshot
+    (scripts/lib/mutation_snapshot.py, no fallback) has Python before its
+    mutation command."""
+    jobs = {name + "-mutations" for name in MUTATIONS}
+    jobs |= {"netns-mutation-run", INTAKE_MUTATIONS}
+    for name in sorted(jobs):
+        job = effective_job(config, config[name])
+        lines = list(map(str, job.get("before_script", [])))
+        # The browser image carries Python and verifies its runtime explicitly.
+        provisioned = any("python3" in (editor_install_line(line) or ("", []))[1] for line in lines)
+        browser_runtime = name == INTAKE_MUTATIONS and "python3 --version" in "\n".join(lines)
+        assert provisioned or browser_runtime, f"{name}: shared mutation editor needs python3"
 
 
 def check_mutant_anchors(config, root=ROOT):
@@ -1090,7 +1554,16 @@ def check_mutant_anchors(config, root=ROOT):
                    for r in job.get("rules", [])), job.get("rules")
     script = "\n".join(map(str, job["script"]))
     assert ANCHORS_MR_RUN in script, script
+    assert ANCHORS_MAIN_RUN in script, script
+    budgets = re.findall(r"timeout -k 10s (\d+)m \./scripts/check-mutant-anchors\.sh", script)
+    assert budgets == ["12", "20"], budgets
+    assert job.get("timeout") == ANCHORS_JOB_TIMEOUT, job.get("timeout")
     assert "./scripts/check-mutant-anchors-selftest.sh" in script, script
+    helper_test = "timeout -k 10s 2m ./scripts/check-mutation-helpers.sh"
+    assert job["script"].count(helper_test) == 1, script
+    assert job["script"][0] == helper_test, script
+    assert not any("check-mutation-helpers.sh" in str(line)
+                   for line in config["public-hygiene-mutations"]["script"])
     # The suites run only through the driver, which forces apply-only mode.
     assert not mutation_runners(config, {ANCHORS_JOB}), script
     assert "MUTATION_APPLY_ONLY" not in script + str(job.get("variables", {})), script
@@ -1100,24 +1573,35 @@ def check_mutant_anchors(config, root=ROOT):
         assert re.search(r"mutation_appl(ied|y_only)|MUTATION_APPLY_ONLY|no source anchors", text), path.name
 
 
+# Branch names the non-default push checks walk: a plain one and the
+# <author>/<id>-<topic> shape most branches here have.
+TOPIC_BRANCHES = ("topic", "dev/1234abcd-some-topic")
+
+
+def topic_push(branch, **extra):
+    return {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_BRANCH": branch, "CI_COMMIT_REF_NAME": branch,
+            "CI_PIPELINE_SOURCE": "push"} | extra
+
+
 def check_branch_push_scope(config):
-    """One full pipeline per MR SHA; every other pipeline kind keeps its coverage."""
-    # The open-MR rule is evaluated when the push pipeline is created. An MR
-    # opened right after the push (push option or `glab mr create`) is not
-    # visible yet, so this context is the duplicate of the later MR pipeline.
-    push = pipeline_jobs(config, TOPIC | {"CI_PIPELINE_SOURCE": "push"})
-    assert push == SCAN_ONLY_JOBS, push
-    assert pipeline_jobs(config, TOPIC | {"CI_PIPELINE_SOURCE": "push",
-                                          "CI_OPEN_MERGE_REQUESTS": "entire-vc/evc-keep!1"}) is None
+    """A push to a non-default branch creates no pipeline, with or without an MR;
+    every other pipeline kind keeps its coverage."""
+    # GitLab evaluates workflow:rules when the push pipeline is created; an MR
+    # opened right after the push is not visible yet. Neither state may matter.
+    for branch in TOPIC_BRANCHES:
+        for extra in ({}, {"CI_OPEN_MERGE_REQUESTS": "entire-vc/evc-keep!1"}, {"KEEP_FULL_CI": "1"},
+                      {"CI_COMMIT_REF_PROTECTED": "true"}):
+            assert pipeline_jobs(config, topic_push(branch, **extra)) is None, (branch, extra)
     mr = pipeline_jobs(config, MR)
     # Everything but the manual backtest is an ordinary check.
     full = mr - MR_JOBS
-    heavy = {"fmt-vet", "golangci-lint", "full-tests", "w3-stubs", "build", "carriers-mutations"}
+    heavy = {"fmt-vet", "golangci-lint", "full-tests", "w3-stubs", "build"}
     every_mutation = {name + "-mutations" for name in MUTATIONS}
     post_review = every_mutation | {"netns-mutation-run", INTAKE_MUTATIONS}
     # On an MR no mutation job runs at all.
-    assert SCAN_ONLY_JOBS | (heavy - every_mutation) <= mr, mr
+    assert SECURITY_JOBS | (heavy - every_mutation) <= mr, mr
     assert not mr & post_review, mr & post_review
+    assert BRANCH_SCAN_JOB not in mr, mr
     assert not mutation_runners(config, mr), mutation_runners(config, mr)
     # The push to the default branch runs every ordinary check but no mutation
     # job; the plugin's own tests run on the merge requests that touch it and
@@ -1125,9 +1609,9 @@ def check_branch_push_scope(config):
     main_push = pipeline_jobs(config, MAIN | {"CI_PIPELINE_SOURCE": "push"})
     assert main_push is not None and (
         full - every_mutation - MR_AND_SCHEDULE_ONLY - MR_ONLY <= main_push), main_push
-    assert not main_push & every_mutation, main_push & every_mutation
-    # The intake browser suites keep the main push they had inside intake-browser.
-    assert mutation_runners(config, main_push) == {INTAKE_MUTATIONS}, mutation_runners(config, main_push)
+    assert not main_push & post_review, main_push & post_review
+    # No mutation suite at all on the main push, the browser ones included.
+    assert not mutation_runners(config, main_push), mutation_runners(config, main_push)
     assert RELEASE_JOB not in main_push
     for context in [MAIN | {"CI_PIPELINE_SOURCE": "schedule"},
                     TOPIC | {"CI_PIPELINE_SOURCE": "schedule"}]:
@@ -1137,18 +1621,59 @@ def check_branch_push_scope(config):
     for source in ("web", "api"):
         for extra in ({}, {"CI_OPEN_MERGE_REQUESTS": "entire-vc/evc-keep!1"}):
             jobs = pipeline_jobs(config, TOPIC | {"CI_PIPELINE_SOURCE": source} | extra)
-            assert jobs is not None and SCAN_ONLY_JOBS | heavy <= jobs, (source, jobs)
-    # A release tag runs the full set, as the schedule does, and then `release`.
-    tag = {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_TAG": "v1.0.0", "CI_PIPELINE_SOURCE": "push"}
-    jobs = pipeline_jobs(config, tag)
-    assert jobs is not None and post_review <= jobs, (jobs, post_review - (jobs or set()))
+            assert jobs is not None and SECURITY_JOBS | heavy <= jobs, (source, jobs)
+            assert not jobs & post_review, (source, jobs & post_review)
+    # A release tag runs lint, tests and build, then `release`; no mutation job
+    # (`release` reads the nightly result instead).
+    jobs = pipeline_jobs(config, TAG)
+    assert jobs is not None and not jobs & post_review, (jobs or set()) & post_review
+    assert not mutation_runners(config, jobs), mutation_runners(config, jobs)
     assert {"security-hygiene", "fmt-vet", "full-tests", "build", RELEASE_JOB} <= jobs, jobs
 
 
 BATCH = MAIN | {"CI_PIPELINE_SOURCE": "schedule", "KEEP_MUTATION_BATCH": "true"}
+
+
+def check_branch_secret_scan(config, scanner=None, selftest=None):
+    """What replaced the scan-only branch push pipeline: a hard job of the schedule
+    pipeline that runs scripts/scan-branch-secrets.sh, and the selftest of that
+    same script in every pipeline that carries the secret-scan gates."""
+    assert BRANCH_SCAN_JOB in config, "the branch secret scan is missing"
+    job = config[BRANCH_SCAN_JOB]
+    assert job["stage"] == "security", job
+    assert job.get("allow_failure", False) is False, job
+    assert job.get("when", "on_success") == "on_success", job
+    assert job["script"] == [BRANCH_SCAN_SCRIPT], job["script"]
+    assert job.get("variables", {}).get("GIT_DEPTH") == 0, job
+    assert not any(isinstance(r, dict) and ("changes" in r or r.get("when") in ("manual", "delayed"))
+                   for r in job.get("rules", [])), job.get("rules")
+    # The schedule ("Daily full verification", on the default branch) runs it;
+    # no other pipeline does: a finding on someone else's branch must not turn
+    # an unrelated merge request or the default branch red.
+    schedule = pipeline_jobs(config, MAIN | {"CI_PIPELINE_SOURCE": "schedule"})
+    assert schedule is not None and BRANCH_SCAN_JOB in schedule, schedule
+    tag = {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_TAG": "v1.0.0", "CI_PIPELINE_SOURCE": "push"}
+    for context in (MR, MAIN | {"CI_PIPELINE_SOURCE": "push"}, TOPIC | {"CI_PIPELINE_SOURCE": "web"}, tag, BATCH):
+        jobs = pipeline_jobs(config, context)
+        assert jobs is not None and BRANCH_SCAN_JOB not in jobs, context
+    # The scanner reads every branch head, excludes the default branch, uses the
+    # repository config, redacts, and exits 1 on a finding.
+    scanner = (ROOT / BRANCH_SCAN_SCRIPT).read_text() if scanner is None else scanner
+    code = "\n".join(line for line in scanner.splitlines() if not line.lstrip().startswith("#"))
+    assert 'git fetch --quiet --prune "$remote" "+refs/heads/*:refs/remotes/$remote/*"' in code, "fetch"
+    assert 'base="refs/remotes/$remote/$default"' in code, "base"
+    assert '--log-opts="--remotes=$remote ^$base"' in code, "default branch exclusion"
+    assert "--config .gitleaks.toml" in code and "--redact --exit-code 1" in code, "gitleaks flags"
+    assert "|| true" not in code and "set +e" not in code and "set -eu" in code, "soft exit"
+    # Its selftest runs this same file, in the job that carries the scan-scope selftest.
+    selftest = (ROOT / BRANCH_SCAN_SELFTEST).read_text() if selftest is None else selftest
+    assert "scanner=${1:-$root/scripts/scan-branch-secrets.sh}" in selftest, "selftest scanner"
+    assert BRANCH_SCAN_SELFTEST in config["secret-scan-scope-selftest"]["script"], "selftest job"
+
+
 # The mutation batch runs the secret scan, fmt-vet (tenancy-mutations reads its
 # artifact) and its own three jobs; the post-review jobs run in its child.
-BATCH_JOBS = SCAN_ONLY_JOBS | {"fmt-vet", RANGE_JOB, BATCH_TRIGGER, GREEN_JOB}
+BATCH_JOBS = SECURITY_JOBS | {"fmt-vet", RANGE_JOB, BATCH_TRIGGER, GREEN_JOB}
 GREEN_RULES = [{"if": BATCH_IF, "variables": {"KEEP_MUTATION_GREEN": "head"}},
                {"if": '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "schedule"',
                 "variables": {"KEEP_MUTATION_GREEN": "head"}},
@@ -1167,7 +1692,7 @@ def check_mutation_batch(config):
         assert jobs == BATCH_JOBS, (context, jobs ^ BATCH_JOBS)
     # No other pipeline runs the range or its trigger, or is named.
     others = [MAIN | {"CI_PIPELINE_SOURCE": s} for s in ("push", "schedule", "web")]
-    others += [TOPIC | {"CI_PIPELINE_SOURCE": "push"}, {"CI_DEFAULT_BRANCH": "main", "CI_PIPELINE_SOURCE": "merge_request_event"},
+    others += [TOPIC | {"CI_PIPELINE_SOURCE": "web"}, {"CI_DEFAULT_BRANCH": "main", "CI_PIPELINE_SOURCE": "merge_request_event"},
                {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_TAG": "v1.0.0", "CI_PIPELINE_SOURCE": "push"}]
     for context in others:
         jobs = pipeline_jobs(config, context)
@@ -1279,6 +1804,248 @@ class CIConfig(unittest.TestCase):
         spec.loader.exec_module(backtest)
         return backtest
 
+    def test_filter_drivers_have_python(self):
+        """Each job whose driver prints through test-result-names.sh has
+        python3; dropping it from one job, or the filter from every driver
+        list, turns the check red."""
+        drivers = filter_drivers()
+        self.assertIn("check-rotate-audit-mutations.sh", drivers)
+        check_filter_has_python(self.config, drivers)
+        broken = copy.deepcopy(self.config)
+        broken["rotate-audit-mutations"]["before_script"] = []
+        with self.assertRaises(AssertionError):
+            check_filter_has_python(broken, drivers)
+        broken = copy.deepcopy(self.config)
+        broken["targets-mutations"]["before_script"] = [
+            line.replace(" python3", "") for line in broken["targets-mutations"]["before_script"]]
+        with self.assertRaises(AssertionError):
+            check_filter_has_python(broken, drivers)
+        with self.assertRaises(AssertionError):
+            check_filter_has_python(self.config, set())
+
+    def test_rotation_testbed_out_is_ignored_by_git(self):
+        """The stand writes into the checkout; an unignored out directory turns
+        every CI receipt dirty. Each broken control turns the check red."""
+        gitignore = (ROOT / ".gitignore").read_text()
+        check_rotation_testbed_out_ignored(self.config, gitignore)
+        line = "/testbed-out/\n"
+        self.assertIn(line, gitignore)
+        moved = copy.deepcopy(self.config)
+        moved[ROTATION_TESTBED]["variables"]["TESTBED_OUT"] = "$CI_PROJECT_DIR/testbed-run"
+        cases = [
+            ("line removed", self.config, gitignore.replace(line, "")),
+            ("negated", self.config, gitignore + "!/testbed-out/\n"),
+            ("empty .gitignore", self.config, ""),
+            ("out moved to an unignored dir", moved, gitignore),
+        ]
+        for label, config, text in cases:
+            with self.subTest(label):
+                with self.assertRaises(AssertionError):
+                    check_rotation_testbed_out_ignored(config, text)
+
+    def test_rotation_testbed_job_dies_on_each_broken_control(self):
+        """Each way to weaken the testbed job turns the check red."""
+        check_rotation_testbed_job(self.config)
+
+        def drop(c):
+            del c[ROTATION_TESTBED]
+
+        def manual_job(c):
+            c[ROTATION_TESTBED]["when"] = "manual"
+
+        def manual_rule(c):
+            for r in c[ROTATION_TESTBED]["rules"]:
+                if r.get("if") == MR_IF:
+                    r["when"] = "manual"
+
+        def no_testbed_changes(c):
+            mr_changes(c[ROTATION_TESTBED]).remove("scripts/testbed/**/*")
+
+        def no_changes_key(c):
+            for r in c[ROTATION_TESTBED]["rules"]:
+                r.pop("changes", None)
+
+        def whole_dir(c):
+            c[ROTATION_TESTBED]["artifacts"]["paths"] = ["testbed-out/"]
+
+        def extra_artifact(c):
+            c[ROTATION_TESTBED]["artifacts"]["paths"].append("testbed-out/terminal.log")
+
+        def untracked(c):
+            c[ROTATION_TESTBED]["artifacts"]["untracked"] = True
+
+        cases = [
+            ("job deleted", drop),
+            ("job manual", manual_job),
+            ("MR rule manual", manual_rule),
+            ("no changes on scripts/testbed", no_testbed_changes),
+            ("no changes key", no_changes_key),
+            ("allow_failure", lambda c: c[ROTATION_TESTBED].__setitem__("allow_failure", True)),
+            ("wrong runner", lambda c: c[ROTATION_TESTBED].__setitem__("tags", ["docker"])),
+            ("artifacts = whole directory", whole_dir),
+            ("extra artifact", extra_artifact),
+            ("untracked artifacts", untracked),
+            ("no down", lambda c: c[ROTATION_TESTBED].pop("after_script")),
+            ("steps without the scenario checks", lambda c: c[ROTATION_TESTBED].__setitem__("script", [
+                "./scripts/testbed/rotation.sh " + step
+                for step in ("up", "rotate", "break-third", "rotate", "receipt")])),
+            ("receipt only", lambda c: c[ROTATION_TESTBED].__setitem__("script", ["./scripts/testbed/rotation.sh receipt"])),
+            ("no schedule", lambda c: c[ROTATION_TESTBED]["rules"].remove({"if": '$CI_PIPELINE_SOURCE == "schedule"'})),
+            ("no batch guard", lambda c: c[ROTATION_TESTBED]["rules"].remove(BATCH_NEVER)),
+            ("timeout 31m", lambda c: c[ROTATION_TESTBED].__setitem__("timeout", "31m")),
+            ("main rule without push", lambda c: c[ROTATION_TESTBED]["rules"].__setitem__(
+                c[ROTATION_TESTBED]["rules"].index({"if": MAIN_PUSH_IF}),
+                {"if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"})),
+            ("no main push rule", lambda c: c[ROTATION_TESTBED]["rules"].remove({"if": MAIN_PUSH_IF})),
+            ("web rule", lambda c: c[ROTATION_TESTBED]["rules"].insert(2, {"if": '$CI_PIPELINE_SOURCE == "web"'})),
+            ("api rule", lambda c: c[ROTATION_TESTBED]["rules"].insert(2, {"if": '$CI_PIPELINE_SOURCE == "api"'})),
+            ("topic push rule", lambda c: c[ROTATION_TESTBED]["rules"].append({"if": '$CI_PIPELINE_SOURCE == "push"'})),
+            ("rule without if", lambda c: c[ROTATION_TESTBED]["rules"].append({"when": "on_success"})),
+            ("needed", lambda c: c["build"].__setitem__("needs", [{"job": ROTATION_TESTBED}])),
+            ("downloads every earlier artifact", lambda c: c[ROTATION_TESTBED].pop("dependencies", None)),
+            ("depends on fmt-vet", lambda c: c[ROTATION_TESTBED].__setitem__("dependencies", ["fmt-vet"])),
+            ("needs fmt-vet artifacts", lambda c: c[ROTATION_TESTBED].__setitem__("needs", [{"job": "fmt-vet"}])),
+            ("needs fmt-vet by name", lambda c: c[ROTATION_TESTBED].__setitem__("needs", ["fmt-vet"])),
+        ]
+        for label, mutate in cases:
+            with self.subTest(label):
+                broken = copy.deepcopy(self.config)
+                mutate(broken)
+                with self.assertRaises(AssertionError):
+                    check_rotation_testbed_job(broken)
+
+    def test_trace_switches_are_found_in_the_testbed_scripts(self):
+        """The scripts of the Mesh job are scanned by traced(); each way to turn a
+        trace on is caught, the ordinary lines are not."""
+        for path in ROTATION_TESTBED_MESH_SCRIPTS:
+            self.assertEqual(traced((ROOT / path).read_text().splitlines()), [], path)
+        self.assertIn("scripts/testbed/stand-init.sh", ROTATION_TESTBED_MESH_SCRIPTS)
+        self.assertIn("scripts/testbed/host/seen.sh", ROTATION_TESTBED_MESH_SCRIPTS)
+        for line in ("set -x", "set -euxo pipefail", "set -Eeuxo pipefail", "set -e -x", "set -eu -o xtrace",
+                     "set -o errexit -o xtrace", "  set -o xtrace", "set +o xtrace", "shopt -os xtrace", "set -v",
+                     "set -o verbose", "bash -x ./x.sh", "sh -ex ./x.sh", "sh -xc 'true'", "bash -xe x.sh",
+                     "bash -e -x x.sh", "SHELLOPTS: xtrace", "export SHELLOPTS=xtrace", "BASH_ENV=/x", "ENV=/x sh",
+                     "BASH_XTRACEFD=2", "curl -v http://x", "curl -fsSv http://x", "curl --verbose http://x",
+                     "curl -s --trace-ascii - http://x", "export GIT_TRACE=1", "GIT_CURL_VERBOSE=1 git fetch",
+                     "CI_DEBUG_TRACE=true"):
+            with self.subTest(line):
+                self.assertEqual(traced(["set -euo pipefail", line]), [line])
+        # A continued command is one shell line: its trace flag on the next physical
+        # line, or inside one multi-line job step, is still found.
+        for lines in (["curl -fsS \\", "  -v http://x"], ["curl \\", "  --header @h \\", "  --verbose http://x"],
+                      ["set -eu \\", "  -x"], ["bash \\", "  -x ./x.sh"], ["curl -fsS \\\n  -v http://x"],
+                      ["curl \\", "  --trace-ascii - http://x"]):
+            with self.subTest(continued=lines):
+                self.assertEqual(len(traced(["set -euo pipefail", *lines])), 1)
+        for line in ("set -euo pipefail", "set -Eeuo pipefail", "# set -x", "sh -c 'true'", "find . -exec true {} +",
+                     "bash ./x.sh", "grep -v x", "curl -fsS --max-time 5 http://x", "docker compose exec -T x sh -c 'y'"):
+            with self.subTest(line):
+                self.assertEqual(traced([line]), [])
+
+    def test_testbed_dirs_in_the_build_directory_are_ignored(self):
+        """The out directories and the Mesh checkout of the testbed jobs are in
+        .gitignore, so a CI receipt says working_tree_dirty=false for a clean
+        commit; dropping any line, or moving a job's directory, turns it red."""
+        gitignore = (ROOT / ".gitignore").read_text()
+        dirs, dirty = unignored_testbed_dirs(self.config, gitignore)
+        self.assertEqual(sorted(set(dirs)), [".testbed-mesh-src", "testbed-mesh-out", "testbed-out"])
+        self.assertEqual(dirty, [])
+        for line in ("/testbed-out/", "/testbed-mesh-out/", "/.testbed-mesh-src/"):
+            with self.subTest(dropped=line):
+                self.assertIn(line + "\n", gitignore)
+                self.assertNotEqual(unignored_testbed_dirs(self.config, gitignore.replace(line + "\n", ""))[1], [])
+        for job, key in ((ROTATION_TESTBED, "TESTBED_OUT"), (ROTATION_TESTBED_MESH, "TESTBED_OUT"),
+                         (ROTATION_TESTBED_MESH, "TESTBED_MESH_SRC")):
+            with self.subTest(moved=f"{job} {key}"):
+                c = copy.deepcopy(self.config)
+                c[job]["variables"][key] = "$CI_PROJECT_DIR/elsewhere"
+                self.assertNotEqual(unignored_testbed_dirs(c, gitignore)[1], [])
+
+    def test_rotation_testbed_mesh_job_dies_on_each_broken_control(self):
+        """Each way to weaken the Mesh testbed job turns the check red."""
+        check_rotation_testbed_mesh_job(self.config)
+        J = ROTATION_TESTBED_MESH
+
+        def drop(c):
+            del c[J]
+
+        def manual_rule(c):
+            for r in c[J]["rules"]:
+                if r.get("if") == MR_IF:
+                    r["when"] = "manual"
+
+        def no_changes_key(c):
+            for r in c[J]["rules"]:
+                r.pop("changes", None)
+
+        def sha(value):
+            return lambda c: c[J]["variables"].__setitem__("TESTBED_MESH_SHA", value)
+
+        def before(f):
+            return lambda c: c[J].__setitem__("before_script", f(c[J]["before_script"]))
+
+        cases = [
+            ("job deleted", drop),
+            ("job manual", lambda c: c[J].__setitem__("when", "manual")),
+            ("MR rule manual", manual_rule),
+            ("no changes on scripts/testbed", lambda c: mr_changes(c[J]).remove("scripts/testbed/**/*")),
+            ("no changes on plugins/mesh", lambda c: mr_changes(c[J]).remove("plugins/mesh/**/*")),
+            ("no changes on internal/rotation", lambda c: mr_changes(c[J]).remove("internal/rotation/**/*")),
+            ("no changes key", no_changes_key),
+            ("allow_failure", lambda c: c[J].__setitem__("allow_failure", True)),
+            ("wrong runner", lambda c: c[J].__setitem__("tags", ["docker"])),
+            ("downloads every earlier artifact", lambda c: c[J].pop("dependencies")),
+            ("downloads the fmt-vet artifacts", lambda c: c[J].__setitem__("dependencies", ["fmt-vet"])),
+            ("needs an earlier job", lambda c: c[J].__setitem__("needs", ["fmt-vet"])),
+            ("Mesh at the head of main", sha("main")),
+            ("Mesh at HEAD", sha("HEAD")),
+            ("Mesh sha empty", sha("")),
+            ("Mesh sha short", sha("b789a94f")),
+            ("Mesh sha not set", lambda c: c[J]["variables"].pop("TESTBED_MESH_SHA")),
+            ("Mesh source outside the build dir", lambda c: c[J]["variables"].__setitem__("TESTBED_MESH_SRC", "/tmp/evc-mesh")),
+            ("no fetch of the pin", before(lambda b: [x for x in b if x != MESH_FETCH])),
+            ("fetch of main", before(lambda b: [x.replace('"$TESTBED_MESH_SHA"', "main") if x == MESH_FETCH else x for x in b])),
+            ("no check of the checked out commit", before(lambda b: [x for x in b if x != MESH_PIN_CHECK])),
+            ("check before fetch", before(lambda b: [MESH_PIN_CHECK] + [x for x in b if x != MESH_PIN_CHECK])),
+            ("personal token", before(lambda b: b + ['git config --global http.extraHeader "PRIVATE-TOKEN: $MESH_TOKEN"'])),
+            ("without --mesh", lambda c: c[J].__setitem__("script", ["./scripts/testbed/rotation.sh all"])),
+            ("steps without the scenario checks", lambda c: c[J].__setitem__("script", [
+                "./scripts/testbed/rotation.sh " + step
+                for step in ("up --mesh", "rotate-mesh", "break-third", "rotate-mesh", "receipt")])),
+            ("artifacts = whole directory", lambda c: c[J]["artifacts"].__setitem__("paths", ["testbed-mesh-out/"])),
+            ("extra artifact", lambda c: c[J]["artifacts"]["paths"].append("testbed-mesh-out/mcp")),
+            ("Mesh source uploaded", lambda c: c[J]["artifacts"]["paths"].append(".testbed-mesh-src/")),
+            ("untracked artifacts", lambda c: c[J]["artifacts"].__setitem__("untracked", True)),
+            ("no down", lambda c: c[J].pop("after_script")),
+            ("no schedule", lambda c: c[J]["rules"].remove({"if": '$CI_PIPELINE_SOURCE == "schedule"'})),
+            ("no main push rule", lambda c: c[J]["rules"].remove({"if": MAIN_PUSH_IF})),
+            ("main rule without push", lambda c: c[J]["rules"].__setitem__(
+                c[J]["rules"].index({"if": MAIN_PUSH_IF}), {"if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"})),
+            ("web rule", lambda c: c[J]["rules"].insert(2, {"if": '$CI_PIPELINE_SOURCE == "web"'})),
+            ("api rule", lambda c: c[J]["rules"].insert(2, {"if": '$CI_PIPELINE_SOURCE == "api"'})),
+            ("topic push rule", lambda c: c[J]["rules"].append({"if": '$CI_PIPELINE_SOURCE == "push"'})),
+            ("no batch guard", lambda c: c[J]["rules"].remove(BATCH_NEVER)),
+            ("timeout 31m", lambda c: c[J].__setitem__("timeout", "31m")),
+            ("needed", lambda c: c["build"].__setitem__("needs", [{"job": J}])),
+            ("GIT_TRACE in the job", lambda c: c[J]["variables"].__setitem__("GIT_TRACE", "1")),
+            ("GIT_CURL_VERBOSE in the job", lambda c: c[J]["variables"].__setitem__("GIT_CURL_VERBOSE", "1")),
+            ("CI_DEBUG_TRACE in the job", lambda c: c[J]["variables"].__setitem__("CI_DEBUG_TRACE", "true")),
+            ("CI_DEBUG_TRACE for the pipeline", lambda c: c["variables"].__setitem__("CI_DEBUG_TRACE", "true")),
+            ("GIT_TRACE for the pipeline", lambda c: c["variables"].__setitem__("GIT_TRACE", "1")),
+            ("set -x before the fetch", before(lambda b: ["set -x"] + b)),
+            ("git trace on the fetch", before(lambda b: ["GIT_TRACE=1 " + x if x == MESH_FETCH else x for x in b])),
+            ("bash -x for the scenario", lambda c: c[J].__setitem__("script", ["bash -x ./scripts/testbed/rotation.sh all --mesh"])),
+            ("set -x in down", lambda c: c[J].__setitem__("after_script", ["set -x", "./scripts/testbed/rotation.sh down"])),
+            ("set -Eeux before the fetch", before(lambda b: ["set -Eeuxo pipefail"] + b)),
+            ("SHELLOPTS for the pipeline", lambda c: c["variables"].__setitem__("SHELLOPTS", "xtrace")),
+        ]
+        for label, mutate in cases:
+            with self.subTest(label):
+                broken = copy.deepcopy(self.config)
+                mutate(broken)
+                with self.assertRaises(AssertionError):
+                    check_rotation_testbed_mesh_job(broken)
+
     def test_core_go_test_deadline_is_15m_under_shard_and_job_limits(self):
         """go test's per-package deadline for core shards is >= 15m, with the
         27m shard limit and the 30m job limit both above it by >= 5m."""
@@ -1312,7 +2079,8 @@ class CIConfig(unittest.TestCase):
         red = ("ok   a: T went red\nFAIL log-claim-token: mutation did not apply - the source changed\n"
                "ERROR: Job failed: exit code 1\n")
         junk = "Executing step_script\nERROR: Job failed: exit code 1\n"
-        self.assertEqual(bt.classify(gone)[0], "branch-deleted")
+        self.assertEqual(bt.classify(gone), ("branch-deleted",
+                         "exit 128: fatal: couldn't find remote ref refs/heads/contributor/x-contract"))
         self.assertEqual(bt.classify(red), ("red-mutant", "FAIL log-claim-token: mutation did not apply - the source changed"))
         self.assertEqual(bt.classify(junk)[0], "unexplained")
         # exit 128 without the missing-ref line, a green `went red` line, an empty trace: none is explained
@@ -1548,24 +2316,35 @@ class CIConfig(unittest.TestCase):
 
     def test_mutations_never_on_mr(self):
         check_mutations_never_on_mr(self.config)
+        rule_cases = {
+            "on MR": lambda r: r.insert(1, {"if": MR_IF}),
+            "manual on MR": lambda r: r.insert(1, {"if": MR_IF, "when": "manual", "allow_failure": False}),
+            "on MR by changes": lambda r: r.insert(1, {"if": MR_IF, "changes": ["**/*.go"]}),
+            "on a tag": lambda r: r.append({"if": TAG_IF}),
+            "on the main push": lambda r: r.append({"if": MAIN_PUSH_IF}),
+            "trailing on_success": lambda r: r.append({"when": "on_success"}),
+            "manual anywhere": lambda r: r.append({"when": "manual"}),
+            "schedule rule dropped": lambda r: r.pop(),
+        }
         for name in sorted(MUTATIONS) + ["netns-mutation-run", INTAKE_MUTATIONS]:
             key = name if name in ("netns-mutation-run", INTAKE_MUTATIONS) else name + "-mutations"
-            for mutate in ("auto", "manual", "main_manual", "changes"):
-                with self.subTest(job=name, mutate=mutate):
+            for label, mutate in rule_cases.items():
+                with self.subTest(job=name, mutate=label):
                     broken = copy.deepcopy(self.config)
-                    rules = broken[key]["rules"]
-                    mr = next(r for r in rules if r.get("if") == MR_IF)
-                    if mutate == "auto":
-                        del mr["when"]
-                    elif mutate == "manual":
-                        mr.update(when="manual", allow_failure=False)
-                    elif mutate == "changes":
-                        mr["changes"] = ["**/*.go"]
-                    else:
-                        next(r for r in reversed(rules)
-                             if r is not mr and r.get("when") != "never")["when"] = "manual"
+                    broken[key]["rules"] = copy.deepcopy(broken[key]["rules"])
+                    mutate(broken[key]["rules"])
                     with self.assertRaises(AssertionError):
                         check_mutations_never_on_mr(broken)
+        # The shared anchor itself, and a second anchor coming back.
+        for label, mutate in {"anchor gains the tag": lambda c: c[".mutation-rules"]["rules"].append({"if": TAG_IF}),
+                              "schedule anchor back": lambda c: c.__setitem__(
+                                  ".mutation-schedule-rules", {"rules": [BATCH_NEVER, {"if": SCHEDULE_IF}, {"if": TAG_IF}]})
+                              }.items():
+            with self.subTest(label):
+                broken = copy.deepcopy(self.config)
+                mutate(broken)
+                with self.assertRaises(AssertionError):
+                    check_mutations_never_on_mr(broken)
 
     def test_image_publish_only_from_protected_default_branch(self):
         check_image_publish(self.config)
@@ -1735,8 +2514,8 @@ class CIConfig(unittest.TestCase):
             "a job running a check-*-mutations.sh script on MR": lambda c: c.__setitem__("anything", script_job),
             "a job named for mutations on MR": lambda c: c.__setitem__("run-mutations-now", named_job),
             "mutation job on MR": lambda c: c["sealer-mutations"].__setitem__("rules", [{"if": MR_IF}]),
-            "shared rules lose MR never": lambda c: c["execrun-mutations"].__setitem__(
-                "rules", [r for r in c["execrun-mutations"]["rules"] if r.get("if") != MR_IF]),
+            "shared rules gain a trailing on_success": lambda c: c["execrun-mutations"].__setitem__(
+                "rules", c["execrun-mutations"]["rules"] + [{"when": "on_success"}]),
             "full-ci forces mutations": lambda c: c["sealer-mutations"]["rules"].insert(
                 0, {"if": MR_IF + " && $KEEP_FULL_CI"}),
             "mutation script in a test job": lambda c: c["mesh-plugin"]["script"].append(
@@ -1781,23 +2560,16 @@ class CIConfig(unittest.TestCase):
         self.assertIn(ANCHORS_JOB, jobs)
         self.assertNotIn("keep-mutations", effective[ANCHORS_JOB].get("tags") or [])
         self.assertEqual(self.config[MR_BACKTEST]["rules"], [{"if": MR_IF, "when": "manual"}])
-        # The schedule and a release tag still carry every mutation job. The expected
-        # set is discovered, not listed: every job whose effective tags include
-        # keep-mutations, whose name ends with -mutations, or the netns run. Nothing
-        # is excluded: intake-browser-mutations has no schedule or tag exclusion
-        # (its rules only drop the batch, the scan-only push and merge requests), so
-        # it must be in both pipelines like the rest; a job that later gains such an
-        # exclusion must be named here with its reason, never skipped silently.
-        every = {name for name, job in self.config.items()
-                 if isinstance(job, dict) and not name.startswith(".") and name not in ("workflow", "default", "variables")
-                 and ("keep-mutations" in (effective_job(self.config, job).get("tags") or [])
-                      or name.endswith("-mutations") or name == "netns-mutation-run")}
+        # The schedule carries every mutation job, a release tag none (owner decision
+        # of 16.11.2026: one pass, at night). The expected set is discovered, not
+        # listed: every job whose effective tags include keep-mutations, whose name
+        # ends with -mutations, or the netns run; intake-browser-mutations included.
+        every = every_mutation_job(self.config)
         self.assertGreater(len(every), 40, every)
         self.assertIn(INTAKE_MUTATIONS, every)
         self.assertLessEqual({name + "-mutations" for name in MUTATIONS}, every)
         self.assertEqual(sorted(every - pipeline_jobs(self.config, MAIN | {"CI_PIPELINE_SOURCE": "schedule"})), [])
-        tag = {"CI_DEFAULT_BRANCH": "main", "CI_COMMIT_TAG": "v1.0.0", "CI_PIPELINE_SOURCE": "push"}
-        self.assertEqual(sorted(every - pipeline_jobs(self.config, tag)), [])
+        self.assertEqual(sorted(every & pipeline_jobs(self.config, TAG)), [])
 
     def test_the_manual_jobs_are_pinned(self):
         """Only the backtest may be manual; it is soft, MR-only and needed by nothing."""
@@ -1838,26 +2610,58 @@ class CIConfig(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     check_mutation_backtest(broken)
 
-    def test_release_waits_for_every_tag_mutation_job(self):
+    def test_release_calls_the_nightly_gate_and_runs_no_mutation_job(self):
         check_release(self.config)
-        _, mutation = tag_mutation_jobs(self.config)
-        # A `needs` list that leaves out any one mutation job lets it start early.
-        for name in sorted(mutation)[:5] + sorted(mutation)[-5:]:
-            with self.subTest(needs_without=name):
-                broken = copy.deepcopy(self.config)
-                broken[RELEASE_JOB]["needs"] = sorted(mutation - {name})
-                with self.assertRaises(AssertionError):
-                    check_release(broken)
+        jobs, mutation = tag_mutation_jobs(self.config)
+        self.assertEqual(sorted(mutation), [])
+        self.assertIn("build", jobs)
         new_job = {"stage": RELEASE_JOB, "dependencies": [], "script": ["./scripts/check-x-mutations.sh"],
                    "rules": [{"if": TAG_IF}]}
+        script = lambda c: c[RELEASE_JOB]["script"]
         cases = {
+            "gate call removed": lambda c: script(c).pop(0),
+            "gate replaced by a no-op": lambda c: script(c).__setitem__(0, ":"),
+            "gate made soft": lambda c: script(c).__setitem__(0, RELEASE_GATE + " || true"),
+            "gate after the publish": lambda c: script(c).reverse(),
+            "gate inside the publish block, softened": lambda c: (
+                script(c).pop(0), script(c).__setitem__(0, RELEASE_GATE + " || :\n" + script(c)[0])),
+            "gate on a shallow clone": lambda c: c[RELEASE_JOB]["variables"].pop("GIT_DEPTH"),
+            "no clone at all": lambda c: c[RELEASE_JOB]["variables"].__setitem__("GIT_STRATEGY", "none"),
+            "gate without git": lambda c: c[RELEASE_JOB].__setitem__("before_script", ["apk add --no-cache curl python3"]),
+            "gate file rewritten before it runs": lambda c: c[RELEASE_JOB]["before_script"].append(
+                "echo 'import sys; sys.exit(0)' > scripts/release-nightly-gate.py"),
+            "clone re-shallowed before the gate": lambda c: c[RELEASE_JOB]["before_script"].append(
+                "git fetch --depth 1 origin"),
+            "gate pointed at another commit": lambda c: c[RELEASE_JOB]["variables"].__setitem__(
+                "CI_COMMIT_SHA", "119c350f699112ecf7ba53d810cb9f122055fc90"),
+            "gate pointed at another branch": lambda c: c[RELEASE_JOB]["variables"].__setitem__(
+                "CI_DEFAULT_BRANCH", "old-green"),
+            "gate without the job token": lambda c: c[RELEASE_JOB]["variables"].__setitem__("CI_JOB_TOKEN", ""),
+            # A global variable outranks the predefined one and reaches release.
+            "gate pointed at another commit globally": lambda c: c.setdefault("variables", {}).__setitem__(
+                "CI_COMMIT_SHA", "119c350f699112ecf7ba53d810cb9f122055fc90"),
+            "gate pointed at another branch globally": lambda c: c.setdefault("variables", {}).__setitem__(
+                "CI_DEFAULT_BRANCH", {"value": "old-green", "description": "x"}),
+            "gate pointed at another project globally": lambda c: c.setdefault("variables", {}).__setitem__(
+                "CI_PROJECT_ID", "1"),
+            "gate without the job token globally": lambda c: c.setdefault("variables", {}).__setitem__(
+                "CI_JOB_TOKEN", ""),
+            "release variables through a template": lambda c: (
+                c.__setitem__(".old-sha", {"variables": {"CI_COMMIT_SHA": "119c350f699112ecf7ba53d810cb9f122055fc90"}}),
+                c[RELEASE_JOB].__setitem__("extends", ".old-sha")),
+            "mutation jobs back on the tag": lambda c: [
+                c[n].__setitem__("rules", c[n]["rules"] + [{"if": TAG_IF}])
+                for n in ("sealer-mutations", "carriers-mutations")],
+            "intake browser suites on the tag": lambda c: c[INTAKE_MUTATIONS].__setitem__(
+                "rules", [BATCH_NEVER, {"when": "on_success"}]),
+            # YAML aliases share one list: appending to the anchor reaches every job on it.
+            "the shared anchor gains the tag": lambda c: c[".mutation-rules"]["rules"].append({"if": TAG_IF}),
+            "a mutation script in a tag job": lambda c: c["build"]["script"].append("./scripts/check-sealer-mutations.sh"),
+            "a mutation script through a variable": lambda c: (
+                c["build"].setdefault("variables", {}).__setitem__("S", "./scripts/check-sealer-mutations.sh"),
+                c["build"]["script"].append('sh -c "$S"')),
             "empty needs": lambda c: c[RELEASE_JOB].__setitem__("needs", []),
             "mutation job beside release": lambda c: c.__setitem__("x-mutations", new_job),
-            "mutation job moved after release": lambda c: (c["stages"].append("late"),
-                                                           c["sealer-mutations"].__setitem__("stage", "late")),
-            "soft mutation job": lambda c: c["sealer-mutations"].__setitem__("allow_failure", True),
-            "soft shard job": lambda c: c["carriers-mutations"].__setitem__("allow_failure", {"exit_codes": [1]}),
-            "always mutation job": lambda c: c["mesh-plugin-mutations"].__setitem__("when", "always"),
             "soft test job on tag": lambda c: c["build"].__setitem__("allow_failure", True),
             "soft release": lambda c: c[RELEASE_JOB].__setitem__("allow_failure", True),
             "release always": lambda c: c[RELEASE_JOB].__setitem__("when", "always"),
@@ -1872,6 +2676,40 @@ class CIConfig(unittest.TestCase):
                 mutate(broken)
                 with self.assertRaises((AssertionError, KeyError)):
                     check_release(broken)
+
+    def test_release_description_is_changelog_section(self):
+        check_release_notes(self.config)
+        script = self.config[RELEASE_JOB]["script"]
+        cases = {
+            "fixed description": lambda j: j.__setitem__("script", [script[0], script[1].replace(
+                '"description=$notes"', '"description=Release $CI_COMMIT_TAG"')]),
+            "no checkout": lambda j: j.setdefault("variables", {}).__setitem__("GIT_STRATEGY", "none"),
+            "missing section ignored": lambda j: j.__setitem__("script", [script[0], script[1].replace(
+                "CHANGELOG.md)", "CHANGELOG.md || echo Release)")]),
+            "section from another file": lambda j: j.__setitem__("script", [script[0], script[1].replace(
+                "CHANGELOG.md)", "README.md)")]),
+            "extraction dropped": lambda j: j.__setitem__("script", [script[0], script[1].replace(
+                'notes=$(sh scripts/changelog-section.sh "$CI_COMMIT_TAG" CHANGELOG.md)',
+                'notes="Release $CI_COMMIT_TAG"')]),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                broken = copy.deepcopy(self.config)
+                mutate(broken[RELEASE_JOB])
+                self.assertNotEqual(broken[RELEASE_JOB], self.config[RELEASE_JOB])
+                with self.assertRaises(AssertionError):
+                    check_release_notes(broken)
+
+    def test_changelog_has_manifest_version(self):
+        check_changelog_has_manifest_version()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = (ROOT / "mesh-extension.json").read_text()
+            (root / "mesh-extension.json").write_text(
+                re.sub(r'"version": "[0-9.]+"', '"version": "99.0.0"', manifest, count=1))
+            shutil.copy(ROOT / "CHANGELOG.md", root / "CHANGELOG.md")
+            with self.assertRaises(AssertionError):
+                check_changelog_has_manifest_version(root)
 
     def test_mutation_jobs_run_on_dedicated_runner(self):
         check_mutation_runner(self.config)
@@ -2113,6 +2951,15 @@ class CIConfig(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check_mesh_plugin_mutations(broken)
 
+        # Without the DB service or DSN, the workspace approval test would
+        # skip while the plugin job remained green.
+        for field, value in [("services", []), ("variables", {})]:
+            with self.subTest(plugin_field=field):
+                broken = copy.deepcopy(self.config)
+                broken["mesh-plugin"][field] = value
+                with self.assertRaises(AssertionError):
+                    check_mesh_plugin_mutations(broken)
+
     def test_catalog_diagnostics_mandatory_gate_control(self):
         check_config(self.config, self.driver)
         broken = copy.deepcopy(self.config)
@@ -2133,11 +2980,16 @@ class CIConfig(unittest.TestCase):
             del rules[index]
         cases = [
             ("removed self-test", lambda c: c["ci-selftests"]["script"].pop()),
+            ("parallel removed", lambda c: c["ci-selftests"].pop("parallel")),
+            ("one node", lambda c: c["ci-selftests"].__setitem__("parallel", 1)),
+            ("needs removed", lambda c: c["ci-selftests"].pop("needs")),
+            ("waits for lint", lambda c: c["ci-selftests"].__setitem__("needs", [{"job": "fmt-vet"}])),
+            ("back in lint", lambda c: c["ci-selftests"].__setitem__("stage", "lint")),
             ("self-test back in fmt-vet", lambda c: c["fmt-vet"]["script"].append(SELFTESTS[0])),
             ("soft", lambda c: c["ci-selftests"].__setitem__("allow_failure", True)),
             ("manual", lambda c: c["ci-selftests"].__setitem__("when", "manual")),
             ("off main", lambda c: c["ci-selftests"]["rules"].__setitem__(-1, {"when": "never"})),
-            ("in scan-only push", lambda c: drop_rule(c["ci-selftests"]["rules"], 0)),
+            ("in the mutation batch", lambda c: drop_rule(c["ci-selftests"]["rules"], 0)),
             ("no forced run", lambda c: drop_rule(c["ci-selftests"]["rules"], 1)),
             ("needed", lambda c: c["build"].__setitem__("needs", [{"job": "ci-selftests"}])),
             ("dependency", lambda c: c["tenancy-mutations"]["dependencies"].append("ci-selftests")),
@@ -2167,6 +3019,24 @@ class CIConfig(unittest.TestCase):
             self.assertIn("internal/apperr/apperr.go", sources)
             self.assertTrue(uncovered(mr_changes(self.config["ci-selftests"]), sources))
 
+    def test_mutation_editor_runtime_and_missing_dependency_controls(self):
+        check_mutation_editor_runtime(self.config)
+        jobs = {name + "-mutations" for name in MUTATIONS}
+        for name in sorted(jobs | {"netns-mutation-run", INTAKE_MUTATIONS}):
+            with self.subTest(name):
+                broken = copy.deepcopy(self.config)
+                broken[name]["before_script"] = []
+                with self.assertRaisesRegex(AssertionError, re.escape(name)):
+                    check_mutation_editor_runtime(broken)
+        # An install line that does not run as written does not provision Python.
+        for line in ("exit 0; apk add --no-cache python3", ": && apk add --no-cache python3",
+                     "apk add --no-cache python3; exit 0", "# apk add --no-cache python3"):
+            with self.subTest(line):
+                broken = copy.deepcopy(self.config)
+                broken["sealer-mutations"]["before_script"] = [line]
+                with self.assertRaisesRegex(AssertionError, "sealer-mutations"):
+                    check_mutation_editor_runtime(broken)
+
     def test_mutant_anchors_on_mr_and_broken_controls(self):
         check_mutant_anchors(self.config)
         def set_rules(c, rules):
@@ -2179,7 +3049,11 @@ class CIConfig(unittest.TestCase):
             ("never on MR", lambda c: set_rules(c, [{"if": MR_IF, "when": "never"}] + FULL_PIPELINE_ONLY)),
             ("path filtered", lambda c: set_rules(c, [{"if": MR_IF, "changes": ["scripts/**/*"]}])),
             ("no MR run", lambda c: c[ANCHORS_JOB]["script"].pop()),
-            ("no selftest", lambda c: c[ANCHORS_JOB]["script"].pop(0)),
+            ("no helper selftest", lambda c: c[ANCHORS_JOB]["script"].pop(0)),
+            ("no anchor selftest", lambda c: c[ANCHORS_JOB]["script"].remove(
+                "timeout -k 10s 2m ./scripts/check-mutant-anchors-selftest.sh")),
+            ("helper in mutation job", lambda c: c["public-hygiene-mutations"]["script"].insert(
+                0, "./scripts/check-mutation-helpers.sh")),
             ("suite run directly", lambda c: c[ANCHORS_JOB]["script"].append(
                 "./scripts/check-lanepoller-mutations.sh")),
             ("mode switched off", lambda c: c[ANCHORS_JOB].setdefault("variables", {}).__setitem__(
@@ -2423,124 +3297,139 @@ class CIConfig(unittest.TestCase):
             self.assertNotEqual(run.returncode, 0)
             self.assertNotIn("arg:detect", run.stdout)
 
-    def test_branch_push_runs_one_full_pipeline_per_mr_sha(self):
+    def test_branch_push_creates_no_pipeline_and_broken_controls(self):
         check_branch_push_scope(self.config)
         self.assertFalse(rule_matches('$A == "x"', {"A": "y"}))
         with self.assertRaises(ValueError):
             rule_matches('$A || $B', {})
-        # The config before this check: the open-MR rule alone left a full
-        # push pipeline (lint, tests, child pipeline) racing the MR pipeline.
-        old = copy.deepcopy(self.config)
-        del old["workflow"]["rules"][5]
-        for job in old.values():
-            if isinstance(job, dict) and job.get("rules") == FULL_PIPELINE_ONLY:
-                del job["rules"]
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(old)
-        # The secret scan must stay in the branch push pipeline.
-        broken = copy.deepcopy(self.config)
-        broken["security-hygiene"]["rules"] = FULL_PIPELINE_ONLY
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        # Any heavy job without the scan-only rule leaks back into it.
-        for name in ("fmt-vet", "full-tests", "carriers-mutations", "build"):
-            with self.subTest(unscoped=name):
+        push_if = '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+        index = self.config["workflow"]["rules"].index({"if": push_if, "when": "never"})
+        def put(rule):
+            return lambda c: c["workflow"]["rules"].__setitem__(index, rule)
+        cases = [
+            # The rule this one replaced: a scan-only pipeline on every branch push.
+            ("scan-only push back", put({"if": push_if, "variables": {"KEEP_BRANCH_PUSH_SCAN_ONLY": "true"}})),
+            # The rule before that: it misses an MR opened right after the push.
+            ("open-MR rule only", put({"if": "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && "
+                                             '$CI_PIPELINE_SOURCE == "push"', "when": "never"})),
+            ("push rule dropped", lambda c: c["workflow"]["rules"].pop(index)),
+            ("branch rule ahead of it", lambda c: c["workflow"]["rules"].insert(index, {"if": "$CI_COMMIT_BRANCH"})),
+            # Main, web and api pipelines must keep full coverage.
+            ("main rule dropped", lambda c: c["workflow"]["rules"].pop(1)),
+            ("web/api rule dropped", lambda c: c["workflow"]["rules"].pop(index + 1)),
+            ("push rule widened", put({"if": "$CI_COMMIT_BRANCH", "when": "never"})),
+        ]
+        for label, mutate in cases:
+            with self.subTest(label):
                 broken = copy.deepcopy(self.config)
-                del broken[name]["rules"]
+                mutate(broken)
                 with self.assertRaises(AssertionError):
                     check_branch_push_scope(broken)
-        # Main, web and api pipelines must keep full coverage.
-        for index in (1, 6):
-            with self.subTest(removed_workflow_rule=index):
+        self.assertNotIn("KEEP_BRANCH_PUSH_SCAN_ONLY", (ROOT / ".gitlab-ci.yml").read_text())
+
+    def test_branch_secret_scan_in_schedule_and_broken_controls(self):
+        check_branch_secret_scan(self.config)
+        scanner = (ROOT / BRANCH_SCAN_SCRIPT).read_text()
+        selftest = (ROOT / BRANCH_SCAN_SELFTEST).read_text()
+        job = lambda c: c[BRANCH_SCAN_JOB]
+        config_cases = [
+            ("removed", lambda c: c.pop(BRANCH_SCAN_JOB)),
+            ("soft", lambda c: job(c).__setitem__("allow_failure", True)),
+            ("manual", lambda c: job(c).__setitem__("when", "manual")),
+            ("not in the schedule", lambda c: job(c).__setitem__("rules", [{"if": MR_IF}])),
+            ("never", lambda c: job(c).__setitem__("rules", [{"when": "never"}])),
+            ("on every pipeline", lambda c: job(c).pop("rules")),
+            ("no-op script", lambda c: job(c).__setitem__("script", [":"])),
+            ("shallow clone", lambda c: job(c)["variables"].pop("GIT_DEPTH")),
+            ("selftest dropped", lambda c: c["secret-scan-scope-selftest"]["script"].remove(BRANCH_SCAN_SELFTEST)),
+        ]
+        for label, mutate in config_cases:
+            with self.subTest(label):
                 broken = copy.deepcopy(self.config)
-                del broken["workflow"]["rules"][index]
+                mutate(broken)
                 with self.assertRaises(AssertionError):
-                    check_branch_push_scope(broken)
-        broken = copy.deepcopy(self.config)
-        broken["workflow"]["rules"][5]["if"] = "$CI_COMMIT_BRANCH"
+                    check_branch_secret_scan(broken)
+        text_cases = [
+            ("no fetch", 'git fetch --quiet --prune "$remote" "+refs/heads/*:refs/remotes/$remote/*"', ":"),
+            ("fetch commented out", "git fetch --quiet", "# git fetch --quiet"),
+            ("main scanned", '--log-opts="--remotes=$remote ^$base"', '--log-opts="--remotes=$remote"'),
+            ("exit code 0", "--exit-code 1", "--exit-code 0"),
+            ("not redacted", "--redact ", ""),
+            ("other config", "--config .gitleaks.toml", "--config /dev/null"),
+            ("soft exit", "--redact --exit-code 1 -v", "--redact --exit-code 1 -v || true"),
+        ]
+        for label, old, new in text_cases:
+            with self.subTest(label):
+                self.assertIn(old, scanner)
+                with self.assertRaises(AssertionError):
+                    check_branch_secret_scan(self.config, scanner=scanner.replace(old, new))
         with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
+            check_branch_secret_scan(self.config, selftest=selftest.replace(
+                "scanner=${1:-$root/scripts/scan-branch-secrets.sh}", "scanner=${1:-/bin/true}"))
 
     def test_main_push_runs_no_mutation_job(self):
-        """Red controls: any way of putting a mutation job back on the main push fails."""
+        """Red controls: any way of putting a mutation job back outside the nightly
+        schedule fails; the schedule losing one fails too."""
         check_mutations_never_on_mr(self.config)
         check_branch_push_scope(self.config)
-        selective = next(n for n in sorted(MUTATIONS)
-                         if not unconditional(self.config[n + "-mutations"]))
+        check_mutations_only_in_schedule(self.config)
         every_mutation = {name + "-mutations" for name in MUTATIONS}
-        # 1. the old rule is put back on a selective job
-        broken = copy.deepcopy(self.config)
-        broken[selective + "-mutations"]["rules"].insert(
-            1, {"if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"})
-        with self.assertRaises(AssertionError):
-            check_mutations_never_on_mr(broken)
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        # 2. the shared rule list loses its main-push exclusion
-        broken = copy.deepcopy(self.config)
-        for name in MUTATIONS:
-            job = broken[name + "-mutations"]
-            if unconditional(job):
-                job["rules"] = [r for r in job["rules"] if r.get("if") != MAIN_PUSH_IF]
-        with self.assertRaises(AssertionError):
-            check_mutations_never_on_mr(broken)
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        # 3. a selective job loses its schedule rule: the nightly would skip it
-        broken = copy.deepcopy(self.config)
-        rules = broken[selective + "-mutations"]["rules"]
-        rules.remove({"if": '$CI_PIPELINE_SOURCE == "schedule"'})
-        with self.assertRaises(AssertionError):
-            check_mutations_never_on_mr(broken)
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        # 4. a mutation suite is run from a job that is not named *-mutations
-        broken = copy.deepcopy(self.config)
-        broken["netns-tests"]["script"].append("timeout -k 10s 18m ./scripts/check-netns-mutations.sh")
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        # 5. the dedicated netns mutation job gets the main push back
-        broken = copy.deepcopy(self.config)
-        broken["netns-mutation-run"]["rules"].insert(1, {"if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"})
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        # 5b. the parent creates the netns mutation run on an MR again (by itself or manual)
-        for field, value in [("when", None), ("when", "on_success"), ("when", "manual")]:
-            broken = copy.deepcopy(self.config)
-            rule = next(r for r in broken["netns-mutation-run"]["rules"] if r.get("if") == MR_IF)
-            if value is None:
-                del rule[field]
-            else:
-                rule[field] = value
-            with self.assertRaises(AssertionError, msg=(field, value)):
-                check_netns_mutation_run_manual_on_mr(broken)
-        check_netns_mutation_run_manual_on_mr(self.config)
-        # 6. the netns mutation run is dropped from the schedule: the nightly would skip it
-        broken = copy.deepcopy(self.config)
-        broken["netns-mutation-run"]["rules"].remove({"if": '$CI_PIPELINE_SOURCE == "schedule"'})
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        # 7. a release tag loses the full set: a job drops its tag rule, a
-        # shared rule list sends tags to the selector path, or the workflow
-        # stops creating tag pipelines
-        broken = copy.deepcopy(self.config)
-        broken["netns-mutation-run"]["rules"].remove({"if": TAG_IF})
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
-        broken = copy.deepcopy(self.config)
-        broken["carriers-mutations"]["rules"].insert(0, {"if": TAG_IF, "when": "never"})
-        with self.assertRaises(AssertionError):
-            check_branch_push_scope(broken)
+        anchor = lambda c: c[".mutation-rules"]["rules"]
+        cases = {
+            # The intake browser suites back on the main push (as before 16.11.2026).
+            "intake browser suites on the main push": lambda c: c[INTAKE_MUTATIONS].__setitem__(
+                "rules", [BATCH_NEVER, {"if": MR_IF, "when": "never"}, {"when": "on_success"}]),
+            # The tag back in the one anchor: every mutation job on a release tag.
+            "the anchor gains $CI_COMMIT_TAG": lambda c: anchor(c).append({"if": TAG_IF}),
+            # The old trailing on_success: web, api and trigger pipelines run them.
+            "the anchor gains a trailing on_success": lambda c: anchor(c).append({"when": "on_success"}),
+            "the main push rule on one job": lambda c: c["sealer-mutations"].__setitem__(
+                "rules", [BATCH_NEVER, {"if": "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"}]),
+            "the netns run on the main push": lambda c: c["netns-mutation-run"].__setitem__(
+                "rules", c["netns-mutation-run"]["rules"] + [{"if": MAIN_PUSH_IF}]),
+            "a web pipeline on a branch": lambda c: c["carriers-mutations"].__setitem__(
+                "rules", c["carriers-mutations"]["rules"] + [{"if": '$CI_PIPELINE_SOURCE == "web"'}]),
+            "a mutation script in an ordinary job": lambda c: c["netns-tests"]["script"].append(
+                "timeout -k 10s 18m ./scripts/check-netns-mutations.sh"),
+            "a mutation script through a job variable": lambda c: (
+                c["build"].setdefault("variables", {}).__setitem__("S", "./scripts/check-sealer-mutations.sh"),
+                c["build"]["script"].append('sh -c "$S"')),
+            "a mutation script through a global variable": lambda c: (
+                c.setdefault("variables", {}).__setitem__("S", {"value": "./scripts/check-sealer-mutations.sh"}),
+                c["build"]["script"].append('sh -c "$S"')),
+            "an ordinary job on the mutation runner": lambda c: c["build"].__setitem__("tags", ["keep-mutations"]),
+            "a mutation job without rules": lambda c: c["sealer-mutations"].pop("rules"),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                broken = copy.deepcopy(self.config)
+                mutate(broken)
+                with self.assertRaises(AssertionError):
+                    check_mutations_only_in_schedule(broken)
+        # The schedule must keep every one: dropping it from one job, or from the anchor.
+        for label, mutate in {"one job off the schedule": lambda c: c["netns-mutation-run"].__setitem__(
+                                  "rules", [BATCH_NEVER, {"if": '$CI_PIPELINE_SOURCE == "web"'}]),
+                              "anchor off the schedule": lambda c: anchor(c).pop()}.items():
+            with self.subTest(label):
+                broken = copy.deepcopy(self.config)
+                mutate(broken)
+                with self.assertRaises(AssertionError):
+                    check_mutations_only_in_schedule(broken)
+                with self.assertRaises(AssertionError):
+                    check_branch_push_scope(broken)
+        # The release tag pipeline keeps its ordinary checks and `release`.
         broken = copy.deepcopy(self.config)
         broken["workflow"]["rules"] = [r for r in broken["workflow"]["rules"] if r.get("if") != TAG_IF]
         with self.assertRaises(AssertionError):
             check_branch_push_scope(broken)
         # positive control of the evaluator: the schedule still runs every one
         jobs = pipeline_jobs(self.config, MAIN | {"CI_PIPELINE_SOURCE": "schedule"})
-        self.assertTrue(mutation_runners(self.config, jobs) >= {"netns-mutation-run"}, jobs)
+        self.assertTrue(mutation_runners(self.config, jobs) >= {"netns-mutation-run", INTAKE_MUTATIONS}, jobs)
         self.assertTrue(every_mutation <= jobs, every_mutation - jobs)
-        jobs = pipeline_jobs(self.config, MAIN | {"CI_PIPELINE_SOURCE": "push"})
-        self.assertFalse(every_mutation & jobs, every_mutation & jobs)
+        for context in (MAIN | {"CI_PIPELINE_SOURCE": "push"}, TAG):
+            jobs = pipeline_jobs(self.config, context)
+            self.assertFalse(every_mutation & jobs, every_mutation & jobs)
+            self.assertFalse(mutation_runners(self.config, jobs), context)
 
     def test_mutation_batch_scope_and_broken_controls(self):
         check_mutation_batch(self.config)
@@ -2906,6 +3795,45 @@ class DocsSelector(unittest.TestCase):
                 self.assertIn("test", jobs)
                 self.assertIn("intake-browser", jobs)
 
+
+
+class ChangelogSection(unittest.TestCase):
+    """scripts/changelog-section.sh on its own: one exact section or a refusal
+    with nothing on stdout."""
+
+    def test_extracts_exactly_one_section(self):
+        for version in ("9.9.1", "v9.9.1"):
+            run = changelog_section(version, SAMPLE_CHANGELOG)
+            self.assertEqual((run.returncode, run.stdout), (0, SAMPLE_SECTION + "\n"), run.stderr)
+        run = changelog_section("9.9.0", SAMPLE_CHANGELOG)
+        self.assertEqual((run.returncode, run.stdout), (0, "- marker-old\n"))
+        crlf = changelog_section("9.9.1", SAMPLE_CHANGELOG.replace("\n", "\r\n"))
+        self.assertEqual((crlf.returncode, crlf.stdout), (0, SAMPLE_SECTION + "\n"))
+
+    def test_refusals(self):
+        cases = {
+            "absent": ("9.9.2", SAMPLE_CHANGELOG),
+            "prefix of another version": ("9.9", SAMPLE_CHANGELOG),
+            "dot is not a wildcard": ("9x9x1", SAMPLE_CHANGELOG.replace("[9.9.1]", "[9x9x1]")),
+            "regex metacharacter": ("9.9.*", SAMPLE_CHANGELOG),
+            "empty section": ("9.9.0", SAMPLE_CHANGELOG.replace("- marker-old", "")),
+            "duplicate section": ("9.9.0", SAMPLE_CHANGELOG + "\n## [9.9.0]\n\n- again\n"),
+            "heading without brackets": ("9.9.1", SAMPLE_CHANGELOG.replace("[9.9.1]", "9.9.1")),
+            "heading with a suffix": ("9.9.1", SAMPLE_CHANGELOG.replace("[9.9.1]", "[9.9.1]x")),
+            "heading with a spaced suffix": ("9.9.1", SAMPLE_CHANGELOG.replace("[9.9.1]", "[9.9.1] unexpected")),
+            "heading with a date suffix": ("9.9.1", SAMPLE_CHANGELOG.replace("[9.9.1]", "[9.9.1] - 2030-01-02")),
+            "heading with trailing space": ("9.9.1", SAMPLE_CHANGELOG.replace("[9.9.1]", "[9.9.1] ")),
+            "subheading only": ("9.9.1", SAMPLE_CHANGELOG.replace("## [9.9.1]", "### [9.9.1]")),
+            "empty version": ("", SAMPLE_CHANGELOG),
+        }
+        for label, (version, text) in cases.items():
+            with self.subTest(label):
+                run = changelog_section(version, text)
+                self.assertNotEqual(run.returncode, 0, run.stdout)
+                self.assertEqual(run.stdout, "")
+        missing = subprocess.run(["sh", str(CHANGELOG_SCRIPT), "9.9.1", "/nonexistent/CHANGELOG.md"],
+                                 capture_output=True, text=True)
+        self.assertEqual((missing.returncode, missing.stdout), (1, ""))
 
 
 class ImportBoundaryShardSetup(unittest.TestCase):

@@ -54,6 +54,18 @@ type HostPolicy struct {
 	// ExecBinDirs are the directories argv[0] may resolve into, after
 	// symlinks. Required once there is a template.
 	ExecBinDirs []string `json:"exec_bin_dirs,omitempty"`
+	// Discovery is the grant to scan local carriers for a discover job. Nil
+	// means discover jobs are refused (policy_denied).
+	Discovery *DiscoveryPolicy `json:"discovery,omitempty"`
+	// AdoptionTargets separately authorizes adoption of exact YAML destinations.
+	// A normal read/write target rule alone never grants adoption.
+	AdoptionTargets []AdoptionTarget `json:"adoption_targets,omitempty"`
+}
+
+// AdoptionTarget is an exact, read-only YAML destination, never a prefix/glob.
+type AdoptionTarget struct {
+	Path  string `json:"path"`
+	Field string `json:"field"`
 }
 
 // TargetRule allows one target kind under the listed directories and, for
@@ -223,6 +235,22 @@ func (p HostPolicy) Validate() error {
 	}
 	if err := p.validateExec(); err != nil {
 		return err
+	}
+	if len(p.AdoptionTargets) > 128 {
+		return errors.New("runnerproto: host policy: too many adoption targets")
+	}
+	seenAdoption := make(map[AdoptionTarget]bool, len(p.AdoptionTargets))
+	for _, a := range p.AdoptionTargets {
+		t := Target{Kind: TargetYAMLScalar, Path: a.Path, Field: a.Field, Mode: 0o600}
+		if t.Validate() != nil || seenAdoption[a] {
+			return errors.New("runnerproto: host policy: invalid adoption target")
+		}
+		seenAdoption[a] = true
+	}
+	if p.Discovery != nil {
+		if err := p.Discovery.validate(p.AgentUIDs, p.UIDShared); err != nil {
+			return err
+		}
 	}
 	for _, r := range p.Targets {
 		if !knownKind(r.Kind) {
@@ -547,13 +575,16 @@ func Check(j Job, p HostPolicy) error {
 	if err := j.Validate(); err != nil {
 		return err
 	}
-	if p.UIDShared && j.Secret.Scope == ProdScope && j.NeedsValue() {
+	if p.UIDShared && j.Secret.Scope == ProdScope && (j.NeedsValue() || j.Action == ActionAdopt) {
 		return denied("prod secrets are not deployed to a uid_shared host")
 	}
 	if j.Action == ActionDiscover {
 		// Deny by default: only a host policy with a discovery section may
-		// run it; until the policy grows that section no host does.
-		return denied("discovery is not enabled in the host policy")
+		// run it. Roots, rules and uids come from that section alone.
+		if p.Discovery == nil {
+			return denied("discovery is not enabled in the host policy")
+		}
+		return nil
 	}
 	if j.Action == ActionExec {
 		if !p.AllowExec {
@@ -579,12 +610,15 @@ func Check(j Job, p HostPolicy) error {
 	if !allowed {
 		return denied("target kind, path and field are not in the host policy")
 	}
+	if j.Action == ActionAdopt && !slices.Contains(p.AdoptionTargets, AdoptionTarget{Path: t.Path, Field: t.Field}) {
+		return denied("adoption of this exact destination is not in the host policy")
+	}
 	// An agent-owned target is refused for verify too: an agent that can
 	// write the file could use verify as an oracle for its guesses.
 	if contains(p.AgentUIDs, t.UID) {
 		return denied("target owner is an agent")
 	}
-	if j.Action == ActionVerify {
+	if j.Action == ActionVerify || j.Action == ActionAdopt {
 		return nil
 	}
 	// Deny by default: a job naming a consumer must have it in some

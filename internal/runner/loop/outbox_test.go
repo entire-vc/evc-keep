@@ -3,11 +3,16 @@
 package loop
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/entire-vc/evc-keep/internal/testutil/canary"
+	"github.com/entire-vc/evc-keep/pkg/fingerprint"
 	"github.com/entire-vc/evc-keep/pkg/runnerproto"
+	"github.com/entire-vc/evc-keep/pkg/secret"
 )
 
 func TestOutboxRefusesBadJobIDs(t *testing.T) {
@@ -122,4 +127,49 @@ func sprintfID(format, id string) string {
 		out += string(format[i])
 	}
 	return out
+}
+
+// A valid report at the contract's size ceiling must survive a restart:
+// what CloseDiscover stores, List reads. The worst case uses characters that
+// json.Marshal expands to six bytes (&, <), in the longest path and name.
+func TestOutboxStoresAndListsLargestValidDiscoverReport(t *testing.T) {
+	ob, _ := OpenOutbox(filepath.Join(t.TempDir(), "outbox"))
+	key, err := fingerprint.GenerateKey("store1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := fingerprint.Compute(key, secret.New([]byte(canary.New().Value(0))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := runnerproto.DiscoverResult{OK: true, Findings: make([]runnerproto.DiscoverFinding, 0, runnerproto.MaxDiscoverFindings)}
+	for i := 0; i < runnerproto.MaxDiscoverFindings; i++ {
+		p := fmt.Sprintf("/%04d/", i) + strings.Repeat("&", 1012) + "/.e"
+		r.Findings = append(r.Findings, runnerproto.DiscoverFinding{Path: p, Name: strings.Repeat("A", 128), Fingerprint: fp, Len: 1 << 20})
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatalf("worst-case report is not valid, test is void: %v", err)
+	}
+	id := newID(t)
+	if err := ob.CloseDiscover(id, r); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	got, err := ob.List()
+	if err != nil || len(got) != 1 || len(got[0].Discover.Findings) != runnerproto.MaxDiscoverFindings {
+		t.Fatalf("List after a valid large report: %d entries, err %v", len(got), err)
+	}
+}
+
+// A non-discover entry between the two caps is refused by List: the larger
+// cap belongs to discover entries only.
+func TestOutboxRefusesNonDiscoverEntryOverItsCap(t *testing.T) {
+	ob, _ := OpenOutbox(filepath.Join(t.TempDir(), "outbox"))
+	id := newID(t)
+	body := `{"job_id":"` + id + `","state":"closed","result":{"ok":false,"error_class":"internal"}}` + strings.Repeat(" ", maxEntrySize)
+	if err := os.WriteFile(filepath.Join(ob.dir, id+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ob.List(); err == nil {
+		t.Fatal("non-discover entry over 64 KiB read")
+	}
 }

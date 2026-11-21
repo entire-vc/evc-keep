@@ -24,6 +24,7 @@ import (
 	"github.com/entire-vc/evc-keep/internal/apperr"
 	"github.com/entire-vc/evc-keep/internal/audit"
 	"github.com/entire-vc/evc-keep/internal/builtin"
+	"github.com/entire-vc/evc-keep/internal/carriers"
 	"github.com/entire-vc/evc-keep/internal/config"
 	"github.com/entire-vc/evc-keep/internal/identity"
 	"github.com/entire-vc/evc-keep/internal/meshext"
@@ -85,6 +86,13 @@ func newMeshFixture(t *testing.T, withMesh bool) *meshFixture {
 
 func newMeshFixtureOn(t *testing.T, pool *pgxpool.Pool, withMesh bool, opts ...func(*api.MeshDeps)) *meshFixture {
 	t.Helper()
+	return newMeshFixtureInput(t, pool, withMesh, "", opts...)
+}
+
+// newMeshFixtureInput is newMeshFixtureOn with the input-link service wired
+// the way main does when KEEP_PUBLIC_URL is inputOrigin ("" leaves it off).
+func newMeshFixtureInput(t *testing.T, pool *pgxpool.Pool, withMesh bool, inputOrigin string, opts ...func(*api.MeshDeps)) *meshFixture {
+	t.Helper()
 	ctx := context.Background()
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -100,9 +108,17 @@ func newMeshFixtureOn(t *testing.T, pool *pgxpool.Pool, withMesh bool, opts ...f
 	if err != nil {
 		t.Fatalf("local backend: %v", err)
 	}
-	deps := api.Deps{Mesh: meshDeps(config.Config{MeshExtension: withMesh}, pool, local, outcomes, meshgate.New(meshgate.NewPG(pool), nil, nil, logger), journal, logger)}
+	deps := api.Deps{Mesh: meshDeps(config.Config{MeshExtension: withMesh}, pool, local, outcomes, meshgate.New(meshgate.NewPG(pool), nil, nil, logger), journal, logger),
+		Carriers: carriers.NewService(pool)}
 	if (deps.Mesh != nil) != withMesh {
 		t.Fatalf("meshDeps(MeshExtension=%v) = %v", withMesh, deps.Mesh)
+	}
+	if inputOrigin != "" {
+		input, err := newInputService(pool, local, inputOrigin, logger)
+		if err != nil || input == nil {
+			t.Fatalf("input service: %v", err)
+		}
+		deps.Input = input
 	}
 	for _, o := range opts {
 		o(deps.Mesh)

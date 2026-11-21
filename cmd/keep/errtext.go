@@ -96,6 +96,7 @@ var classMessages = map[string]string{
 	"metadata_not_approved":    "metadata not approved",
 	"deployment_not_confirmed": "deployment not confirmed",
 	"revoke_pending":           "revoke pending",
+	"provider_ref_in_use":      "provider reference already in use in this store",
 }
 
 // staticMessage returns the local text for a server error class; a class

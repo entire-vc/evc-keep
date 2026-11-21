@@ -22,24 +22,13 @@ pkg=./cmd/keep-server/app
 # require TEST (in package $pkg, ./cmd/keep-server/app unless set otherwise)
 # to fail with a real --- FAIL.
 mutate() {
+	mutation_take_occurrences
 	mutation_selected || return 0
 	name=$1 file=$2 from=$3 to=$4 test=$5
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! python3 - "$work/tree/$file" "$from" "$to" "${6:-}" "${7:-}" "${8:-}" <<'PY'
-import sys
-p, a, b, f2, a2, b2 = sys.argv[1:]
-s = open(p).read()
-if s.count(a) < 1:
-    sys.exit(1)
-open(p, 'w').write(s.replace(a, b, 1))
-if f2:
-    q = p.rsplit('/tree/', 1)[0] + '/tree/' + f2
-    t = open(q).read()
-    if t.count(a2) < 1:
-        sys.exit(1)
-    open(q, 'w').write(t.replace(a2, b2, 1))
-PY
+	if ! { mutation_edit "$work/tree/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/edited" &&
+		mv "$work/edited" "$work/tree/$file" &&
+		{ [ -z "${6:-}" ] || { mutation_edit "$work/tree/$6" "$7" "$8" "${mutation_occurrence2:-}" >"$work/edited" && mv "$work/edited" "$work/tree/$6"; }; }; }
 	then
 		echo "FAIL $name: mutation did not apply, the source changed, update this script"
 		fail=1
@@ -136,14 +125,14 @@ mutate snap-member-ignores-ts  $H 'status = CASE WHEN mesh_members.state_at < $5
 mutate snap-agent-ignores-ts   $H 'status = CASE WHEN mesh_agents.state_at <= $5 THEN' 'status = CASE WHEN true THEN' TestMeshStaleEventDoesNotReviveOrphanedEntities
 mutate snap-key-ignores-ts     $H 'status = CASE WHEN mesh_agent_keys.state_at < $6 OR (mesh_agent_keys.state_at = $6 AND mesh_agent_keys.status < $5)' 'status = CASE WHEN true OR (mesh_agent_keys.state_at = $6 AND mesh_agent_keys.status < $5)' $N
 mutate snap-project-overrides-newer $H 'p.IsArchived, at, true, true, true' 'p.IsArchived, at.Add(time.Hour), true, true, true' $N
-mutate project-slug-clock-off $H '$7 AND (mesh_projects.slug_at < $6 OR (mesh_projects.slug_at = $6 AND mesh_projects.slug < left($3,128)))' '$7' TestMeshSeededPartialProjectConverges
-mutate project-slug-tie-off $H '$7 AND (mesh_projects.slug_at < $6 OR (mesh_projects.slug_at = $6 AND mesh_projects.slug < left($3,128)))' '$7 AND (mesh_projects.slug_at < $6)' TestMeshSeededPartialProjectConverges
-mutate project-name-clock-off $H '$8 AND (mesh_projects.name_at < $6 OR (mesh_projects.name_at = $6 AND mesh_projects.name < left($4,256)))' '$8' TestMeshSeededPartialProjectConverges
-mutate project-name-tie-off $H '$8 AND (mesh_projects.name_at < $6 OR (mesh_projects.name_at = $6 AND mesh_projects.name < left($4,256)))' '$8 AND (mesh_projects.name_at < $6)' TestMeshSeededPartialProjectConverges
-mutate project-archived-clock-off $H '$9 AND (mesh_projects.archived_at < $6 OR (mesh_projects.archived_at = $6 AND mesh_projects.is_archived < $5::boolean))' '$9' TestMeshSeededPartialProjectConverges
-mutate project-archived-tie-off $H '$9 AND (mesh_projects.archived_at < $6 OR (mesh_projects.archived_at = $6 AND mesh_projects.is_archived < $5::boolean))' '$9 AND (mesh_projects.archived_at < $6)' TestMeshSeededPartialProjectConverges
+MUTATION_OCCURRENCE=1 mutate project-slug-clock-off $H '$7 AND (mesh_projects.slug_at < $6 OR (mesh_projects.slug_at = $6 AND mesh_projects.slug < left($3,128)))' '$7' TestMeshSeededPartialProjectConverges
+MUTATION_OCCURRENCE=1 mutate project-slug-tie-off $H '$7 AND (mesh_projects.slug_at < $6 OR (mesh_projects.slug_at = $6 AND mesh_projects.slug < left($3,128)))' '$7 AND (mesh_projects.slug_at < $6)' TestMeshSeededPartialProjectConverges
+MUTATION_OCCURRENCE=1 mutate project-name-clock-off $H '$8 AND (mesh_projects.name_at < $6 OR (mesh_projects.name_at = $6 AND mesh_projects.name < left($4,256)))' '$8' TestMeshSeededPartialProjectConverges
+MUTATION_OCCURRENCE=1 mutate project-name-tie-off $H '$8 AND (mesh_projects.name_at < $6 OR (mesh_projects.name_at = $6 AND mesh_projects.name < left($4,256)))' '$8 AND (mesh_projects.name_at < $6)' TestMeshSeededPartialProjectConverges
+MUTATION_OCCURRENCE=1 mutate project-archived-clock-off $H '$9 AND (mesh_projects.archived_at < $6 OR (mesh_projects.archived_at = $6 AND mesh_projects.is_archived < $5::boolean))' '$9' TestMeshSeededPartialProjectConverges
+MUTATION_OCCURRENCE=1 mutate project-archived-tie-off $H '$9 AND (mesh_projects.archived_at < $6 OR (mesh_projects.archived_at = $6 AND mesh_projects.is_archived < $5::boolean))' '$9 AND (mesh_projects.archived_at < $6)' TestMeshSeededPartialProjectConverges
 mutate project-stale-revives $H "WHEN mesh_projects.state_at <= \$6 THEN 'active'" "WHEN true THEN 'active'" TestMeshStaleEventDoesNotReviveOrphanedProject
-mutate project-fields-ignore-flag $H 'CASE WHEN $7 AND (mesh_projects.slug_at' 'CASE WHEN true AND (mesh_projects.slug_at' TestMeshSeededPartialProjectConverges
+MUTATION_OCCURRENCE=1 mutate project-fields-ignore-flag $H 'CASE WHEN $7 AND (mesh_projects.slug_at' 'CASE WHEN true AND (mesh_projects.slug_at' TestMeshSeededPartialProjectConverges
 mutate agent-event-order-off   $H 'status = CASE WHEN mesh_agents.state_at <= $5 THEN' 'status = CASE WHEN true THEN' TestMeshStaleEventDoesNotReviveOrphanedEntities
 mutate partial-not-dirty       $H '	if !applied {
 		return markDirty(ctx, tx, ws)
@@ -186,9 +175,9 @@ mutate http-dial-unguarded $V '	allowed := loopbackDialAddress
 ' TestMeshReconcileOrphansWhatMeshNoLongerReports
 # Optional fields of member, agent and key events order on their own clocks, not on the row's status clock.
 T=TestMeshPartialMemberAgentKeyConverges
-mutate role-shares-status-clock    $H 'CASE WHEN $6 AND (mesh_members.role_at < $5 OR' 'CASE WHEN $6 AND (mesh_members.state_at < $5 OR' $T
-mutate sponsor-shares-status-clock $H 'CASE WHEN $7 AND (mesh_agents.sponsor_at < $5 OR' 'CASE WHEN $7 AND (mesh_agents.state_at < $5 OR' $T
-mutate label-shares-status-clock   $H 'CASE WHEN $7 AND (mesh_agent_keys.label_at < $6 OR' 'CASE WHEN $7 AND (mesh_agent_keys.state_at < $6 OR' $T
+MUTATION_OCCURRENCE=1 mutate role-shares-status-clock    $H 'CASE WHEN $6 AND (mesh_members.role_at < $5 OR' 'CASE WHEN $6 AND (mesh_members.state_at < $5 OR' $T
+MUTATION_OCCURRENCE=1 mutate sponsor-shares-status-clock $H 'CASE WHEN $7 AND (mesh_agents.sponsor_at < $5 OR' 'CASE WHEN $7 AND (mesh_agents.state_at < $5 OR' $T
+MUTATION_OCCURRENCE=1 mutate label-shares-status-clock   $H 'CASE WHEN $7 AND (mesh_agent_keys.label_at < $6 OR' 'CASE WHEN $7 AND (mesh_agent_keys.state_at < $6 OR' $T
 mutate absent-role-is-a-fact       $H 'ev.At, d.Role != "")' 'ev.At, true)' $T
 mutate absent-label-is-a-fact      $H 'ev.At, d.Label != "")' 'ev.At, true)' $T
 # X-Mesh-Event and X-Mesh-Delivery are not signed. The id of a flat hierarchy

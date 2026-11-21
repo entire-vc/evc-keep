@@ -1,5 +1,5 @@
 {
-  "schema": 1, "id": "keep", "name": "Keep", "version": "0.6.5",
+  "schema": 1, "id": "keep", "name": "Keep", "version": "0.7.0",
   "kind": "plugin", "runtime": "external", "mesh_api": ">=1 <2",
   "publisher": "entire-vc",
   "description": "Store and distribute secrets to people and agents; values never enter model context.",
@@ -14,7 +14,7 @@
       "approvals_via_mesh": { "type": "boolean", "title": "Approvals through Mesh cards", "default": true } } }
   },
   "capabilities": {
-    "api": ["workspaces:read", "projects:read", "members:read", "agents:read", "agent_keys:read", "tasks:write", "comments:write", "secrets:write"],
+    "api": ["workspaces:read", "projects:read", "members:read", "agents:read", "agent_keys:read", "tasks:write"],
     "events": ["workspace.member.added", "workspace.member.removed", "project.created", "project.updated", "agent.key.issued", "agent.key.revoked", "task.gate.decided"],
     "network": { "allowed_domains": ["{settings.keep_url}"], "reasoning": "calls to the Keep API" },
     "ui": ["sidebar.item", "workspace.settings"],

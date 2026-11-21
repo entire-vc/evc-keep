@@ -529,8 +529,7 @@ class CIDefinitions(unittest.TestCase):
             "variables": replace_in_job(CI_TEXT, "variables", 'GOFLAGS: "-buildvcs=false"', 'GOFLAGS: "-buildvcs=true"'),
             "default": replace_in_job(CI_TEXT, "default", "interruptible: true", "interruptible: false"),
             "template": replace_in_job(CI_TEXT, ".go-module-cache", "policy: pull", "policy: pull-push"),
-            "rules anchor": replace_in_job(CI_TEXT, ".mutation-rules", "    - when: on_success", "    - when: manual"),
-            "schedule anchor": replace_in_job(CI_TEXT, ".mutation-schedule-rules", '"schedule"', '"web"'),
+            "rules anchor": replace_in_job(CI_TEXT, ".mutation-rules", '"schedule"', '"web"'),
             "runner anchor": replace_in_job(CI_TEXT, ".mutation-runner", "[keep-mutations]", "[docker]"),
             "unparsable": CI_TEXT + "\n  broken: [\n",
         }

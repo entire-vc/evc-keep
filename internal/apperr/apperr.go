@@ -94,6 +94,12 @@ const (
 	// new version everywhere but the old key still alive: the revoke is
 	// pending and is retried with the same run id.
 	ClassRevokePending Class = "revoke_pending"
+	// ClassProviderRefInUse is returned when a create is refused because
+	// another secret in the same store, active or disabled, already uses the
+	// provider reference: two catalog rows with one locator in one store would share
+	// one value across scopes. The answer never names the reference or the
+	// secret that holds it.
+	ClassProviderRefInUse Class = "provider_ref_in_use"
 )
 
 // Classes is the closed set of every Class this package defines. A client
@@ -104,7 +110,7 @@ func Classes() []Class {
 		ClassInternal, ClassInvalidArgument, ClassNotReady, ClassUnauthenticated,
 		ClassNotFound, ClassSecretNotFound, ClassOverrideLocked, ClassNoStoreBound,
 		ClassAmbiguousContext, ClassAlreadyExists, ClassPermissionDenied, ClassRateLimited, ClassPayloadTooLarge,
-		ClassMetadataNotApproved, ClassDeploymentNotConfirmed, ClassRevokePending,
+		ClassMetadataNotApproved, ClassDeploymentNotConfirmed, ClassRevokePending, ClassProviderRefInUse,
 	}
 }
 

@@ -136,6 +136,10 @@ func (p *rotationParts) deps(ctx context.Context, ref rotation.Ref, prov *builti
 // and verification jobs can name it.
 type rotationVersions struct{ *rotationParts }
 
+// The engine finds a rollback by asking its Versions for this interface; a
+// wrapper that loses it silently turns every failed run back into a forward-only one.
+var _ rotation.Rollbacker = rotationVersions{}
+
 // ForwardOnly: a generated value leaves the old one valid until it is revoked.
 func (rotationVersions) ForwardOnly() bool { return false }
 
@@ -179,6 +183,41 @@ func (v rotationVersions) Adopt(ctx context.Context, ref rotation.Ref, runID uui
 		return nil, rotation.ErrPrepare
 	}
 	return rotation.NewProviderVersions(d).Adopt(ctx, ref, runID, ver)
+}
+
+// CanRollback is rotation.Rollbacker: whether the run issued a key of its own
+// that can be ended again.
+func (v rotationVersions) CanRollback(ctx context.Context, ref rotation.Ref, runID uuid.UUID) (bool, error) {
+	prov, t, err := v.target(ctx, ref)
+	if err != nil {
+		return false, rotation.ErrRevoke
+	}
+	d, err := v.deps(ctx, ref, prov, t)
+	if err != nil {
+		return false, rotation.ErrRevoke
+	}
+	return rotation.NewProviderVersions(d).CanRollback(ctx, ref, runID)
+}
+
+// RollbackNew ends the key the run issued and disables the new version, in the
+// provider and then in the catalog, so the old version is the current one again.
+func (v rotationVersions) RollbackNew(ctx context.Context, ref rotation.Ref, runID uuid.UUID) error {
+	prov, t, err := v.target(ctx, ref)
+	if err != nil {
+		return rotation.ErrRevoke
+	}
+	d, err := v.deps(ctx, ref, prov, t)
+	if err != nil {
+		return rotation.ErrRevoke
+	}
+	if err := rotation.NewProviderVersions(d).RollbackNew(ctx, ref, runID); err != nil {
+		return err
+	}
+	if _, err := v.pool.Exec(ctx, `UPDATE secret_versions SET disabled=true WHERE org_id=$1 AND secret_id=$2
+ AND provider_version=(SELECT new_version FROM rotation_runs WHERE id=$3 AND org_id=$1 AND secret_id=$2)`, ref.OrgID, ref.SecretID, runID); err != nil {
+		return rotation.ErrRevoke
+	}
+	return nil
 }
 
 // Supersede disables a version that was sealed but never laid out, in the

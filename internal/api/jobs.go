@@ -17,7 +17,7 @@ import (
 type RunnerJobs interface {
 	Poll(context.Context, mtls.Principal) (runnerproto.SignedJob, bool, error)
 	Material(context.Context, mtls.Principal, string) (runnerproto.ValueEnvelope, error)
-	Result(context.Context, mtls.Principal, string, runnerproto.Result) error
+	ResultBody(context.Context, mtls.Principal, string, []byte) error
 }
 
 func jobPeer(w http.ResponseWriter, r *http.Request, jobs RunnerJobs) (mtls.Principal, bool) {
@@ -98,17 +98,14 @@ func handleJobResult(jobs RunnerJobs) http.Handler {
 		if !ok {
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+		// The body's shape and real size limit depend on the job's action, which
+		// only the server knows; it refuses any body too big for its job.
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, dispatch.MaxDiscoverBody))
 		if err != nil {
 			invalidJobBody(w, r)
 			return
 		}
-		result, err := runnerproto.DecodeResult(body)
-		if err != nil {
-			invalidJobBody(w, r)
-			return
-		}
-		if err := jobs.Result(r.Context(), p, r.PathValue("job_id"), result); err != nil {
+		if err := jobs.ResultBody(r.Context(), p, r.PathValue("job_id"), body); err != nil {
 			writeJobError(w, r, err)
 			return
 		}
@@ -120,6 +117,10 @@ func invalidJobBody(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusBadRequest, apperr.ClassInvalidArgument, "invalid runner job request", reqid.FromContext(r.Context()))
 }
 func writeJobError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, dispatch.ErrInvalidBody) {
+		invalidJobBody(w, r)
+		return
+	}
 	if errors.Is(err, dispatch.ErrNotFound) {
 		writeError(w, http.StatusNotFound, apperr.ClassNotFound, "job unavailable", reqid.FromContext(r.Context()))
 		return

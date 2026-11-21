@@ -29,13 +29,13 @@ func countOpens(t *testing.T) *int {
 
 func (f *verifyFixture) agentCarriers(t *testing.T) []meshkey.Carrier {
 	t.Helper()
-	reg := fmt.Sprintf(`{"agents":[{"name":"Sage","agent_key":%q,"mesh_agent_key":%q},{"name":"Other","agent_key":%q,"mesh_agent_key":%q}]}`,
+	reg := fmt.Sprintf(`{"agents":[{"name":"Alpha","agent_key":%q,"mesh_agent_key":%q},{"name":"Other","agent_key":%q,"mesh_agent_key":%q}]}`,
 		f.target, f.target, f.others[0], f.others[1])
 	f.write(t, "mesh-agents.json", reg)
 	f.write(t, "fiddler.json", reg)
 	f.write(t, ".mcp.json", fmt.Sprintf(`{"mcpServers":{"evc-mesh":{"env":{"MESH_AGENT_KEY":%q}}}}`, f.target))
-	f.write(t, "sage.env", fmt.Sprintf("OTHER=%s\nMESH_AGENT_KEY=%s\n", f.others[0], f.target))
-	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Sage", LaneDir: f.dir, BinDir: f.dir, CfgDir: f.dir, EnvDir: f.dir, EnvFile: "sage.env"})
+	f.write(t, "agent.env", fmt.Sprintf("OTHER=%s\nMESH_AGENT_KEY=%s\n", f.others[0], f.target))
+	cs, err := meshkey.For(meshkey.Agent{Host: "h", Name: "Alpha", LaneDir: f.dir, BinDir: f.dir, CfgDir: f.dir, EnvDir: f.dir, EnvFile: "agent.env"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestVerifyCarrierAcceptsOnlyManifestCarriers(t *testing.T) {
 	// A readable file with a canary, reachable by absolute path, that is no
 	// carrier of the manifest.
 	foreign := f.write(t, "notes.txt", "K="+f.target+"\n")
-	foreignJSON := f.write(t, "other.json", fmt.Sprintf(`{"agents":[{"name":"Sage","agent_key":%q}]}`, f.target))
+	foreignJSON := f.write(t, "other.json", fmt.Sprintf(`{"agents":[{"name":"Alpha","agent_key":%q}]}`, f.target))
 	mk := func(k meshkey.Kind, format, p, field string) meshkey.Carrier {
 		kind := runnerproto.TargetMCPConfig
 		if format == meshkey.FormatEnv {
@@ -79,10 +79,10 @@ func TestVerifyCarrierAcceptsOnlyManifestCarriers(t *testing.T) {
 	}
 	bad := map[string]meshkey.Carrier{
 		"foreign env file":           mk(meshkey.AgentEnv, meshkey.FormatEnv, foreign, "K"),
-		"foreign json file":          mk(meshkey.MeshAgents, meshkey.FormatJSON, foreignJSON, "agents[name=Sage].agent_key"),
+		"foreign json file":          mk(meshkey.MeshAgents, meshkey.FormatJSON, foreignJSON, "agents[name=Alpha].agent_key"),
 		"etc passwd":                 mk(meshkey.AgentEnv, meshkey.FormatEnv, "/etc/passwd", "root"),
 		"field outside the manifest": mk(meshkey.MCPJSON, meshkey.FormatJSON, cs[0].Path, "mcpServers.evc-mesh.env.OTHER"),
-		"wrong field for the file":   mk(meshkey.MeshAgents, meshkey.FormatJSON, cs[1].Path, "agents[name=Sage].mesh_agent_key"),
+		"wrong field for the file":   mk(meshkey.MeshAgents, meshkey.FormatJSON, cs[1].Path, "agents[name=Alpha].mesh_agent_key"),
 		"unknown kind":               mk(meshkey.Kind("shadow"), meshkey.FormatJSON, cs[0].Path, cs[0].Field),
 		"format mismatch":            mk(meshkey.MCPJSON, meshkey.FormatEnv, cs[0].Path, cs[0].Field),
 		"traversal in path":          mk(meshkey.MCPJSON, meshkey.FormatJSON, f.dir+"/x/../.mcp.json", cs[0].Field),

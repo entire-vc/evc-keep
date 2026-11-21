@@ -98,6 +98,18 @@ for f in "$steps"/*.mode; do
 	esac
 done
 
+# A scanner assertion can contain a value in its file name, URL or error.
+# Name only declared tests and a closed list of classes; never copy a log line.
+scan_diagnostics() {
+	local log=$1 diagnostic
+	"$root/scripts/test-result-names.sh" "$root" <"$log" || echo "FAIL diagnostics: test-result-names.sh exited $?"
+	for diagnostic in 'value canary found in' 'db.pw found in' 'root.key found in' 'admin.token found in' 'QS_CLI_TOKEN_FILE does not hold'; do
+		if grep -Fq -- "$diagnostic" "$log"; then
+			printf '%s\n' "$diagnostic"
+		fi
+	done
+}
+
 leak_scan() { # leak_scan partial|full: 0 if clean (partial: no positive controls)
 	QS_PARTIAL=$([ "$1" = partial ] && echo 1 || echo 0) QS_CANARY_FILE="$secrets/canary" QS_TARGET="$qs/target/demo.key" QS_SCAN="$out:$qs$([ -d "$HOME/.config/keep" ] && printf %s ":$HOME/.config/keep")" \
 		QS_DB_PW_FILE="$qs/db.pw" QS_ROOT_KEY_FILE="$qs/root.key" QS_ADMIN_TOKEN_FILE="$qs/admin.token" QS_SERVER_ENV="$qs/keep-server.env" QS_CLI_TOKEN_FILE="$qs/config/keep/token" \
@@ -114,7 +126,7 @@ raw_scan() {
 		QS_RAW_PATHS="/orgs/$org/secrets?scope_level=org&scope_id=$org /orgs/$org/secrets/$sid /orgs/$org/secrets/$sid/versions /v1/deployments/$(jq -r .request_id "$out/deploy.out") /v1/input-links/$(jq -r .request_id "$qs/link.json")" \
 		go test -tags quickstart -count=1 -v -run 'TestRawAnswersNoLeak' ./test/quickstart >"$work/go-raw.log" 2>&1 \
 		&& grep -q -- '--- PASS: TestRawAnswersNoLeak' "$work/go-raw.log" \
-		|| { grep -E '^\s*(---|FAIL|ok|leak_test)' "$work/go-raw.log" || true; fail "a raw API answer carries the value, or could not be fetched (no value is printed)"; }
+		|| { scan_diagnostics "$work/go-raw.log"; fail "a raw API answer carries the value, or could not be fetched (no value is printed)"; }
 }
 
 # ---- run -----------------------------------------------------------------------
@@ -132,6 +144,10 @@ for f in "$steps"/*.sh; do
 	if ! bash -euo pipefail "$f" >"$out/$id.out" 2>"$out/$id.err"; then
 		# A failing step may carry a leak in its error: search before anything is printed.
 		leak_scan partial || fail "step $id exited non-zero and a leak search found the value; nothing is printed"
+		# A zero exit with the leak test renamed, unmatched by -run or skipped
+		# searched nothing: the outputs below are printed only after a search.
+		grep -q -- '--- PASS: TestQuickstartNoLeak' "$work/go-test.log" && ! grep -q -- '--- SKIP' "$work/go-test.log" \
+			|| fail "the leak search after the failed step $id did not run (TestQuickstartNoLeak did not pass, or a test was skipped); nothing is printed"
 		echo "--- stdout"; cat "$out/$id.out"; echo "--- stderr"; cat "$out/$id.err"
 		for l in server runner; do [ -f "$qs/$l.log" ] && { echo "--- $l.log"; tail -20 "$qs/$l.log"; }; done
 		fail "step $id exited non-zero"
@@ -172,8 +188,8 @@ done
 
 log=$work/go-test.log
 if ! leak_scan full; then
-	grep -E '^\s*(---|FAIL|ok|leak_test)' "$log" || true
-	fail "the leak search failed (file names above; no value is printed)"
+	scan_diagnostics "$log"
+	fail "the leak search failed (test names and leak classes above; no value is printed)"
 fi
 grep -q -- '--- SKIP' "$log" && fail "a leak test was skipped; SKIP is not PASS"
 grep -q -- '--- PASS: TestQuickstartNoLeak' "$log" || fail "TestQuickstartNoLeak did not run"

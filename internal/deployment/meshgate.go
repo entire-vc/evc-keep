@@ -35,6 +35,8 @@ func (g GateApprovals) Get(ctx context.Context, org, id uuid.UUID) (meshgate.App
 		kind = "rotate"
 	case a.Exec != nil:
 		kind = "exec"
+	case a.Adopt:
+		kind = "adopt"
 	}
 	return meshgate.Approval{ID: a.ID, Status: a.Status, BindingHash: a.BindingHash, RequesterID: a.Requester.ID,
 		ExpiresAt: a.ExpiresAt, SecretName: a.SecretName, Class: a.SecretClass, Kind: kind, RequestID: a.RequestID, Scope: a.Scope}, nil
@@ -77,7 +79,7 @@ func gateErr(err error) error {
 // Confirmation is a new approval, as it is about to be shown to a person.
 type Confirmation struct {
 	OrgID, ApprovalID uuid.UUID
-	Kind              string // deploy, exec or rotate
+	Kind              string // deploy, exec, rotate or adopt
 	SecretName        string
 	SecretClass       string
 	RequestID         string

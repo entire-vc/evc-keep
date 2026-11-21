@@ -21,6 +21,9 @@ apply_only=os.environ.get('MUTATION_APPLY_ONLY')=='1'
 LOW_ORDER_BEFORE='if !x25519.Shared(&ss, &sKey, &pKey) {\n\t\t\treturn ErrInvalidKEMSharedSecret\n\t\t}'
 WIPE_BEFORE='return pt, nil'
 root=pathlib.Path.cwd()
+import sys
+sys.path.insert(0, str(root / 'scripts/lib'))
+from mutation_edit import named_edit as mutation_edit
 files=subprocess.check_output(['git','ls-files','-co','--exclude-standard','-z']).decode().split('\0')
 mutations=[
  ('open-error','internal/builtin/intake.go','if openErr != nil {','if openErr != nil && false {','TestIntakeAcceptBoundCiphertext','ciphertext accepted for another request'),
@@ -59,9 +62,8 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-mutants-') as d:
   dest=tree/name;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(src,dest)
  for name,file,before,after,test,marker in mutations:
   dest=tree/file;source=(root/file).read_text()
-  if source.count(before)!=1:raise SystemExit('FAIL '+name+': mutation target is not unique')
-  changed=source.replace(before,after,1)
-  if name=='post-decrypt-error': changed=changed.replace('"errors"','"errors"\n\t"fmt"',1)
+  changed=mutation_edit(name, source, before, after, src=file)
+  if name=='post-decrypt-error': changed=mutation_edit(name, changed, '"errors"', '"errors"\n\t"fmt"')
   dest.write_text(changed)
   try:
    if apply_only:
@@ -83,7 +85,6 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-mutants-') as d:
   if not module.is_dir():
    raise SystemExit('FAIL low-order, wipe: circl '+version+' is not in the module cache; run go mod download')
   for name,rel,before in anchors:
-   if (module/rel).read_text().count(before)!=1:raise SystemExit('FAIL '+name+': dependency mutation target is not unique')
    print('ok   '+name+': applies',flush=True)
   if (root/'internal/builtin/intake.go').read_text().count('defer clear(plain)')!=1:raise SystemExit('FAIL plaintext-wipe: caller target is not unique')
   print('ok   plaintext-wipe: applies',flush=True)
@@ -95,9 +96,8 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-mutants-') as d:
  target=dependency/'hpke/xkem.go'
  source=target.read_text()
  before=LOW_ORDER_BEFORE
- if source.count(before)!=1:raise SystemExit('FAIL low-order: dependency mutation target is not unique')
  target.chmod(0o644)
- target.write_text(source.replace(before,'_ = x25519.Shared(&ss, &sKey, &pKey)',1))
+ target.write_text(mutation_edit('low-order', source, before, '_ = x25519.Shared(&ss, &sKey, &pKey)'))
  subprocess.run(['go','mod','edit','-replace=github.com/cloudflare/circl='+str(dependency)],cwd=tree,env=env,check=True)
  result=subprocess.run(['go','test','-timeout','60s','-count=1','-run','^TestIntakeRejectsLowOrderDH$','./internal/builtin'],cwd=tree,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
  out=result.stdout.decode(errors='replace')
@@ -111,9 +111,8 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-mutants-') as d:
  aead=dependency/'hpke/aead.go'
  aead_source=aead.read_text()
  before=WIPE_BEFORE
- if aead_source.count(before)!=1:raise SystemExit('FAIL wipe: Open probe target is not unique')
  aead.chmod(0o644)
- aead.write_text(aead_source.replace(before,'IntakePlaintextProbe = pt\n\treturn pt, nil',1))
+ aead.write_text(mutation_edit('wipe', aead_source, before, 'IntakePlaintextProbe = pt\n\treturn pt, nil'))
  (dependency/'hpke').chmod(0o755)
  (dependency/'hpke/intake_plaintext_probe.go').write_text('package hpke\nvar IntakePlaintextProbe []byte\n')
  shutil.copyfile(root/'scripts/testdata/intake-wipe-probe.go.txt',tree/'internal/builtin/intake_wipe_probe_test.go')
@@ -125,7 +124,7 @@ with tempfile.TemporaryDirectory(prefix='keep-intake-mutants-') as d:
  caller=tree/'internal/builtin/intake.go'
  caller_source=caller.read_text()
  if caller_source.count('defer clear(plain)')!=1:raise SystemExit('FAIL wipe: caller target is not unique')
- caller.write_text(caller_source.replace('defer clear(plain)','// plaintext wipe removed',1))
+ caller.write_text(mutation_edit('plaintext-wipe', caller_source, 'defer clear(plain)', '// plaintext wipe removed'))
  result=subprocess.run(cmd,cwd=tree,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
  out=result.stdout.decode(errors='replace')
  if result.returncode==0 or '--- FAIL: TestIntakePlaintextWipe' not in out or 'intake plaintext wipe missing' not in out:

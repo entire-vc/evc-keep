@@ -22,15 +22,12 @@ temp_workspace
 src=pkg/execpolicy/execpolicy.go
 
 fail=0
-# mutate NAME FROM TO: replace the first literal occurrence of FROM with TO.
+# mutate NAME FROM TO: replace the only or explicitly named literal occurrence of FROM with TO.
 mutate() {
+	mutation_take_occurrences
 	name=$1 from=$2 to=$3
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -39,17 +36,18 @@ mutate() {
 	run_mutant "$name"
 }
 
-# mutate_sed NAME SED-EXPR: apply a sed edit to every line of the source.
-mutate_sed() {
-	name=$1 expr=$2
-	rm -rf "$work/tree"
+# mutate_many NAME FROM TO N...: edit these occurrences, from last to first.
+mutate_many() {
+	name=$1 from=$2 to=$3
+	shift 3
 	mutation_snapshot "$work/tree"
-	sed -e "$expr" "$root/$src" >"$work/tree/$src"
-	if cmp -s "$root/$src" "$work/tree/$src"; then
-		echo "FAIL $name: mutation did not apply — the source changed, update this script"
-		fail=1
-		return
-	fi
+	for occurrence in "$@"; do
+		if ! mutation_edit "$work/tree/$src" "$from" "$to" "$occurrence" >"$work/edited"; then
+			fail=1
+			return
+		fi
+		mv "$work/edited" "$work/tree/$src"
+	done
 	mutation_applied "$name" && return
 	run_mutant "$name"
 }
@@ -107,12 +105,12 @@ mutate refuse-everything  'func Validate(t Template) (Decision, error) {' 'func 
 mutate fold-identity      'func foldHostish(s string) string {' 'func foldHostish(s string) string { if true { return s }'
 mutate no-invisible-ban   'if strings.IndexFunc(a,' 'if false && strings.IndexFunc(a,'
 mutate invisible-quotes-arg 'return Decision{}, fmt.Errorf("%w: argv[%d]", ErrInvisibleChar, i+1)' 'return Decision{}, fmt.Errorf("%w: argv[%d] %q", ErrInvisibleChar, i+1, a)'
-mutate ascii-user-host    '@[\\p{L}\\p{M}\\p{N}.-]+\\.[\\p{L}\\p{M}]{2,}(:.*)?$' '@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}(:.*)?$'
-mutate ascii-host-port    '^([\\p{L}\\p{M}\\p{N}.-]+\\.[\\p{L}\\p{M}]{2,}|' '^([A-Za-z0-9.-]+\\.[A-Za-z]{2,}|'
-mutate ascii-user-wide    '@[\\p{L}\\p{M}\\p{N}][\\p{L}\\p{M}\\p{N}.-]*(:.*)?$' '@[A-Za-z0-9][A-Za-z0-9.-]*(:.*)?$'
-mutate ascii-host-wide    '^\\[?[\\p{L}\\p{M}\\p{N}.:-]*[\\p{L}\\p{M}\\p{N}]\\]?:\\d{1,5}$' '^\\[?[A-Za-z0-9.:-]*[A-Za-z0-9]\\]?:\\d{1,5}$'
-mutate ascii-host-like    '^([\\p{L}\\p{M}\\p{N}-]+\\.)+[\\p{L}\\p{M}\\p{N}-]+$' '^([A-Za-z0-9-]+\\.)+[A-Za-z0-9-]+$'
-mutate_sed no-mark-class  's/\\p{M}//g'
+mutate ascii-user-host    '@[\p{L}\p{M}\p{N}.-]+\.[\p{L}\p{M}]{2,}(:.*)?$' '@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(:.*)?$'
+mutate ascii-host-port    '^([\p{L}\p{M}\p{N}.-]+\.[\p{L}\p{M}]{2,}|' '^([A-Za-z0-9.-]+\.[A-Za-z]{2,}|'
+mutate ascii-user-wide    '@[\p{L}\p{M}\p{N}][\p{L}\p{M}\p{N}.-]*(:.*)?$' '@[A-Za-z0-9][A-Za-z0-9.-]*(:.*)?$'
+mutate ascii-host-wide    '^\[?[\p{L}\p{M}\p{N}.:-]*[\p{L}\p{M}\p{N}]\]?:\d{1,5}$' '^\[?[A-Za-z0-9.:-]*[A-Za-z0-9]\]?:\d{1,5}$'
+mutate ascii-host-like    '^([\p{L}\p{M}\p{N}-]+\.)+[\p{L}\p{M}\p{N}-]+$' '^([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+$'
+mutate_many no-mark-class  '\p{M}' '' 13 12 11 10 9 8 7 6 5 4 3 2 1
 mutate no-fold-expand     'return hostLikeRe.MatchString(v) || hostLikeRe.MatchString(foldHostish(v))' 'return hostLikeRe.MatchString(v)'
 mutate no-fold-scan       'if f := foldHostish(a); f != a {' 'if f := foldHostish(a); false && f != a {'
 
@@ -123,11 +121,11 @@ mutate no-cf-fold         'if unicode.Is(unicode.Cf, r) ||' 'if false ||'
 # returned hosts must each go red.
 mutate no-root-dot-fold   'return rootDotRe.ReplaceAllString(s, "$1$2")' 'return s'
 mutate no-root-dot-trim   'if t := strings.TrimSuffix(h, "."); t != "" {' 'if t := strings.TrimSuffix(h, "."); false && t != "" {'
-mutate ascii-tld-user     '\\.[\\p{L}\\p{M}]{2,}(:.*)?$' '\\.[A-Za-z]{2,}(:.*)?$'
-mutate ascii-tld-hostport '\\.[\\p{L}\\p{M}]{2,}|' '\\.[A-Za-z]{2,}|'
-mutate ascii-tld-bare     ')+[\\p{L}\\p{M}]{2,}$' ')+[A-Za-z]{2,}$'
-mutate_sed no-tld-mark    's/\\p{M}]{2,}/]{2,}/g'
-mutate no-mark-bare-label '^([\\p{L}\\p{M}\\p{N}-]+\\.)+[\\p{L}\\p{M}]{2,}$' '^([\\p{L}\\p{N}-]+\\.)+[\\p{L}\\p{M}]{2,}$'
+mutate ascii-tld-user     '\.[\p{L}\p{M}]{2,}(:.*)?$' '\.[A-Za-z]{2,}(:.*)?$'
+mutate ascii-tld-hostport '\.[\p{L}\p{M}]{2,}|' '\.[A-Za-z]{2,}|'
+mutate ascii-tld-bare     ')+[\p{L}\p{M}]{2,}$' ')+[A-Za-z]{2,}$'
+mutate_many no-tld-mark    '\p{M}]{2,}' ']{2,}' 3 2 1
+mutate no-mark-bare-label '^([\p{L}\p{M}\p{N}-]+\.)+[\p{L}\p{M}]{2,}$' '^([\p{L}\p{N}-]+\.)+[\p{L}\p{M}]{2,}$'
 
 mutation_apply_only && exit "$fail"
 

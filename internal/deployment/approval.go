@@ -48,6 +48,7 @@ type Approval struct {
 	Requester   audit.Actor
 	RequestID   string
 	SecretID    uuid.UUID
+	VersionID   uuid.UUID
 	SecretName  string
 	SecretClass string
 	Scope       tenancy.Scope
@@ -61,6 +62,9 @@ type Approval struct {
 	// Rotate marks the approval of a two-phase rotation of SecretID: no
 	// runner, no target. RequestID is the id of the run it will start.
 	Rotate bool
+	// Adopt marks a read-only attestation of an existing carrier. It never
+	// authorizes a deployment, restart or rotation.
+	Adopt bool
 }
 
 // ApprovalExec is what an approver sees of an exec request besides the
@@ -75,7 +79,7 @@ type ApprovalExec struct {
 
 const approvalColumns = `a.id,a.status,a.requested_at,a.expires_at,a.decided_at,a.decided_by,a.decision_reason,a.binding_hash,
 	a.requester_type,a.requester_id,a.requester_sponsor_id,a.requester_via,
-	d.request_id,d.secret_id,s.name,s.class,d.secret_scope_level,d.secret_scope_id,d.runner_id,d.target,d.exec,
+	d.request_id,d.secret_id,d.version_id,s.name,s.class,d.secret_scope_level,d.secret_scope_id,d.runner_id,d.target,d.exec,d.adoption,
 	a.expires_at < clock_timestamp()`
 
 const approvalFrom = ` FROM approval_requests a
@@ -91,7 +95,7 @@ func scanApproval(row pgx.Row) (Approval, error) {
 	var expired bool
 	err := row.Scan(&a.ID, &a.Status, &a.RequestedAt, &a.ExpiresAt, &decidedAt, &decidedBy, &a.Reason, &hash,
 		&rtype, &a.Requester.ID, &a.Requester.SponsorID, &rvia,
-		&a.RequestID, &a.SecretID, &a.SecretName, &a.SecretClass, &level, &a.Scope.ID, &a.RunnerID, &target, &execRaw, &expired)
+		&a.RequestID, &a.SecretID, &a.VersionID, &a.SecretName, &a.SecretClass, &level, &a.Scope.ID, &a.RunnerID, &target, &execRaw, &a.Adopt, &expired)
 	if err != nil {
 		return Approval{}, err
 	}
@@ -226,13 +230,13 @@ func (r *Repo) Decide(ctx context.Context, in DecideInput) (DecideResult, error)
 		requestID, level                      string
 		scopeID                               uuid.UUID
 		stored, targetJSON, execJSON          []byte
-		expired                               bool
+		expired, isAdopt                      bool
 	)
 	err = tx.QueryRow(ctx, `SELECT a.deployment_request_id,a.status,a.binding_hash,a.requester_type,a.requester_id,a.requester_sponsor_id,a.requester_via,
-	 a.expires_at < clock_timestamp(),d.request_id,d.secret_id,d.version_id,d.runner_id,d.secret_scope_level,d.secret_scope_id,d.target,d.exec
+	 a.expires_at < clock_timestamp(),d.request_id,d.secret_id,d.version_id,d.runner_id,d.secret_scope_level,d.secret_scope_id,d.target,d.exec,d.adoption
 	 FROM approval_requests a JOIN deployment_requests d ON d.org_id=a.org_id AND d.id=a.deployment_request_id
 	 WHERE a.org_id=$1 AND a.id=$2 FOR UPDATE OF a`, in.OrgID, in.ApprovalID).Scan(&reqRow, &status, &stored, &rtype, &rid, &rsponsor, &rvia, &expired,
-		&requestID, &secretID, &versionID, &runnerID, &level, &scopeID, &targetJSON, &execJSON)
+		&requestID, &secretID, &versionID, &runnerID, &level, &scopeID, &targetJSON, &execJSON, &isAdopt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DecideResult{}, ErrNotFound
 	}
@@ -258,6 +262,13 @@ func (r *Repo) Decide(ctx context.Context, in DecideInput) (DecideResult, error)
 	}
 	scope := tenancy.Scope{Level: tenancy.Level(level), ID: scopeID}
 	recomputed := bindHash("keep/deploy/request/v1", in.OrgID.String(), secretID.String(), versionID.String(), runnerID.String(), scope.String(), string(canonical), rtype, rid, rsponsor, rvia)
+	if isAdopt {
+		if execJSON != nil || !validAdoptionTarget(target) {
+			return DecideResult{}, ErrBindingMismatch
+		}
+		recomputed = adoptionBinding(AdoptRequest{OrgID: in.OrgID, Scope: scope, SecretID: secretID, RunnerID: runnerID, Target: target,
+			Actor: audit.Actor{Type: audit.ActorType(rtype), ID: rid, SponsorID: rsponsor, Via: audit.ActorVia(rvia)}}, versionID)
+	}
 	var snap execSnapshot
 	isExec := execJSON != nil
 	if isExec {
@@ -275,12 +286,19 @@ func (r *Repo) Decide(ctx context.Context, in DecideInput) (DecideResult, error)
 	if in.Approve {
 		res.Status = "approved"
 		req := Request{OrgID: in.OrgID, Scope: scope, SecretID: secretID, VersionID: versionID, RunnerID: runnerID, RequestID: requestID, Target: target}
-		secret, lerr := loadSecret(ctx, tx, req)
-		if lerr != nil {
-			return DecideResult{}, ErrRefused
-		}
 		host, terr := r.trust(ctx, tx, in.OrgID, runnerID)
 		if terr != nil {
+			return DecideResult{}, ErrRefused
+		}
+		if isAdopt {
+			// Approval cannot revive an attestation of a superseded version.
+			current, cerr := currentVersionID(ctx, tx, in.OrgID, secretID)
+			if cerr != nil || current != versionID {
+				return DecideResult{}, ErrRefused
+			}
+		}
+		secret, lerr := loadSecret(ctx, tx, req)
+		if lerr != nil {
 			return DecideResult{}, ErrRefused
 		}
 		host.ID = runnerID.String()
@@ -294,6 +312,10 @@ func (r *Repo) Decide(ctx context.Context, in DecideInput) (DecideResult, error)
 			lt, terr := loadExecTemplate(ctx, tx, in.OrgID, snap.TemplateID)
 			if terr != nil || lt.digest != snap.Digest || secret.provider != runnerproto.ProviderBuiltin ||
 				(secret.class == "prod" && (!host.AttributesKnown || host.UIDShared)) {
+				return DecideResult{}, ErrRefused
+			}
+		} else if isAdopt {
+			if _, perr := EvaluateAdoption(Policy{}, host, secretID, secret.class, target); perr != nil || secret.provider != runnerproto.ProviderBuiltin {
 				return DecideResult{}, ErrRefused
 			}
 		} else if _, perr := Evaluate(Policy{}, host, secretID, secret.class, target, true); perr != nil || secret.provider != runnerproto.ProviderBuiltin {
@@ -312,6 +334,8 @@ func (r *Repo) Decide(ctx context.Context, in DecideInput) (DecideResult, error)
 		}
 		if isExec {
 			res.JobID, err = insertExecJob(ctx, tx, in.OrgID, runnerID, reqRow, requestID, secretID, versionID, secret, execJob(snap))
+		} else if isAdopt {
+			res.JobID, err = storeJob(ctx, tx, in.OrgID, runnerID, reqRow, requestID, secretID, versionID, secret, runnerproto.ActionAdopt, target, nil)
 		} else {
 			res.JobID, err = insertJob(ctx, tx, in.OrgID, runnerID, reqRow, requestID, secretID, versionID, secret, target)
 		}
@@ -335,6 +359,9 @@ func (r *Repo) Decide(ctx context.Context, in DecideInput) (DecideResult, error)
 		Result:   audit.Result{Status: audit.StatusOK}}
 	if isExec {
 		rec.Target.Kind = "exec"
+	}
+	if isAdopt {
+		rec.Target.Kind = "adopt"
 	}
 	if !in.Approve {
 		rec.Policy.Decision = audit.DecisionDeny

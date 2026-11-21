@@ -126,16 +126,45 @@ func TestDatabaseListErrorPathsAreSanitized(t *testing.T) {
 			case "scan":
 				query = `ALTER TABLE carriers ALTER COLUMN last_verified_at TYPE TEXT USING 'not-a-time'`
 			case "rows":
+				// SELECT * keeps every column List reads, so the statement
+				// prepares and the error is raised while rows are produced.
 				query = `ALTER TABLE carriers RENAME TO carrier_data;
-CREATE FUNCTION carrier_read_error(text) RETURNS text LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic read error'; END $$;
-CREATE VIEW carriers AS SELECT id,org_id,secret_id,version,host,target_kind,target_path,target_field,consumer,carrier_read_error(healthcheck_ref) AS healthcheck_ref,last_fp,state,created_at,updated_at,last_verified_at FROM carrier_data`
+CREATE FUNCTION carrier_read_error(uuid) RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic read error'; END $$;
+CREATE VIEW carriers AS SELECT * FROM carrier_data WHERE carrier_read_error(id)`
 			}
 			_, err := f.pool.Exec(ctx, query)
 			must(t, err)
+			if stage != "lookup" {
+				if got := listFailureStage(t, f); got != stage {
+					t.Fatalf("the %s breakage fails List at the %s stage", stage, got)
+				}
+			}
 			_, err = f.repo.List(ctx, f.org, f.id)
 			internalError(t, err)
 		})
 	}
+}
+
+// listFailureStage reads the carriers of the fixture secret the way List
+// does and names the step that fails: a breakage meant for one error path
+// must not be caught by an earlier one (a schema change once moved the
+// "rows" breakage to the query step, and its mutant survived).
+func listFailureStage(t *testing.T, f fixture) string {
+	t.Helper()
+	rows, err := f.pool.Query(ctx, `SELECT `+columns+` FROM carriers WHERE org_id=$1 AND secret_id=$2`, f.org, f.id)
+	if err != nil {
+		return "query"
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if _, err := scanCarrier(rows); err != nil {
+			return "scan"
+		}
+	}
+	if rows.Err() != nil {
+		return "rows"
+	}
+	return "none"
 }
 
 func TestDatabaseMarkLookupErrorsAreSanitized(t *testing.T) {

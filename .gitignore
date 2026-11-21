@@ -3,6 +3,10 @@
 *.test
 *.out
 
+# Output of the rotation-testbed CI job (TESTBED_OUT); untracked, it would
+# mark every receipt's working tree dirty.
+/testbed-out/
+
 # Go
 /.gocache/
 /.gomodcache/
@@ -13,6 +17,11 @@ CLAUDE.md
 CLAUDE-*.md
 .claude/
 dev-docs/
+
+# Rotation testbed in CI: out directories and the pinned Mesh checkout live in
+# the build directory; the receipt's working_tree_dirty must not count them.
+/testbed-mesh-out/
+/.testbed-mesh-src/
 
 # Local tool logs
 /logs/

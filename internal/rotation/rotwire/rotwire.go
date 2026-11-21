@@ -134,6 +134,9 @@ func (d *Deployer) carrier(ctx context.Context, ref rotation.Ref, id string) (ca
 // carrier's destination: it carries the mode and owner the consumer needs,
 // which the carrier row does not keep.
 func (d *Deployer) lastTarget(ctx context.Context, c carriers.Carrier) (runnerproto.Target, error) {
+	if !c.TargetKind.SupportsAction(runnerproto.ActionDeploy) {
+		return runnerproto.Target{}, ErrRefused
+	}
 	want, err := json.Marshal(struct {
 		Kind     runnerproto.TargetKind
 		Path     string
@@ -146,7 +149,7 @@ func (d *Deployer) lastTarget(ctx context.Context, c carriers.Carrier) (runnerpr
 	var raw []byte
 	err = d.Pool.QueryRow(ctx, `SELECT dr.target FROM deployment_jobs j
 		JOIN deployment_requests dr ON dr.org_id=j.org_id AND dr.id=j.deployment_request_id
-		WHERE j.org_id=$1 AND j.secret_id=$2 AND j.runner_id=$3 AND j.status='completed' AND dr.target @> $4::jsonb
+		WHERE j.org_id=$1 AND j.secret_id=$2 AND j.runner_id=$3 AND j.action='deploy' AND j.status='completed' AND dr.target @> $4::jsonb
 		ORDER BY j.created_at DESC, j.id DESC LIMIT 1`, c.OrgID, c.SecretID, c.RunnerID, want).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) || err != nil {
 		return runnerproto.Target{}, ErrRefused
@@ -156,6 +159,33 @@ func (d *Deployer) lastTarget(ctx context.Context, c carriers.Carrier) (runnerpr
 		return runnerproto.Target{}, ErrRefused
 	}
 	return t, nil
+}
+
+// deployRequestID is the idempotency key of the layout of one carrier. The
+// layout of the old version during a rollback is a request of its own: the
+// layout's id would hand back the finished layout of the new version.
+func deployRequestID(ctx context.Context, runID uuid.UUID, carrier string) string {
+	if rotation.IsRollback(ctx) {
+		return uuid.NewSHA1(runID, []byte("rollback-deploy/"+carrier)).String()
+	}
+	return uuid.NewSHA1(runID, []byte("deploy/"+carrier)).String()
+}
+
+// verifyRequestID is the key of the run's one verification and the version it
+// is pinned to. A rollback reads the carriers against the version they were put
+// back on, not against the newest one (still enabled while the key is ended).
+func verifyRequestID(ctx context.Context, runID uuid.UUID, version string) (id, pin string) {
+	if rotation.IsRollback(ctx) {
+		return uuid.NewSHA1(runID, []byte("rollback-verify")).String(), version
+	}
+	return uuid.NewSHA1(runID, []byte("verify")).String(), ""
+}
+
+// deployRequest is the layout request of one carrier. Only the layout that puts
+// the old version back is marked as a rollback.
+func deployRequest(ctx context.Context, ref rotation.Ref, f secretFacts, car carriers.Carrier, reqID string, target runnerproto.Target) deployment.Request {
+	return deployment.Request{OrgID: ref.OrgID, Scope: f.scope, SecretID: ref.SecretID, VersionID: f.versionID,
+		RunnerID: car.RunnerID, RequestID: reqID, Target: target, Actor: systemActor, Rollback: rotation.IsRollback(ctx)}
 }
 
 // Deploy queues the layout of version on the carrier and waits for the
@@ -173,9 +203,8 @@ func (d *Deployer) Deploy(ctx context.Context, ref rotation.Ref, runID uuid.UUID
 	if err != nil {
 		return err
 	}
-	reqID := uuid.NewSHA1(runID, []byte("deploy/"+c.ID)).String()
-	out, err := d.Deployments.Submit(ctx, deployment.Request{OrgID: ref.OrgID, Scope: f.scope, SecretID: ref.SecretID, VersionID: f.versionID,
-		RunnerID: car.RunnerID, RequestID: reqID, Target: target, Actor: systemActor})
+	reqID := deployRequestID(ctx, runID, c.ID)
+	out, err := d.Deployments.Submit(ctx, deployRequest(ctx, ref, f, car, reqID, target))
 	if err != nil || out.Status != deployment.Queued {
 		return ErrRefused
 	}
@@ -213,8 +242,8 @@ func (d *Deployer) Verify(ctx context.Context, ref rotation.Ref, c rotation.Carr
 	if err != nil {
 		return rotation.Report{}, ErrRefused
 	}
-	reqID := uuid.NewSHA1(runID, []byte("verify")).String()
-	if _, err := d.Deployments.SubmitVerify(ctx, deployment.VerifyRequest{OrgID: ref.OrgID, Scope: f.scope, SecretID: ref.SecretID, RequestID: reqID, Actor: systemActor}); err != nil {
+	reqID, pin := verifyRequestID(ctx, runID, version)
+	if _, err := d.Deployments.SubmitVerify(ctx, deployment.VerifyRequest{OrgID: ref.OrgID, Scope: f.scope, SecretID: ref.SecretID, RequestID: reqID, Actor: systemActor, ProviderVersion: pin}); err != nil {
 		return rotation.Report{}, ErrRefused
 	}
 	var line deployment.VerifyItem

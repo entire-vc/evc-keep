@@ -56,6 +56,17 @@ func VerifyKeyInfo(j Job) []byte {
 	return e.b.Bytes()
 }
 
+// AdoptKeyInfo binds the read-only adoption key to the complete signed job,
+// including its exact target, nonce and expiry. Other key envelopes never open
+// under this domain.
+func AdoptKeyInfo(j Job) []byte {
+	var e encoder
+	e.b.WriteString("keep/fingerprint-key/adopt/v1\x00")
+	e.b.Write(Info(j))
+	e.b.Write(encodeJob(j))
+	return e.b.Bytes()
+}
+
 // DiscoverKeyInfo is the HPKE info string of the fingerprint key a discover
 // job receives: its own domain, never VerifyKeyInfo's, so a verify envelope
 // does not open as a discover key and the other way round. It binds the job,

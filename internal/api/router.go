@@ -61,9 +61,13 @@ func routeTable(ir *identity.Repo, logger *slog.Logger, pool *pgxpool.Pool, inpu
 	cr := &carrierRoutes{sec: sec, svc: carriersSvc}
 	cv := &carrierVerifyRoutes{sec: sec}
 	cv.svc, _ = dep.(CarrierVerifyService)
+	cd := &carrierDiscoverRoutes{ir: ir}
+	cd.svc, _ = dep.(CarrierDiscoverService)
 	ro := &rotateRoutes{sec: sec, svc: rot, input: input, publicURL: publicURL}
 	rs := &restartRoutes{q: restarts}
 	dr := &deploymentRoutes{sec: sec, svc: dep, aud: aud, publicURL: publicURL, notifier: notifier, logger: logger}
+	ca := &carrierAdoptRoutes{sec: sec, dr: dr}
+	ca.svc, _ = dep.(CarrierAdoptionService)
 
 	return []routeEntry{
 		{Method: "POST", Pattern: "/v1/input-links", Auth: true, Handler: in.issue},
@@ -86,10 +90,14 @@ func routeTable(ir *identity.Repo, logger *slog.Logger, pool *pgxpool.Pool, inpu
 		{Method: "GET", Pattern: "/orgs/{org_id}/secrets/{secret_id}/versions", Auth: true, Handler: sec.handleListVersions},
 		{Method: "POST", Pattern: "/orgs/{org_id}/secrets/{secret_id}/carriers", Auth: true, Handler: cr.register},
 		{Method: "GET", Pattern: "/orgs/{org_id}/secrets/{secret_id}/carriers", Auth: true, Handler: cr.list},
+		{Method: "POST", Pattern: "/orgs/{org_id}/secrets/{secret_id}/carriers/adopt", Auth: true, Handler: ca.submit},
+		{Method: "GET", Pattern: "/orgs/{org_id}/secrets/{secret_id}/carriers/adopt/{request_id}", Auth: true, Handler: ca.status},
 		{Method: "POST", Pattern: "/orgs/{org_id}/secrets/{secret_id}/rotate", Auth: true, Handler: ro.start},
 		{Method: "GET", Pattern: "/orgs/{org_id}/secrets/{secret_id}/rotate/{request_id}", Auth: true, Handler: ro.status},
 		{Method: "POST", Pattern: "/orgs/{org_id}/secrets/{secret_id}/carriers/verify", Auth: true, Handler: cv.submitOrg},
 		{Method: "GET", Pattern: "/orgs/{org_id}/secrets/{secret_id}/carriers/verify/{request_id}", Auth: true, Handler: cv.statusOrg},
+		{Method: "POST", Pattern: "/orgs/{org_id}/carriers/discover", Auth: true, Handler: cd.submit},
+		{Method: "GET", Pattern: "/orgs/{org_id}/carriers/discover/{request_id}", Auth: true, Handler: cd.status},
 		{Method: "POST", Pattern: "/orgs/{org_id}/tokens", Auth: true, Handler: tok.handleIssueToken},
 		{Method: "POST", Pattern: "/orgs/{org_id}/tokens/{token_id}/revoke", Auth: true, Handler: tok.handleRevokeToken},
 		{Method: "GET", Pattern: "/orgs/{org_id}/audit/verify", Auth: true, Handler: avr.handleVerify},
@@ -250,7 +258,10 @@ func NewRouter(logger *slog.Logger, pool *pgxpool.Pool, deps Deps) http.Handler 
 		if deps.Mesh.Federation != nil {
 			// No bearer: the Mesh-signed context token is the authentication.
 			mux.Handle("POST /mesh/session", logged("/mesh/session", logger, requireTLS(http.HandlerFunc(mr.handleSession)).ServeHTTP))
-			registerMeshUI(mux, logger, mr, catalog.New(pool))
+			// Both screens read the runs through the same closed vocabulary.
+			runs := meshUIClosedRuns(deps.Mesh.Rotations)
+			u := registerMeshUI(mux, logger, mr, catalog.New(pool), meshUIDeps{Carriers: meshUICarriersOf(deps.Carriers), Rotations: runs, Input: deps.Input})
+			registerMeshUIRotations(mux, logger, u, meshUIRotationDeps{Runs: deps.Mesh.Rotations, Reports: deps.Rotations, Carriers: deps.Carriers})
 		}
 	}
 

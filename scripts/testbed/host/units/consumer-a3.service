@@ -1,0 +1,13 @@
+[Unit]
+Description=Stand consumer consumer-a3
+[Service]
+User=svc
+Type=notify
+NotifyAccess=main
+Restart=no
+# systemd decrypts the credential with this host's key before the service
+# starts; a file that does not decrypt under this name keeps it from starting.
+LoadCredentialEncrypted=api_token:/srv/app/a3/api_token.cred
+# Stand-only: the carrier as this start reads it, kept for the leak scan's needles.
+ExecStartPre=+/usr/local/sbin/testbed-seen.sh a3 /srv/app/a3/api_token.cred
+ExecStart=/usr/local/bin/consumer -name a3 -source credential -key api_token -listen 127.0.0.1:19103

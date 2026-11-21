@@ -43,15 +43,15 @@ func agentStub(t *testing.T, agent string, calls *atomic.Int32) *httptest.Server
 			id := uuid.NewString()
 			keys[id] = true
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]string{"key_id": id, "key": "agk_fake-key-for-tests"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"key_id": id, "api_key": "agk_fake-key-for-tests"})
 		case http.MethodGet:
-			out := []map[string]string{}
+			out := []map[string]any{{"id": "primary", "primary": true, "revoked_at": "2026-01-01T00:00:00Z"}}
 			for id, on := range keys {
-				st := "revoked"
-				if on {
-					st = "active"
+				var revoked any // Mesh's list has no status: a revoked key carries revoked_at
+				if !on {
+					revoked = "2026-01-01T00:00:00Z"
 				}
-				out = append(out, map[string]string{"key_id": id, "status": st})
+				out = append(out, map[string]any{"id": id, "primary": false, "revoked_at": revoked})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"keys": out})
 		case http.MethodDelete:
@@ -96,8 +96,8 @@ func TestRotators_BadBindingsRefuseTheStart(t *testing.T) {
 	tok := writeToken(t, 0o600, rotToken)
 	good, other := uuid.NewString(), uuid.NewString()
 	for name, m := range map[string]map[string]string{
-		"secret not a uuid":  {"Sage": good},
-		"agent not a uuid":   {good: "Sage"},
+		"secret not a uuid":  {"Alpha": good},
+		"agent not a uuid":   {good: "Alpha"},
 		"uppercase agent id": {good: strings.ToUpper(other)},
 	} {
 		setRotateEnv(t, "http://127.0.0.1:1", tok, writeBindings(t, m))

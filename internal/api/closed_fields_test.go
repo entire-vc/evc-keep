@@ -94,7 +94,7 @@ var (
 	carrierFields       = fieldSet("id", "host", "runner_id", "target", "status", "last_verified_at", "fingerprint_match")
 	carrierVerifyRow    = fieldSet("id", "host", "runner_id", "target", "status", "last_verified_at", "fingerprint_match", "error_class")
 	carrierVerifyFields = fieldSet("ok", "request_id", "fingerprint", "version", "carriers")
-	carrierTargetFields = fieldSet("kind", "path")
+	carrierTargetFields = fieldSet("kind", "path", "field")
 
 	verifyResultSchema     = "CarrierVerifyResult"
 	verifyRowSchema        = "CarrierVerifyItem"
@@ -102,8 +102,18 @@ var (
 	verifyResultExceptions = fieldSet("carriers", "error_class")
 )
 
-// carrierRowFields is §4.3's Carrier row of the register and list routes.
-var carrierRowFields = fieldSet("id", "secret_id", "host", "runner_id", "target", "consumer", "healthcheck", "status", "last_verified_at", "fingerprint_match")
+// Discovery result (threat model 4.3.4.1, 4.3.4.2): one page of a report,
+// where it starts and how long the whole report is, and per finding a closed
+// verdict with its place, name and keyed fingerprint; never a value and
+// never a length.
+var (
+	discoverResultFields  = fieldSet("ok", "request_id", "runner_id", "store_id", "host", "state", "error_class", "offset", "total", "findings")
+	discoverFindingFields = fieldSet("verdict", "carrier_id", "path", "name", "fingerprint", "incident")
+)
+
+// carrierRowFields is §4.3's Carrier row, extended by the read-only YAML
+// adoption contract with tenant/version identity and registration proof.
+var carrierRowFields = fieldSet("id", "org_id", "secret_id", "version", "provenance", "attestation_job_id", "host", "runner_id", "target", "consumer", "healthcheck", "status", "last_verified_at", "fingerprint_match")
 
 // rotateCarrierFields is one carrier's row of a rotation status.
 var rotateCarrierFields = fieldSet("carrier_id", "phase", "state")
@@ -122,6 +132,13 @@ var closedFieldsRegistry = []closedFieldsEntry{
 		allowed: carrierVerifyRow,
 		nested:  map[string]map[string]bool{"target": carrierTargetFields},
 	},
+	{
+		name:    "CarrierDiscoverResult",
+		typ:     reflect.TypeOf(CarrierDiscoverResult{}),
+		allowed: discoverResultFields,
+		nested:  map[string]map[string]bool{"findings": discoverFindingFields},
+	},
+	{name: "CarrierDiscoverFound", typ: reflect.TypeOf(CarrierDiscoverFound{}), allowed: discoverFindingFields},
 	{name: "CarrierTarget", typ: reflect.TypeOf(CarrierTarget{}), allowed: carrierTargetFields},
 	{
 		name:    "DeployResult",
@@ -132,7 +149,7 @@ var closedFieldsRegistry = []closedFieldsEntry{
 	{
 		name:    "RotateResult",
 		typ:     reflect.TypeOf(RotateResult{}),
-		allowed: fieldSet("ok", "request_id", "fingerprint", "version", "error_class", "carriers", "approval"),
+		allowed: fieldSet("ok", "request_id", "fingerprint", "version", "error_class", "carriers", "approval", "incident_opened"),
 		nested:  map[string]map[string]bool{"carriers": rotateCarrierFields, "approval": deployApprovalFields},
 	},
 	{name: "RotateApproval", typ: reflect.TypeOf(RotateApproval{}), allowed: deployApprovalFields},

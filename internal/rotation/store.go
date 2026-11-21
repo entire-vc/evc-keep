@@ -27,10 +27,19 @@ type runRow struct {
 	NewLength      int
 }
 
+// owesIncident is a run that failed and whose incident is not recorded yet: the
+// engine opens it before the run is finished (the same condition in drive). A
+// superseded run is no failure of the rotation and opens none.
+func (r runRow) owesIncident() bool {
+	return r.State == StateFailed && !r.IncidentOpened && r.Class != ClassSuperseded
+}
+
 type stepRow struct {
 	CarrierID string
 	Deploy    string
 	Verify    string
+	// Class is the closed class the carrier's step failed with, "" otherwise.
+	Class Class
 }
 
 // start creates the run row if it is new. A second active run of the same
@@ -126,6 +135,13 @@ func (s *store) holds(ctx context.Context, id uuid.UUID, l *lease, now time.Time
 	return ok, err
 }
 
+// leased reports whether some owner holds a live lease on run id at now.
+func (s *store) leased(ctx context.Context, id uuid.UUID, now time.Time) (bool, error) {
+	var ok bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM rotation_runs WHERE id=$1 AND lease_owner<>'' AND lease_until >= $2)`, id, now).Scan(&ok)
+	return ok, err
+}
+
 func (s *store) release(ctx context.Context, id uuid.UUID, l *lease) error {
 	_, err := s.pool.Exec(ctx, `UPDATE rotation_runs SET lease_owner='', lease_until=NULL WHERE id=$1 AND lease_owner=$2 AND lease_epoch=$3`, id, l.owner, l.epoch)
 	return err
@@ -197,6 +213,14 @@ func (s *store) failAbandoned(ctx context.Context, id uuid.UUID, c Class, now ti
 	return err
 }
 
+// markIncidentGivenUp records an incident opened for a run nothing holds any
+// more (Resume gave up on it): there is no lease to fence on, and the run is
+// already failed.
+func (s *store) markIncidentGivenUp(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `UPDATE rotation_runs SET incident_opened=true WHERE id=$1 AND state='failed'`, id)
+	return err
+}
+
 func (s *store) markIncident(ctx context.Context, id uuid.UUID) error {
 	l := leaseOf(ctx)
 	if l == nil {
@@ -213,7 +237,7 @@ func (s *store) markIncident(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *store) steps(ctx context.Context, id uuid.UUID) ([]stepRow, error) {
-	rows, err := s.pool.Query(ctx, `SELECT carrier_id, deploy_state, verify_state FROM rotation_steps WHERE run_id=$1 ORDER BY carrier_id`, id)
+	rows, err := s.pool.Query(ctx, `SELECT carrier_id, deploy_state, verify_state, error_class FROM rotation_steps WHERE run_id=$1 ORDER BY carrier_id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -221,9 +245,11 @@ func (s *store) steps(ctx context.Context, id uuid.UUID) ([]stepRow, error) {
 	var out []stepRow
 	for rows.Next() {
 		var r stepRow
-		if err := rows.Scan(&r.CarrierID, &r.Deploy, &r.Verify); err != nil {
+		var cl string
+		if err := rows.Scan(&r.CarrierID, &r.Deploy, &r.Verify, &cl); err != nil {
 			return nil, err
 		}
+		r.Class = Class(cl)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -331,12 +357,12 @@ const stuck = `r.state NOT IN ('done','failed')
 // second sweeper off a run the first just took.
 func (s *store) claimResumes(ctx context.Context, cfg ResumeConfig, now time.Time, inflight []uuid.UUID) ([]resumable, error) {
 	return s.scanResumes(ctx, `WITH c AS (
-			SELECT r.id FROM rotation_runs r
+			SELECT r.id, r.state AS prev FROM rotation_runs r
 			WHERE r.resume_attempts < $6 AND `+stuck+`
 			ORDER BY r.updated_at LIMIT $7 FOR UPDATE OF r SKIP LOCKED)
 		UPDATE rotation_runs r SET resume_after=$1 + `+resumeBackoff+`, resume_attempts=r.resume_attempts+1
 		FROM c WHERE r.id=c.id
-		RETURNING r.id, r.org_id, r.secret_id, r.resume_attempts`,
+		RETURNING r.id, r.org_id, r.secret_id, r.resume_attempts, c.prev`,
 		now, cfg.Stale.Seconds(), inflight, cfg.BackoffBase.Seconds(), cfg.BackoffMax.Seconds(), cfg.MaxAttempts, cfg.Batch)
 }
 
@@ -345,12 +371,12 @@ func (s *store) claimResumes(ctx context.Context, cfg ResumeConfig, now time.Tim
 // slot, so the next rotation can start.
 func (s *store) giveUpResumes(ctx context.Context, cfg ResumeConfig, now time.Time, inflight []uuid.UUID) ([]resumable, error) {
 	return s.scanResumes(ctx, `WITH c AS (
-			SELECT r.id FROM rotation_runs r
+			SELECT r.id, r.state AS prev FROM rotation_runs r
 			WHERE r.resume_attempts >= $5 AND `+stuck+`
 			ORDER BY r.updated_at LIMIT $6 FOR UPDATE OF r SKIP LOCKED)
 		UPDATE rotation_runs r SET state='failed', error_class=$4, updated_at=now()
 		FROM c WHERE r.id=c.id
-		RETURNING r.id, r.org_id, r.secret_id, r.resume_attempts`,
+		RETURNING r.id, r.org_id, r.secret_id, r.resume_attempts, c.prev`,
 		now, cfg.Stale.Seconds(), inflight, string(ClassInternalError), cfg.MaxAttempts, cfg.Batch)
 }
 
@@ -363,7 +389,7 @@ func (s *store) scanResumes(ctx context.Context, q string, args ...any) ([]resum
 	var out []resumable
 	for rows.Next() {
 		var r resumable
-		if err := rows.Scan(&r.id, &r.ref.OrgID, &r.ref.SecretID, &r.attempts); err != nil {
+		if err := rows.Scan(&r.id, &r.ref.OrgID, &r.ref.SecretID, &r.attempts, &r.prev); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

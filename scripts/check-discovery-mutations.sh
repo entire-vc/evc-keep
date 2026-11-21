@@ -22,22 +22,6 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 temp_workspace
 
 fail=0
-# edit SRC FROM TO: print SRC with the first literal occurrence of FROM
-# replaced by TO; exit 1 if FROM is not there.
-edit() {
-	python3 - "$1" "$2" "$3" "${4:-1}" <<'PYEDIT'
-import pathlib
-import sys
-source = pathlib.Path(sys.argv[1]).read_text()
-old, new, nth = sys.argv[2], sys.argv[3], int(sys.argv[4])
-position = -1
-for _ in range(nth):
-    position = source.find(old, position + 1)
-    if position < 0:
-        raise SystemExit(1)
-sys.stdout.write(source[:position] + new + source[position + len(old):])
-PYEDIT
-}
 
 pkgs="./internal/runner/discover/"
 
@@ -48,13 +32,22 @@ pkgs="./internal/runner/discover/"
 # (a different, unrelated check that happened to also depend on the mutated
 # line) proves nothing about the property WANT names. Mirrors the
 # `--- FAIL: WANT` check in check-identity-attack-mutations.sh.
+# The snapshot keeps the instrumented files as its own sources, so a reset
+# restores them without instrumenting the tree again.
+instrument_wipes() {
+	python3 "$root/scripts/instrument-discovery-wipes.py" "$1"
+}
 mutate() {
-	name=$1 src=$2 from=$3 to=$4 want=${5:-} occurrence=${6:-1}
-	rm -rf "$work/tree"
-	mkdir -p "$work/tree"
-	(cd "$root" && tar --exclude=.git --exclude=.gocache --exclude=.gomodcache --exclude=.lintcache -cf - .) | (cd "$work/tree" && tar -xf -)
-	python3 "$root/scripts/instrument-discovery-wipes.py" "$work/tree"
-	if ! edit "$work/tree/$src" "$from" "$to" "$occurrence" >"$work/edited"; then
+	mutation_take_occurrences
+	name=$1 src=$2 from=$3 to=$4 want=${5:-} occurrence=${6:-${mutation_occurrence:-}}
+	# Apply-only: queued, checked against the instrumented tree in one run
+	# at the end, with no copy of the tree per mutant.
+	if mutation_apply_only; then
+		mutation_batch "$src" "$from" "$to" "$occurrence"
+		return
+	fi
+	mutation_snapshot "$work/tree" prepare instrument_wipes
+	if ! mutation_edit "$work/tree/$src" "$from" "$to" "$occurrence" >"$work/edited"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -85,12 +78,22 @@ mutate() {
 	done
 	if [ -n "$missing" ]; then
 		echo "FAIL $name: red, but not on:$missing (the wrong test/subtest caught it):"
-		grep -- '--- FAIL' "$work/out" | head -5
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 		return
 	fi
-	echo "ok   $name: tests went red ($(grep -c -- '--- FAIL' "$work/out") failing)${want:+, confirmed on: $want}"
+	echo "ok   $name: tests went red ($(grep -c -- '--- FAIL' "$work/out" | awk '{print ($1 > 40 ? "40+" : $1)}') failing)${want:+, confirmed on: $want}"
 }
+
+# Apply-only: one instrumented copy of the tree for every queued mutant, as
+# each mutant would see it in the ordinary run. A directory that already
+# exists gets mutation_snapshot's plain copy, not the reset cache.
+if mutation_apply_only; then
+	mkdir -p "$work/tree"
+	mutation_snapshot "$work/tree"
+	python3 "$root/scripts/instrument-discovery-wipes.py" "$work/tree"
+fi
 
 # Turn off independently observable tenant guards and require the isolation
 # test itself (not an unrelated schema failure) to catch each mutation.
@@ -102,7 +105,7 @@ mutate symlink-followed internal/runner/discover/read_unix.go \
  'const noFollow = unix.O_NOFOLLOW' 'const noFollow = 0' 'TestPolicyAndSymlinks'
 mutate size-preflight-off internal/runner/discover/read_unix.go \
  'if info.Size() > limit {' 'if false && info.Size() > limit {' 'TestSizeLimitNoRead'
-mutate writable-root-accepted internal/runner/discover/read_unix.go \
+MUTATION_OCCURRENCE=1 mutate writable-root-accepted internal/runner/discover/read_unix.go \
  'info.Mode().Perm()&0o022 != 0' '(false && info.Mode().Perm()&0o022 != 0)' 'TestWritableRootRefused'
 mutate writable-root-ancestor-accepted internal/runner/discover/read_unix.go \
  'parentInfo.Mode().Perm()&0o022 != 0' '(false && parentInfo.Mode().Perm()&0o022 != 0)' 'TestWritableRootAncestorRefused'
@@ -131,13 +134,18 @@ mutate names-prefix internal/runner/discover/parse.go \
  'bytes.Equal(e.name, []byte(name))' 'bytes.HasPrefix(e.name, []byte(name))' 'TestNamesExactAdmission'
 mutate env-double-escape-unchecked internal/runner/discover/parse.go \
  '&& !doubleEscape {' '&& false && !doubleEscape {' 'TestEnvDoubleQuotedEscapes'
-mutate binary-plist-error-leak internal/runner/discover/parse.go \
+# parse.go returns ErrParse first in the YAML branch, then for the parsed
+# formats: occurrence 1 is the YAML scalar path, occurrence 2 the shared
+# path that binary plists take.
+MUTATION_OCCURRENCE=1 mutate yaml-error-leak internal/runner/discover/parse.go \
+ 'return nil, ErrParse' 'return nil, xml.UnmarshalError(string(data))' 'TestYAMLDiscoveryRefusesUnsafeDocumentsAndPaths'
+MUTATION_OCCURRENCE=2 mutate binary-plist-error-leak internal/runner/discover/parse.go \
  'return nil, ErrParse' 'return nil, xml.UnmarshalError(string(data))' 'TestBinaryPlist'
 mutate fingerprint-suffix-ignored internal/runner/discover/scan.go \
  '[]byte(f.Fingerprint), []byte(k.Fingerprint)' '[]byte(f.Fingerprint[:len(f.Fingerprint)-2]), []byte(k.Fingerprint[:len(k.Fingerprint)-2])' 'TestFingerprintLastByte'
 mutate malformed-pair-accepted internal/runner/discover/scan.go \
  'p, err := fingerprint.Parse(fp)' 'p, err := fingerprint.Parse(fp); if err != nil { p.KeyID = keyID; err = nil }' 'TestMalformedPairRejected'
-mutate scan-key-precheck-off internal/runner/discover/scan.go \
+MUTATION_OCCURRENCE=1 mutate scan-key-precheck-off internal/runner/discover/scan.go \
  'if _, err := fingerprint.Compute(key, secret.Value{}); err != nil {' 'if _, err := fingerprint.Compute(key, secret.Value{}); false && err != nil {' 'TestInvalidScanKeyOnEmptyRoot'
 mutate json-duplicates-accepted internal/runner/discover/json.go \
  'if bytes.Equal(old, k) {' 'if false && bytes.Equal(old, k) {' 'TestJSONStructuralDuplicatesAndKeyLimit'
@@ -145,7 +153,7 @@ mutate json-key-unbounded internal/runner/discover/json.go \
  'len(k) > 256' 'len(k) > 100000' 'TestJSONStructuralDuplicatesAndKeyLimit'
 mutate read-growth-unbounded internal/runner/discover/read_unix.go \
  'make([]byte, limit+1)' 'make([]byte, limit)' 'TestWipeReadErrors/growth'
-mutate parse-values-not-wiped internal/runner/discover/parse.go \
+MUTATION_OCCURRENCE=1 mutate parse-values-not-wiped internal/runner/discover/parse.go \
  'wipe(e.value)' '_ = e.value' 'TestWipeLifecycle/env'
 mutate scan-input-not-wiped internal/runner/discover/scan.go \
  'wipe(data)' '_ = data' 'TestWipeLifecycle/env TestWipeLifecycle/env-error-word'
@@ -153,15 +161,15 @@ mutate secret-copy-not-wiped internal/runner/discover/scan.go \
  'defer v.Wipe()' '_ = v' 'TestWipeLifecycle/env'
 mutate word-growth-not-wiped internal/runner/discover/parse.go \
  'appendWiped(out, []byte{c})' 'append(out, []byte{c}...)' 'TestWipeLifecycle/env'
-mutate json-growth-not-wiped internal/runner/discover/json.go \
+MUTATION_OCCURRENCE=1 mutate json-growth-not-wiped internal/runner/discover/json.go \
  'appendWiped(out, []byte{c})' 'append(out, []byte{c}...)' 'TestWipeLifecycle/json'
 mutate xml-tree-not-wiped internal/runner/discover/parse.go \
  'defer root.destroy()' '_ = root' 'TestWipeLifecycle/xml'
 mutate json-tree-not-wiped internal/runner/discover/json.go \
  'defer root.destroy()' '_ = root' 'TestWipeLifecycle/json'
-mutate env-error-word-not-wiped internal/runner/discover/parse.go \
+MUTATION_OCCURRENCE=1 mutate env-error-word-not-wiped internal/runner/discover/parse.go \
  'wipe(value)' '_ = value' 'TestWipeLifecycle/env-error-word'
-mutate read-growth-buffer-not-wiped internal/runner/discover/read_unix.go \
+MUTATION_OCCURRENCE=1 mutate read-growth-buffer-not-wiped internal/runner/discover/read_unix.go \
  'wipe(buffer)' '_ = buffer' 'TestWipeReadErrors/growth'
 
 mutate env-error-tail-not-wiped internal/runner/discover/parse.go \
@@ -189,7 +197,7 @@ mutate xml-text-not-wiped internal/runner/discover/parse.go \
  'wipe(n.text)' '_ = n.text' 'TestWipeLifecycle/xml'
 mutate json-text-not-wiped internal/runner/discover/json.go \
  'wipe(n.text)' '_ = n.text' 'TestWipeLifecycle/json'
-mutate json-keys-not-wiped internal/runner/discover/json.go \
+MUTATION_OCCURRENCE=1 mutate json-keys-not-wiped internal/runner/discover/json.go \
  'wipe(k)' '_ = k' 'TestWipeLifecycle/json'
 mutate json-encoded-not-wiped internal/runner/discover/json.go \
  'wipe(encoded[:])' '_ = encoded' 'TestWipeLifecycle/json'
@@ -211,7 +219,7 @@ mutate policy-owners-unbounded internal/runner/discover/scan.go \
 mutate tenant-key-prefix internal/runner/discover/scan.go \
  'return p.KeyID == keyID' 'return strings.HasPrefix(p.KeyID, keyID)' 'TestTenantKeyPrefixRejected/finding TestTenantKeyPrefixRejected/known TestTenantKeyPrefixRejected/both TestTenantKeyPrefixRejected/known-only'
 mutate known-key-unchecked internal/runner/discover/scan.go \
- '!validName(k.Name) || !check(k.Fingerprint)' '!validName(k.Name)' 'TestTenantKeyPrefixRejected/known TestTenantKeyPrefixRejected/known-only'
+ '(!validName(k.Name) && !validYAMLField(k.Name)) || !check(k.Fingerprint)' '(!validName(k.Name) && !validYAMLField(k.Name))' 'TestTenantKeyPrefixRejected/known TestTenantKeyPrefixRejected/known-only'
 mutate nonregular-admitted internal/runner/discover/read_unix.go \
  '!info.Mode().IsRegular() || !ok' '!ok' 'TestNonRegularFilesRefused/fifo TestNonRegularFilesRefused/device'
 mutate bplist-low-surrogate-not-wiped internal/runner/discover/bplist.go \
@@ -236,11 +244,11 @@ mutate json-tab-growth-not-wiped internal/runner/discover/json.go \
  'appendWiped(out, []byte{'\''\t'\''})' 'append(out, []byte{'\''\t'\''}...)' 'TestWipeGrowthBoundaries/json-tab'
 
 # The unmutated tree is green: a script whose baseline is red proves nothing.
-mutation_apply_only && exit "$fail"
-rm -rf "$work/tree"
-mkdir -p "$work/tree"
-	(cd "$root" && tar --exclude=.git --exclude=.gocache --exclude=.gomodcache --exclude=.lintcache -cf - .) | (cd "$work/tree" && tar -xf -)
-python3 "$root/scripts/instrument-discovery-wipes.py" "$work/tree"
+if mutation_apply_only; then
+	mutation_batch_run "$work/tree" || fail=1
+	exit "$fail"
+fi
+mutation_snapshot "$work/tree" prepare instrument_wipes
 # shellcheck disable=SC2086
 if (cd "$work/tree" && go test -race -tags=discover_wipecheck -timeout 90s -count=1 -p 1 -v $pkgs >"$work/out" 2>&1); then
 	if grep -q -- '--- SKIP' "$work/out"; then
@@ -251,7 +259,8 @@ if (cd "$work/tree" && go test -race -tags=discover_wipecheck -timeout 90s -coun
     fi
 else
 	echo "FAIL baseline: tests are red on the real code"
-	grep -A3 -- "--- FAIL" "$work/out" || tail -20 "$work/out"
+	"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+		echo "FAIL diagnostics: test-result-names.sh exited $?"
 	fail=1
 fi
 

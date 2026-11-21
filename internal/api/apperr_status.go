@@ -20,7 +20,8 @@ func httpStatus(class apperr.Class) int {
 		return http.StatusUnauthorized
 	case apperr.ClassNotFound, apperr.ClassSecretNotFound:
 		return http.StatusNotFound
-	case apperr.ClassOverrideLocked, apperr.ClassNoStoreBound, apperr.ClassRevokePending, apperr.ClassAlreadyExists:
+	case apperr.ClassOverrideLocked, apperr.ClassNoStoreBound, apperr.ClassRevokePending, apperr.ClassAlreadyExists,
+		apperr.ClassProviderRefInUse:
 		return http.StatusConflict
 	case apperr.ClassPayloadTooLarge:
 		return http.StatusRequestEntityTooLarge

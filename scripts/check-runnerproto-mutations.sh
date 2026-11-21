@@ -45,21 +45,18 @@ mutation_witness_supported() {
 	case "$1" in *[!A-Za-z0-9_]*) return 1 ;; esac
 }
 
-# mutate NAME FILE TEST FROM TO: replace the first literal occurrence of FROM
+# mutate NAME FILE TEST FROM TO: replace the only or explicitly named literal occurrence of FROM
 # with TO in FILE; TEST must be among the failing tests.
 mutate() {
+	mutation_take_occurrences
 	name=$1 file=$dir/$2 test=$3 from=$4 to=$5
 	if ! mutation_witness_supported "$test"; then
 		echo "FAIL $name: unsupported mutation witness"
 		fail=1
 		return
 	fi
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$file" >"$work/tree/$file"; then
+	if ! mutation_edit "$root/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$file"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
@@ -72,7 +69,8 @@ mutate() {
 		exit 1
 	elif ! mutation_witness_failed "$test" "$work/out"; then
 		echo "FAIL $name: $test did not fail (build error or wrong test?):"
-		head -20 "$work/out"
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "ok   $name: $test went red"
@@ -121,10 +119,7 @@ if [ "${1:-}" = --selftest ]; then exit 0; fi
 # mutateN already copied — lets mutateN chain several onto one scratch tree.
 apply1() {
 	file=$dir/$1 from=$2 to=$3
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$work/tree/$file" >"$work/tree/$file.new"; then
+	if ! mutation_edit "$work/tree/$file" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$file.new"; then
 		return 1
 	fi
 	mv "$work/tree/$file.new" "$work/tree/$file"
@@ -142,7 +137,6 @@ mutateN() {
 		return
 	fi
 	shift 2
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
 	while [ $# -gt 0 ]; do
 		if ! apply1 "$1" "$2" "$3"; then
@@ -160,7 +154,8 @@ mutateN() {
 		exit 1
 	elif ! mutation_witness_failed "$test" "$work/out"; then
 		echo "FAIL $name: $test did not fail (build error or wrong test?):"
-		head -20 "$work/out"
+		"$root/scripts/test-result-names.sh" "$work/tree" <"$work/out" ||
+			echo "FAIL diagnostics: test-result-names.sh exited $?"
 		fail=1
 	else
 		echo "ok   $name: $test went red"
@@ -191,15 +186,16 @@ mutate journal-nofollow    journal_read_unix.go TestJournalOpenFIFO 'syscall.O_N
 mutate journal-eloop-static journal_read_unix.go TestJournalOpenFIFO 'if errors.Is(err, syscall.ELOOP) {' 'if false {'
 mutate journal-read-bypass journal.go           TestJournalOpenFIFO 'readJournal(path); err == nil {' 'os.ReadFile(path); err == nil {'
 mutate non-canonical-ok    canonical.go TestNonCanonicalRejected   'if !bytes.Equal(encodeJob(j), b) {' 'if false {'
-mutate long-lifetime       job.go       TestInvalidJobs            'case j.NotAfter.Sub(j.IssuedAt) > MaxJobTTL:' 'case false:'
+MUTATION_OCCURRENCE=1 mutate long-lifetime       job.go       TestInvalidJobs            'case j.NotAfter.Sub(j.IssuedAt) > MaxJobTTL:' 'case false:'
 # tagTargetConsumer must stay appended after tagNonce, never inserted between
 # existing tags (see the tag block's doc comment for the incident this
 # guards): re-inserting it between tagTargetUnit and tagTargetMode — one
 # `mutate` from/to can't express a line moving, hence mutateN — must break
 # decoding of a job encoded by the previous binary.
 mutateN canonical-tag-reordered TestDecodeJobAcceptsPreConsumerWireFormat \
-	canonical.go '\ttagTargetConsumer' '' \
-	canonical.go '\ttagTargetUnit' '\ttagTargetUnit\n\ttagTargetConsumer'
+	canonical.go '	tagTargetConsumer' '' \
+	canonical.go '	tagTargetUnit' '	tagTargetUnit
+	tagTargetConsumer'
 
 # Same rule, caught from the other direction: the encode CALL for Consumer
 # moved back to right after Unit (before Mode/UID/GID/Nonce) instead of
@@ -208,7 +204,8 @@ mutateN canonical-tag-reordered TestDecodeJobAcceptsPreConsumerWireFormat \
 # the result, but nothing asserted that refusal before TestConsumerRoundTrip.
 mutateN consumer-out-of-order TestConsumerRoundTrip \
 	canonical.go 'e.opt(tagTargetConsumer, j.Target.Consumer)' '' \
-	canonical.go 'e.opt(tagTargetUnit, j.Target.Unit)' 'e.opt(tagTargetUnit, j.Target.Unit)\n\te.opt(tagTargetConsumer, j.Target.Consumer)'
+	canonical.go 'e.opt(tagTargetUnit, j.Target.Unit)' 'e.opt(tagTargetUnit, j.Target.Unit)
+	e.opt(tagTargetConsumer, j.Target.Consumer)'
 
 # Decoder silently drops a field it recognizes the tag for: caught today only
 # by the one-encoding re-check (the decoded job, missing Consumer, re-encodes
@@ -237,20 +234,20 @@ mutate health-no-marker-required policy.go TestHealthCheckValidate 'h.BodyMarker
 
 # Value delivery: bound to the job, released once, only to its runner.
 mutate verify-key-domain     value.go     TestVerifyKeyInfoIsItsOwnDomainBoundToNonceAndWindow 'keep/fingerprint-key/verify/v1' 'keep/fingerprint-key/v1'
-mutate verify-key-nonce-unbound value.go  TestVerifyKeyInfoIsItsOwnDomainBoundToNonceAndWindow 'e.field(tagNonce, j.Nonce)' ''
-mutate verify-key-issued-unbound value.go TestVerifyKeyInfoIsItsOwnDomainBoundToNonceAndWindow 'e.i64(tagIssuedAt, j.IssuedAt.Unix())' ''
-mutate verify-key-window-unbound value.go TestVerifyKeyInfoIsItsOwnDomainBoundToNonceAndWindow 'e.i64(tagNotAfter, j.NotAfter.Unix())' ''
+MUTATION_OCCURRENCE=1 mutate verify-key-nonce-unbound value.go  TestVerifyKeyInfoIsItsOwnDomainBoundToNonceAndWindow 'e.field(tagNonce, j.Nonce)' ''
+MUTATION_OCCURRENCE=1 mutate verify-key-issued-unbound value.go TestVerifyKeyInfoIsItsOwnDomainBoundToNonceAndWindow 'e.i64(tagIssuedAt, j.IssuedAt.Unix())' ''
+MUTATION_OCCURRENCE=1 mutate verify-key-window-unbound value.go TestVerifyKeyInfoIsItsOwnDomainBoundToNonceAndWindow 'e.i64(tagNotAfter, j.NotAfter.Unix())' ''
 mutate info-unbound        value.go     TestInfoBindsJob           'e.str(tagRunnerID, j.RunnerID)' ''
 FAIL_LINE_ONLY=1 mutate info-scope-unbound value.go TestInfoHPKEBindsSecret 'e.str(tagSecretScope, j.Secret.Scope)' ''
 FAIL_LINE_ONLY=1 mutate info-provider-unbound value.go TestInfoHPKEBindsSecret 'e.str(tagProvider, j.Secret.Provider)' ''
 # A tag inserted between two existing ones (not appended at the end)
 # renumbers every following tag; Info's byte output for a fixed job then
 # changes even though none of that job's fields did.
-mutate tag-inserted-mid-list canonical.go TestInfoHistoricalWireFormat 'tagOrgID' 'tagInsertedForTest; tagOrgID'
+MUTATION_OCCURRENCE=1 mutate tag-inserted-mid-list canonical.go TestInfoHistoricalWireFormat 'tagOrgID' 'tagInsertedForTest; tagOrgID'
 # Info doesn't use any tag after tagExpectedFingerprint, so an insertion
 # there leaves Info's pin green — only the Job/ExecJob pins would notice.
-mutate tag-inserted-before-action canonical.go TestJobHistoricalWireFormat 'tagAction' 'tagInsertedForTest2; tagAction'
-mutate tag-inserted-before-execdigest canonical.go TestExecJobHistoricalWireFormat 'tagExecDigest' 'tagInsertedForTest3; tagExecDigest'
+MUTATION_OCCURRENCE=1 mutate tag-inserted-before-action canonical.go TestJobHistoricalWireFormat 'tagAction' 'tagInsertedForTest2; tagAction'
+MUTATION_OCCURRENCE=1 mutate tag-inserted-before-execdigest canonical.go TestExecJobHistoricalWireFormat 'tagExecDigest' 'tagInsertedForTest3; tagExecDigest'
 # A binary tag missing from binaryTag's switch is wrongly UTF-8-checked; a
 # nonce that happens not to be valid UTF-8 is then rejected instead of
 # accepted.
@@ -284,7 +281,7 @@ mutate any-path            policy.go    TestHostPolicyOverridesServer 'if under(
 mutate prefix-lookalike    policy.go    TestHostPolicyOverridesServer 'return strings.HasPrefix(p, prefix+"/")' 'return strings.HasPrefix(p, prefix)'
 mutate agent-owner-ok      policy.go    TestHostPolicyOverridesServer 'if contains(p.AgentUIDs, t.UID) {' 'if false {'
 mutate world-readable-ok   policy.go    TestHostPolicyOverridesServer 'case t.Mode&0o007 != 0:' 'case false:'
-mutate uid-shared-prod-ok  policy.go    TestHostPolicyOverridesServer 'if p.UIDShared && j.Secret.Scope == ProdScope && j.NeedsValue() {' 'if false {'
+mutate uid-shared-prod-ok  policy.go    TestHostPolicyOverridesServer 'if p.UIDShared && j.Secret.Scope == ProdScope && (j.NeedsValue() || j.Action == ActionAdopt) {' 'if false {'
 mutate exec-allowed        policy.go    TestHostPolicyOverridesServer 'if !p.AllowExec {' 'if false {'
 mutate no-clean-path       policy.go    TestInvalidJobs            'case path.Clean(p) != p:' 'case path.Clean(p) == "":'
 mutate relative-path-ok    policy.go    TestInvalidJobs            'case !strings.HasPrefix(p, "/"):' 'case false:'
@@ -329,7 +326,7 @@ mutate go-settings-off     policy.go    TestHostPolicyFieldRules   'if strings.H
 mutate go-settings-any     policy.go    TestHostPolicyFieldRules   'if strings.HasPrefix(name, "GO") && !strings.Contains(name, "_") {' 'if strings.HasPrefix(name, "GO") {'
 mutate fileless-rule-kind  policy.go    TestHostPolicyFieldRules   'if !kindHasField(r.Kind) {' 'if false {'
 mutate fileless-job-kind   policy.go    TestHostPolicyOverridesServer 'if !kindHasField(t.Kind) {' 'if true {'
-mutate mcp-kind-no-field   job.go       TestHostPolicyFieldRules   'case TargetEnvFile, TargetLaunchdEnv, TargetMCPConfig, TargetHermesConfig:' 'case TargetEnvFile, TargetLaunchdEnv, TargetHermesConfig:'
+mutate mcp-kind-no-field   job.go       TestHostPolicyFieldRules   'case TargetEnvFile, TargetLaunchdEnv, TargetMCPConfig, TargetHermesConfig, TargetYAMLScalar:' 'case TargetEnvFile, TargetLaunchdEnv, TargetHermesConfig, TargetYAMLScalar:'
 mutate field-malformed-ok  policy.go    TestHostPolicyFieldRules   'if err := (Target{Kind: r.Kind, Field: f}).validateField(); err != nil {' 'if err := error(nil); err != nil {'
 mutate rule-without-fields policy.go    TestHostPolicyFieldRules   'if len(r.Fields) == 0 {' 'if false {'
 mutate fields-on-fileless  policy.go    TestHostPolicyFieldRules   'if len(r.Fields) != 0 {' 'if false {'
@@ -360,6 +357,21 @@ mutate discover-required-fields discover_result.go TestDecodeDiscoverResult 'if 
 mutate discover-path-relative  discover_result.go TestDecodeDiscoverResult 'ValidatePath(f.Path) != nil ||' 'false ||'
 mutate discover-class-on-result result.go TestDiscoverResultIsClosed 'ErrClassProvider: true, ErrClassInternal: true,' 'ErrClassProvider: true, ErrClassInternal: true, "discovery_failed": true,'
 mutate no-rate-limit       policy.go    TestLimiter                'if len(l.times) >= l.max {' 'if false {'
+mutate discover-limiter-off  policy_discovery.go TestDiscoverLimiterCapsPerHour 'if len(l.times) >= l.max {' 'if false {'
+mutate discover-agent-uid    policy_discovery.go TestDiscoveryPolicyValidate 'if slices.Contains(agentUIDs, u) {' 'if slices.Contains(agentUIDs, u) && false {'
+mutate discover-hourly-cap   policy_discovery.go TestDiscoveryPolicyValidate 'if d.MaxPerHour < 1 || d.MaxPerHour > maxDiscoveryPerHour {' 'if false {'
+mutate discover-uid-shared    policy_discovery.go TestDiscoveryNeedsToKnowTheAgents 'if uidShared || len(agentUIDs) == 0 {' 'if false {'
+mutate discover-glob-safety   policy_discovery.go TestDiscoveryPolicyValidate 'if !safeDiscoveryGlob(rule.Glob) ||' 'if false ||'
+mutate discover-root-overlap  policy_discovery.go TestDiscoveryPolicyValidate 'if strings.HasPrefix(other+"/", r.Root+"/") || strings.HasPrefix(r.Root+"/", other+"/") {' 'if false {'
+mutate discover-credential-one policy_discovery.go TestDiscoveryPolicyValidate 'if rule.Kind == "credential" && len(rule.Names) != 1 {' 'if false {'
+mutate discover-name-repeat   policy_discovery.go TestDiscoveryPolicyValidate 'if !valid || names[n] {' 'if !valid {'
+mutate discover-files-cap    policy_discovery.go TestDiscoveryPolicyValidate '|| r.MaxFiles > maxDiscoveryFiles' '|| false'
+mutate discover-names-cap    policy_discovery.go TestDiscoveryPolicyValidate '|| len(rule.Names) > maxDiscoveryNames' '|| false'
+mutate discover-rules-cap    policy_discovery.go TestDiscoveryPolicyValidate '|| len(r.Rules) > maxDiscoveryRules' '|| false'
+mutate discover-roots-cap    policy_discovery.go TestDiscoveryPolicyValidate '|| len(d.Roots) > maxDiscoveryRoots' '|| false'
+mutate discover-uids-cap     policy_discovery.go TestDiscoveryPolicyValidate '|| len(r.TrustedUIDs) > maxDiscoveryUIDs' '|| false'
+mutate discover-name-shape   policy_discovery.go TestDiscoveryPolicyValidate 'if !valid || names[n] {' 'if names[n] && valid {'
+mutate discover-no-section-open policy.go TestDiscoverIsDeniedByHostPolicyUntilEnabled 'if p.Discovery == nil {' 'if false {'
 
 # And the unmutated tree must be green, or every "red" above means nothing.
 if mutation_apply_only; then

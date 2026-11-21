@@ -46,6 +46,7 @@ fail=0
 # mutate NAME FILE FROM TO WITNESS: require the named test itself to fail.
 # Files under internal/ are repo-relative; other paths are builtin-relative.
 mutate() {
+	mutation_take_occurrences
 	name=$1
 	if [ "$#" -ne 5 ] || [ -z "$5" ]; then
 		echo "FAIL $name: a designated witness is required"
@@ -59,12 +60,8 @@ mutate() {
 		internal/*) src=$2 ;;
 		*) src=$pkg/$2 ;;
 	esac
-	rm -rf "$work/tree"
 	mutation_snapshot "$work/tree"
-	if ! awk -v from="$from" -v to="$to" '
-		!done && (i = index($0, from)) { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	if ! mutation_edit "$root/$src" "$from" "$to" "${mutation_occurrence:-}" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return

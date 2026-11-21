@@ -2,6 +2,8 @@ package obs
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,14 +26,79 @@ func TestServerErrorLogRoutesThroughAllowList(t *testing.T) {
 	if strings.Count(out, "\n") != 3 {
 		t.Fatalf("want 3 records, got: %q", out)
 	}
-	for _, bad := range []string{"CANARY", "203.0.113.9", "4444", "goroutine"} {
-		if strings.Contains(out, bad) {
-			t.Errorf("free text %q reached the log: %s", bad, out)
-		}
+	for _, f := range freeTextFindings(out, serverErrorLogForbidden) {
+		t.Error(f)
 	}
 	for _, c := range []string{`"error_class":"tls_handshake"`, `"error_class":"handler_panic"`, `"error_class":"http_server"`} {
 		if !strings.Contains(out, c) {
 			t.Errorf("missing %s in: %s", c, out)
+		}
+	}
+}
+
+// serverErrorLogForbidden is what net/http's free text carries in the probes
+// above: peer text, the peer address and port, and a goroutine dump.
+var serverErrorLogForbidden = []string{"CANARY", "203.0.113.9", "4444", "goroutine"}
+
+// freeTextFindings parses every line of out as one JSON record, drops the
+// record's own "time" (an RFC3339Nano stamp whose digits can contain "4444"
+// with no leak at all) and searches every remaining key and value for the
+// forbidden substrings. Keys are searched too: a leak into a field name is
+// still a leak. A line that is not a JSON object is itself a finding.
+func freeTextFindings(out string, forbidden []string) []string {
+	var findings []string
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			findings = append(findings, fmt.Sprintf("record is not a JSON object (%v): %s", err, line))
+			continue
+		}
+		if rec == nil { // valid JSON null decodes into a nil map without error
+			findings = append(findings, fmt.Sprintf("record is not a JSON object: %s", line))
+			continue
+		}
+		delete(rec, "time")
+		rest, err := json.Marshal(rec)
+		if err != nil {
+			findings = append(findings, fmt.Sprintf("record does not re-encode (%v): %s", err, line))
+			continue
+		}
+		for _, bad := range forbidden {
+			if strings.Contains(string(rest), bad) {
+				findings = append(findings, fmt.Sprintf("free text %q reached the log: %s", bad, line))
+			}
+		}
+	}
+	return findings
+}
+
+// TestFreeTextFindingsIgnoresOnlyTime pins the checker itself: a record whose
+// timestamp happens to contain "4444" is clean, the same port in msg, in any
+// other field or in a key is caught, and an unparsable line is never clean.
+func TestFreeTextFindingsIgnoresOnlyTime(t *testing.T) {
+	cases := []struct {
+		name   string
+		record string
+		leak   bool
+	}{
+		{"port digits only in time", `{"time":"2026-11-15T10:51:15.538444494Z","level":"ERROR","msg":"http server error","error_class":"http_server"}`, false},
+		{"peer address in msg", `{"time":"2026-11-15T10:51:15.5Z","level":"ERROR","msg":"http: TLS handshake error from 203.0.113.9:4444","error_class":"tls_handshake"}`, true},
+		{"port alone in msg", `{"time":"2026-11-15T10:51:15.5Z","level":"ERROR","msg":"retry 4444","error_class":"http_server"}`, true},
+		{"port in another field", `{"time":"2026-11-15T10:51:15.5Z","level":"ERROR","msg":"x","error_class":"4444"}`, true},
+		{"address in a key", `{"time":"2026-11-15T10:51:15.5Z","level":"ERROR","msg":"x","203.0.113.9":1}`, true},
+		{"nested value", `{"time":"2026-11-15T10:51:15.5Z","msg":"x","g":{"k":"goroutine 1"}}`, true},
+		{"not JSON", `http: panic serving 203.0.113.9:4444`, true},
+		{"JSON null", `null`, true},
+		{"JSON string", `"203.0.113.9:4444"`, true},
+		{"JSON array", `["goroutine 1"]`, true},
+	}
+	for _, c := range cases {
+		got := freeTextFindings(c.record+"\n", serverErrorLogForbidden)
+		if c.leak && len(got) == 0 {
+			t.Errorf("%s: leak not caught: %s", c.name, c.record)
+		}
+		if !c.leak && len(got) != 0 {
+			t.Errorf("%s: clean record flagged: %v", c.name, got)
 		}
 	}
 }

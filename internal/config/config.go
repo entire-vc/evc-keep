@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -60,6 +61,32 @@ type Config struct {
 	// of the reverse proxies whose X-Forwarded-For names the client of a Mesh
 	// call. Empty: the peer is the client.
 	TrustedProxies []netip.Prefix
+	// RestartLanes is KEEP_RESTART_LANES: comma-separated names of the lanes
+	// a restart may be queued for. Unset or blank is none, and the restart
+	// queue then refuses every request; there is no built-in list.
+	RestartLanes []string
+}
+
+// laneName is the shape of a lane name, the same as the restart_requests
+// CHECK constraint: a letter, then up to 31 letters, digits, '_' or '-'.
+var laneName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,31}$`)
+
+// restartLanes parses KEEP_RESTART_LANES; a blank variable is no lane. The
+// error names the variable and never the value.
+func restartLanes() ([]string, error) {
+	raw := strings.TrimSpace(os.Getenv("KEEP_RESTART_LANES"))
+	if raw == "" {
+		return nil, nil
+	}
+	var out []string
+	for _, f := range strings.Split(raw, ",") {
+		l := strings.TrimSpace(f)
+		if !laneName.MatchString(l) {
+			return nil, errors.New("KEEP_RESTART_LANES must be comma-separated lane names: a letter, then up to 31 letters, digits, '_' or '-'")
+		}
+		out = append(out, l)
+	}
+	return out, nil
 }
 
 // trustedProxies parses KEEP_TRUSTED_PROXIES; an empty variable is no proxy.
@@ -130,7 +157,12 @@ func FromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	lanes, err := restartLanes()
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
+		RestartLanes:         lanes,
 		TrustedProxies:       proxies,
 		CatalogRatePerMinute: rate,
 		CatalogBurst:         burst,

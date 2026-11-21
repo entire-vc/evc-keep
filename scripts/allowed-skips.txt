@@ -48,3 +48,9 @@ TestW3_A06_ScannerRefusesSymlink            pending target
 TestW3_A10_ForeignTenantCarriersInvisible   pending target
 TestW3_A11_CarrierGuessOracleBlocked        pending target
 TestW3_A13_AgentCannotInjectRotationValue   pending target
+
+# A helper compiled and run by the local rotation stand (scripts/testbed/rotation.sh) with
+# KEEP_HUMAN_LINK/KEEP_HUMAN_OUT set; there is no CI stand job (no privileged docker runner).
+TestHumanEntersTheValue                              rotation stand runs it (scripts/testbed/rotation.sh)
+# Stand catalog stand-in, compiled with `go test -c` and run by the meshaux container.
+TestServe                                           run by the meshaux container (scripts/testbed)

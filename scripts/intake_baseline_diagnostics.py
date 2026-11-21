@@ -5,7 +5,7 @@ import re
 import subprocess
 import time
 
-STAGES = frozenset(('descriptor', 'schema-restore', 'service', 'page'))
+STAGES = frozenset(('descriptor', 'schema-restore', 'service', 'service-app', 'page'))
 PACKAGES = frozenset(('./internal/intake/descriptor', './internal/intake',
                       './internal/builtin', './internal/api', './internal/catalog',
                       './internal/store', './cmd/keep-server/app', './cmd/keep'))
@@ -33,6 +33,31 @@ RUNTIME_MESSAGES = frozenset(('race detected during execution of test',))
 SAFE_MESSAGE = re.compile(r'[\x20-\x7e]{1,200}')
 ASSERTIONS_PER_TEST, ASSERTIONS_TOTAL = 4, 16
 TEST_EVENT = re.compile(r'^\s*(?:--- (?:FAIL|SKIP):|=== RUN) +(Test[A-Za-z0-9_]+)(?:\s|$)', re.M)
+
+
+PLAIN_TEST = re.compile(r'Test[A-Za-z0-9_]+')
+
+
+def designated_run_pattern(names):
+    """Anchored -run pattern for designated top-level tests.
+
+    Only plain names are accepted: anything else would be read as a regex by
+    go test's -run and by the PASS match below, so it is refused, not escaped.
+    """
+    names = sorted(set(names))
+    if not names or any(not PLAIN_TEST.fullmatch(name) for name in names):
+        raise ValueError('designated tests are not plain test names')
+    return '^(' + '|'.join(names) + ')$'
+
+
+def missing_passes(text, names):
+    """Designated tests without their own top-level `--- PASS: <name> (` line.
+
+    A prefix of another test, a subtest line or an indented line does not
+    count, nor does FAIL or SKIP.
+    """
+    return sorted(name for name in set(names)
+                  if not re.search(r'^--- PASS: ' + re.escape(name) + r' \(', text, re.M))
 
 
 def known_test_ids(cwd, packages):

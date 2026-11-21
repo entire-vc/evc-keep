@@ -14,29 +14,25 @@ temp_workspace
 pkg=internal/mcp
 
 fail=0
-# mutate NAME FILE FROM TO [N]: replace the Nth (default first) literal
+# mutate NAME FILE FROM TO [N [WITNESS]]: replace the Nth (required if ambiguous) literal
 # occurrence of FROM with TO in FILE.
 mutate() {
-	name=$1 src=$pkg/$2 from=$3 to=$4 nth=${5:-1}
-	rm -rf "$work/tree"
-	# Apply-only writes just the mutated file: no need to copy the whole tree.
-	if mutation_apply_only; then mkdir -p "$work/tree/$pkg"; else mutation_snapshot "$work/tree"; fi
-	if ! awk -v from="$from" -v to="$to" -v nth="$nth" '
-		!done && (i = index($0, from)) && ++seen == nth { $0 = substr($0, 1, i-1) to substr($0, i+length(from)); done = 1 }
-		{ print }
-		END { exit !done }' "$root/$src" >"$work/tree/$src"; then
+	mutation_take_occurrences
+	name=$1 src=$pkg/$2 from=$3 to=$4 nth=${5:-${mutation_occurrence:-}} want=${6:-}
+	mutation_snapshot "$work/tree"
+	if ! mutation_edit "$root/$src" "$from" "$to" "$nth" >"$work/tree/$src"; then
 		echo "FAIL $name: mutation did not apply — the source changed, update this script"
 		fail=1
 		return
 	fi
 	mutation_applied "$name" && return
-	if (cd "$work/tree" && go test -timeout 120s -count=1 ./$pkg/ >"$work/out" 2>&1); then
+	if (cd "$work/tree" && go test -timeout 120s -count=1 -run "^${want:-.*}\$" ./$pkg/ >"$work/out" 2>&1); then
 		echo "FAIL $name: tests stayed green with the property switched off"
 		fail=1
 	elif mutation_infrastructure_failed "$work/out"; then
 		exit 1
-	elif ! grep -q -- '--- FAIL' "$work/out"; then
-		echo "FAIL $name: mutant did not reach a failing test (build error?)"
+	elif ! grep -q -- "--- FAIL: ${want:-Test}" "$work/out"; then
+		echo "FAIL $name: mutant did not reach ${want:-a failing test} (build error or wrong witness?)"
 		fail=1
 	else
 		echo "ok   $name: tests went red ($(grep -c -- '--- FAIL' "$work/out") failing)"
@@ -47,8 +43,8 @@ mutate() {
 mutate reply-open-shape    tools.go 'd.DisallowUnknownFields()' '_ = d' 2
 # arguments are closed: a value-shaped extra is refused before any request
 mutate args-open-shape     tools.go 'd.DisallowUnknownFields()' '_ = d' 1
-mutate tool-takes-a-value  tools.go '`json:"wait_seconds"`' '`json:"wait_seconds"`; Value string `json:"value"`'
-mutate target-takes-value  tools.go '`json:"consumer"`' '`json:"consumer"`; Value string `json:"value"`'
+MUTATION_OCCURRENCE=1 mutate tool-takes-a-value  tools.go '`json:"wait_seconds"`' '`json:"wait_seconds"`; Value string `json:"value"`'
+MUTATION_OCCURRENCE=1 mutate target-takes-value  tools.go '`json:"consumer"`' '`json:"consumer"`; Value string `json:"value"`'
 mutate schema-offers-value tools.go '"secret": str("secret name"), "runner_id": str("runner id"),' '"secret": str("secret name"), "value": str("v"), "runner_id": str("runner id"),'
 mutate answer-type-opens   types.go '`json:"owner,omitempty"`' '`json:"owner,omitempty"`; Value string `json:"value"`'
 # the token goes to the configured host only, and into no answer
@@ -59,15 +55,15 @@ mutate token-not-sent      backend.go 'req.Header.Set("Authorization", "Bearer "
 mutate plain-http-remote   backend.go 'if u.Scheme != "https" && (u.Scheme != "http" || !isLoopback(u.Hostname())) {' 'if false {'
 mutate isloopback-suffix   backend.go 'if host == "localhost" {' 'if strings.HasSuffix(host, "localhost") {'
 mutate isloopback-prefix   backend.go 'if host == "localhost" {' 'if strings.HasPrefix(host, "localhost") {'
-mutate input-status-open   tools.go 'if status != http.StatusCreated ||' 'if status == 0 ||'
+MUTATION_OCCURRENCE=1 mutate input-status-open   tools.go 'if status != http.StatusCreated ||' 'if status == 0 ||'
 # the error row keeps its closed shape
 mutate class-forwarded     tools.go 'if string(k) == c {' 'if string(k) == c || true {' 2
 mutate message-forwarded   tools.go '"the server refused the request: " + class' 'ae.Message'
 mutate request-id-forwarded tools.go 'if !reqid.Valid(rid) {' 'if false {'
 mutate deploy-class-open   tools.go '!deployClassKnown(r.ErrorClass)' 'false'
 mutate deploy-class-api-only tools.go 'if runnerproto.ErrorClass(c).Valid() {' 'if false {'
-mutate deploy-class-apperr-off tools.go 'if string(k) == c {' 'if string(k) == c && false {'
-mutate fingerprint-open    tools.go '!fingerprintShape.MatchString(r.Fingerprint)' 'false' 2
+MUTATION_OCCURRENCE=1 mutate deploy-class-apperr-off tools.go 'if string(k) == c {' 'if string(k) == c && false {'
+mutate fingerprint-open    tools.go '!fingerprintShape.MatchString(r.Fingerprint)' 'false' 3 TestDeployAnswerWithOddStringsIsRefused
 mutate deploy-health-status-open tools.go 'r.Healthcheck != nil && !healthStatus[r.Healthcheck.Status]' 'false'
 mutate deploy-health-list-widened tools.go 'var healthStatus = map[string]bool{"ok": true, "failed": true, "skipped": true}' 'var healthStatus = map[string]bool{"ok": true, "failed": true, "skipped": true, "": true, "degraded": true}'
 mutate deploy-id-unchecked tools.go '!reqid.Valid(r.RequestID)' 'r.RequestID == ""' 2
@@ -77,7 +73,7 @@ mutate approval-id-open tools.go 'validUUID(a.ID) && approvalStatus' 'true && ap
 mutate approval-status-open tools.go 'approvalStatus[a.Status] && a.URL' 'true && a.URL'
 mutate approval-url-empty tools.go 'a.URL != "" && len(a.URL)' 'true && len(a.URL)'
 mutate approval-url-unbounded tools.go 'len(a.URL) <= 512 &&' 'true &&'
-mutate approval-url-whitespace tools.go '!strings.ContainsAny(a.URL, " \\t\\r\\n")' 'true'
+mutate approval-url-whitespace tools.go '!strings.ContainsAny(a.URL, " \t\r\n")' 'true'
 mutate rotate-approval-unchecked tools.go 'if !validApproval(r.Approval) {' 'if false {'
 mutate deploy-approval-unchecked tools.go '|| !validApproval(r.Approval) {' '|| false {'
 mutate deploy-version-open tools.go '(r.Version != "" && !versionRe.MatchString(r.Version))' 'false' 2
@@ -98,7 +94,7 @@ mutate userinfo-accepted   backend.go 'u.Host == "" || u.User != nil' 'u.Host ==
 # arguments are validated before they become a path or a query
 mutate scope-unchecked     tools.go '!scopeLevel[a.ScopeLevel] || !validUUID(a.ScopeID)' 'false'
 mutate secret-id-unchecked tools.go 'if !validUUID(a.SecretID) {' 'if false {'
-mutate wait-unbounded      tools.go 'wait < 0 || wait > maxWait' 'wait < 0'
+MUTATION_OCCURRENCE=1 mutate wait-unbounded      tools.go 'wait < 0 || wait > maxWait' 'wait < 0'
 mutate ttl-unbounded       tools.go 'd <= 0 || d > 24*time.Hour' 'd <= 0'
 # provider_ref is a locator; an error reply is the closed row
 mutate list-secret-unchecked tools.go 'if !closedSecret(s) {' 'if !closedSecret(s) && false {'
@@ -121,7 +117,7 @@ mutate carrier-host-unchecked tools.go '!plain(a.Host, 253) ||' ''
 mutate carrier-status-open    tools.go 'if status != http.StatusCreated || decodeStrict(body, &out) != nil || out.ID == ""' 'if status == 0 || decodeStrict(body, &out) != nil || out.ID == ""'
 mutate carrier-foreign-row    tools.go 'out.SecretID != a.SecretID ||' ''
 mutate carrier-type-opens     types.go '`json:"fingerprint_match"`' '`json:"fingerprint_match"`; Fingerprint string `json:"fingerprint"`'
-mutate carrier-runner-id-dropped types.go '`json:"runner_id,omitempty"`' '`json:"-"`'
+MUTATION_OCCURRENCE=1 mutate carrier-runner-id-dropped types.go '`json:"runner_id,omitempty"`' '`json:"-"`'
 mutate carrier-runner-id-unchecked tools.go '(out.RunnerID != "" && !canonicalUUID(out.RunnerID))' 'false'
 mutate carrier-runner-id-loose-uuid tools.go 'u != uuid.Nil && u.String() == s' 'u == u'
 mutate carrier-version-unchecked tools.go '!plain(a.Version, 64) ||' ''
@@ -134,14 +130,14 @@ mutate carrier-empty-status-accepted tools.go '|| out.Status == "" ||' '||'
 mutate carrier-host-rewritten tools.go '"version": a.Version, "host": a.Host,' '"version": a.Version, "host": strings.ToLower(a.Host) + ".",'
 mutate carrier-required-loosened tools.go 'schema([]string{"secret_id", "version", "host", "target_kind", "target_path"}' 'schema([]string{"secret_id", "version", "target_kind", "target_path"}'
 # rotate: the agent passes a mode, never a value; the answer is the closed row
-mutate rotate-takes-a-value     tools.go '`json:"wait_seconds"`' '`json:"wait_seconds"`; Value string `json:"value"`' 2
+mutate rotate-takes-a-value     tools.go '`json:"wait_seconds"`' '`json:"wait_seconds"`; Value string `json:"value"`' 3 TestRotateRefusesBadArgumentsBeforeTheServer
 mutate rotate-schema-offers-value tools.go '"secret_id":    str("secret id"),' '"secret_id":    str("secret id"), "value": str("v"),'
 mutate rotate-mode-open         tools.go '(a.Mode != "generate" && a.Mode != "human_input")' 'false'
 mutate rotate-secret-unchecked  tools.go '!validUUID(a.SecretID) || (a.Mode' 'false || (a.Mode'
-mutate rotate-wait-unbounded    tools.go 'wait < 0 || wait > maxWait' 'wait < 0' 2
+mutate rotate-wait-unbounded    tools.go 'wait < 0 || wait > maxWait' 'wait < 0' 3 TestRotateRefusesBadArgumentsBeforeTheServer
 mutate rotate-class-open        tools.go '(r.ErrorClass != "" && !rotateClasses[r.ErrorClass])' 'false'
-mutate rotate-fingerprint-open  tools.go '!fingerprintShape.MatchString(r.Fingerprint)' 'false' 1
-mutate rotate-version-open      tools.go '(r.Version != "" && !versionRe.MatchString(r.Version))' 'false'
+mutate rotate-fingerprint-open  tools.go '!fingerprintShape.MatchString(r.Fingerprint)' 'false' 2 TestRotateRefusesAStatusOutsideTheClosedShape
+MUTATION_OCCURRENCE=1 mutate rotate-version-open      tools.go '(r.Version != "" && !versionRe.MatchString(r.Version))' 'false'
 mutate rotate-request-id-open   tools.go '!validUUID(r.RequestID) || len(r.Carriers) > 256' 'false'
 mutate rotate-carriers-unbounded tools.go ' || len(r.Carriers) > 256' ''
 mutate rotate-carrier-id-open   tools.go '!validUUID(c.CarrierID) || !rotatePhase' 'false || !rotatePhase'
@@ -149,14 +145,14 @@ mutate rotate-phase-open        tools.go '!rotatePhase[c.Phase]' 'false'
 mutate rotate-state-open        tools.go '!rotateState[c.State]' 'false'
 mutate rotate-reply-open-shape  tools.go 'decodeStrict(body, &r) != nil || !validUUID(r.RequestID)' 'json.Unmarshal(body, &r) != nil || !validUUID(r.RequestID)'
 mutate rotate-version-before-ok  tools.go '(!r.OK && (r.Version != "" || r.Fingerprint != ""))' 'false'
-mutate rotate-class-on-ok        tools.go '(r.OK && r.ErrorClass != "")' 'false'
-mutate rotate-accepted-may-be-ok tools.go '(status == http.StatusAccepted && (r.OK || r.ErrorClass != ""))' 'false'
-mutate rotate-accepted-may-fail tools.go '(r.OK || r.ErrorClass != "")) ||' '(r.OK)) ||'
-mutate rotate-ok-needs-version  tools.go '(r.Version == "" || r.Fingerprint == "")' 'r.Fingerprint == ""'
-mutate rotate-ok-needs-fingerprint tools.go '(r.Version == "" || r.Fingerprint == "")' 'r.Version == ""'
+MUTATION_OCCURRENCE=1 mutate rotate-class-on-ok        tools.go '(r.OK && r.ErrorClass != "")' 'false'
+MUTATION_OCCURRENCE=1 mutate rotate-accepted-may-be-ok tools.go '(status == http.StatusAccepted && (r.OK || r.ErrorClass != ""))' 'false'
+MUTATION_OCCURRENCE=1 mutate rotate-accepted-may-fail tools.go '(r.OK || r.ErrorClass != "")) ||' '(r.OK)) ||'
+MUTATION_OCCURRENCE=1 mutate rotate-ok-needs-version  tools.go '(r.Version == "" || r.Fingerprint == "")' 'r.Fingerprint == ""'
+MUTATION_OCCURRENCE=1 mutate rotate-ok-needs-fingerprint tools.go '(r.Version == "" || r.Fingerprint == "")' 'r.Version == ""'
 mutate rotate-input-status-open tools.go 'if status != http.StatusAccepted || decodeStrict(body, &out)' 'if status == 0 || decodeStrict(body, &out)'
 mutate rotate-start-status-open tools.go 'if status != http.StatusAccepted {' 'if false {'
-mutate rotate-poll-status-open tools.go 'if status != http.StatusOK && status != http.StatusAccepted {' 'if false {'
+MUTATION_OCCURRENCE=1 mutate rotate-poll-status-open tools.go 'if status != http.StatusOK && status != http.StatusAccepted {' 'if false {'
 mutate rotate-answer-type-opens types.go '`json:"carriers,omitempty"`' '`json:"carriers,omitempty"`; Value string `json:"value"`'
 mutate rotate-carrier-type-opens types.go '`json:"state"`' '`json:"state"`; Value string `json:"value"`'
 # verify_carriers: a closed, bounded thin wrapper
@@ -174,7 +170,7 @@ mutate verify-carrier-row-id-open  tools.go '!validUUID(c.ID) ||' 'false ||'
 mutate verify-carrier-rows-unbounded tools.go ' || len(r.Carriers) > maxCarrierRows' ''
 mutate verify-wait-unbounded tools.go '|| wait < 0 || wait > maxWait {' '{' 2
 mutate verify-takes-a-value tools.go '`json:"wait_seconds"`' '`json:"wait_seconds"`; Value string `json:"value"`' 2
-mutate verify-carrier-row-opens    types.go '`json:"error_class,omitempty"`' '`json:"error_class,omitempty"`; Value string `json:"value"`' 2
+mutate verify-carrier-row-opens    types.go '`json:"error_class,omitempty"`' '`json:"error_class,omitempty"`; Value string `json:"value"`' 3 TestAnswerTypesStayInTheClosedList
 # protocol
 mutate id-any-echoed       server.go '!notification && !integerID.Match(req.ID) {' '!notification && false {'
 mutate id-string-allowed   server.go '{0,15})$`)' '{0,15})$|^".*"$`)'

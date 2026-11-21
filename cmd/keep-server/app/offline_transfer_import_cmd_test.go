@@ -134,13 +134,13 @@ func TestTransferImportRequiresAllFlagsAndNoDSNInArgv(t *testing.T) {
 func TestApprovalMatchesOnlyTheSameTransfer(t *testing.T) {
 	id := func() string { return uuid.NewString() }
 	b := approvalBinding{
-		Transfer: id(), Source: id(), Target: id(), Snapshot: id(), Org: id(), Workspace: id(), Schema: 51,
+		Transfer: id(), Source: id(), Target: id(), Snapshot: id(), Org: id(), Workspace: id(), Schema: 52,
 		Checksum: strings.Repeat("a", 64), ClosureDigest: "sha256:" + strings.Repeat("b", 64), AuditHead: "head-1",
 	}
 	mk := func(mutate func(*transferApproval)) []byte {
 		a := transferApproval{transferCheckpoint: transferCheckpoint{
 			Version: 1, OrgID: b.Org, WorkspaceID: b.Workspace, TransferID: b.Transfer, SnapshotID: b.Snapshot,
-			SourceID: b.Source, TargetID: b.Target, Schema: 51, ClosureDigest: b.ClosureDigest,
+			SourceID: b.Source, TargetID: b.Target, Schema: 52, ClosureDigest: b.ClosureDigest,
 			AuditHead: b.AuditHead, Rows: 3, CiphertextChecksum: b.Checksum,
 		}, Quiescence: "asserted", Status: "final"}
 		if mutate != nil {
@@ -162,7 +162,7 @@ func TestApprovalMatchesOnlyTheSameTransfer(t *testing.T) {
 		"snapshot":     mk(func(a *transferApproval) { a.SnapshotID = id() }),
 		"org":          mk(func(a *transferApproval) { a.OrgID = id() }),
 		"workspace":    mk(func(a *transferApproval) { a.WorkspaceID = id() }),
-		"schema":       mk(func(a *transferApproval) { a.Schema = 52 }),
+		"schema":       mk(func(a *transferApproval) { a.Schema = 53 }),
 		"checksum":     mk(func(a *transferApproval) { a.CiphertextChecksum = strings.Repeat("c", 64) }),
 		"digest":       mk(func(a *transferApproval) { a.ClosureDigest = "sha256:" + strings.Repeat("d", 64) }),
 		"audit head":   mk(func(a *transferApproval) { a.AuditHead = "head-2" }),
@@ -188,13 +188,13 @@ func TestApprovalMatchesOnlyTheSameTransfer(t *testing.T) {
 func TestVerifyApprovalNeedsTheIndependentPin(t *testing.T) {
 	id := func() string { return uuid.NewString() }
 	b := approvalBinding{
-		Transfer: id(), Source: id(), Target: id(), Snapshot: id(), Org: id(), Workspace: id(), Schema: 51,
+		Transfer: id(), Source: id(), Target: id(), Snapshot: id(), Org: id(), Workspace: id(), Schema: 52,
 		Checksum: strings.Repeat("a", 64), ClosureDigest: "sha256:" + strings.Repeat("b", 64), AuditHead: "head-1",
 	}
 	mk := func(rows int64) []byte {
 		raw, err := json.Marshal(transferApproval{transferCheckpoint: transferCheckpoint{
 			Version: 1, OrgID: b.Org, WorkspaceID: b.Workspace, TransferID: b.Transfer, SnapshotID: b.Snapshot,
-			SourceID: b.Source, TargetID: b.Target, Schema: 51, ClosureDigest: b.ClosureDigest,
+			SourceID: b.Source, TargetID: b.Target, Schema: 52, ClosureDigest: b.ClosureDigest,
 			AuditHead: b.AuditHead, Rows: rows, CiphertextChecksum: b.Checksum,
 		}, Quiescence: "asserted", Status: "final"})
 		if err != nil {

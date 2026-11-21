@@ -216,9 +216,14 @@ type evCollab struct {
 	left   map[string]int // deploy failures left per carrier
 	always bool           // every deploy fails
 	fp     func() string
+	rbBad  map[string]bool // carriers that do not come back healthy on the old version
 }
 
-func (c *evCollab) Deploy(_ context.Context, _ Ref, _ uuid.UUID, car Carrier, _ string) error {
+func (c *evCollab) Deploy(ctx context.Context, _ Ref, _ uuid.UUID, car Carrier, _ string) error {
+	if IsRollback(ctx) {
+		c.ev.add("rollback-deploy " + car.ID)
+		return nil
+	}
 	c.ev.add("deploy " + car.ID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -232,7 +237,11 @@ func (c *evCollab) Deploy(_ context.Context, _ Ref, _ uuid.UUID, car Carrier, _ 
 	return nil
 }
 
-func (c *evCollab) Verify(_ context.Context, _ Ref, car Carrier, _ string) (Report, error) {
+func (c *evCollab) Verify(ctx context.Context, _ Ref, car Carrier, _ string) (Report, error) {
+	if IsRollback(ctx) {
+		c.ev.add("rollback-verify " + car.ID)
+		return Report{Fingerprint: fpOld, Healthy: !c.rbBad[car.ID]}, nil
+	}
 	c.ev.add("verify " + car.ID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -289,7 +298,7 @@ func newProvFx(t *testing.T, dual bool, carriers int) *provFx {
 	p := &provFx{fx: x, ev: ev, mem: mem}
 	p.store = &evStore{Provider: mem, ev: ev}
 	p.rp = &stubProvider{ev: ev, dual: dual, active: map[string]bool{}}
-	p.col = &evCollab{fakes: newFakes(carriers), ev: ev, left: map[string]int{}}
+	p.col = &evCollab{fakes: newFakes(carriers), ev: ev, left: map[string]int{}, rbBad: map[string]bool{}}
 	p.deps = ProviderDeps{
 		Provider: p.rp,
 		Resolve: func(context.Context, Ref) (Target, error) {
@@ -347,16 +356,19 @@ func TestProviderDualKeyOrderIsStrict(t *testing.T) {
 	}
 }
 
-// DualKey: one carrier does not confirm; the old key and old version stay.
+// DualKey: one carrier does not confirm; the old key and old version stay, and
+// only the new key and version are undone.
 func TestProviderUnconfirmedCarrierRevokesNothing(t *testing.T) {
 	p := newProvFx(t, true, 3)
-	p.firstRun(t)
+	first := p.firstRun(t)
+	oldKey := p.rp.lastID
 	p.col.unhealthy[cid(2)] = true
 	r, err := p.rotate()
 	if !errors.Is(err, ErrFailed) || r.State != StateFailed {
 		t.Fatalf("want a failed run, got %+v %v", r, err)
 	}
-	if p.ev.count("revoke") != 0 || p.ev.count("disable") != 0 || p.ev.count("incident") != 1 {
+	if p.ev.exact("revoke "+oldKey) != 0 || !p.rp.active[oldKey] || p.ev.exact("disable "+first.NewVersion) != 0 ||
+		p.ev.exact("revoke "+p.rp.lastID) != 1 || p.ev.count("incident") != 1 {
 		t.Fatalf("old key or version touched: %v", p.ev.all())
 	}
 }
@@ -899,8 +911,8 @@ func TestProviderFailedCarrierSparesOriginalKey(t *testing.T) {
 	if _, err := p.rotate(); !errors.Is(err, ErrFailed) {
 		t.Fatalf("want a failed run: %v", err)
 	}
-	if p.ev.count("revoke") != 0 || !p.rp.active[orig] {
-		t.Fatalf("original key touched: %v", p.ev.all())
+	if p.ev.exact("revoke "+orig) != 0 || !p.rp.active[orig] || p.ev.count("revoke") != 1 {
+		t.Fatalf("original key touched, or the new key not the only one ended: %v", p.ev.all())
 	}
 }
 

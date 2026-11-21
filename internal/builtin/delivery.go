@@ -85,11 +85,12 @@ func OpenRunnerMaterial(j runnerproto.Job, recipient *ecdh.PrivateKey, env runne
 	return secret.New(rawValue), key, nil
 }
 
-// SealRunnerKey is SealRunnerMaterial for a verify job: it seals only the
-// fingerprint key, under VerifyKeyInfo, and never a value. Sealed stays empty
+// SealRunnerKey seals only the fingerprint key for verify or adopt, under
+// that action's separate HPKE domain, and never a value. Sealed stays empty
 // whatever the provider; the caller owns and wipes key.
 func SealRunnerKey(j runnerproto.Job, recipient []byte, key fingerprint.Key) (runnerproto.ValueEnvelope, error) {
-	if j.Validate() != nil || j.Action != runnerproto.ActionVerify {
+	info := readKeyInfo(j)
+	if j.Validate() != nil || info == nil {
 		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
 	}
 	parsed, err := fingerprint.Parse(j.ExpectedFingerprint)
@@ -105,7 +106,7 @@ func SealRunnerKey(j runnerproto.Job, recipient []byte, key fingerprint.Key) (ru
 			err = ErrDeliveryMaterial
 			return
 		}
-		env.SealedFingerprintKey, err = sealRunnerBytes(recipient, runnerproto.VerifyKeyInfo(j), raw)
+		env.SealedFingerprintKey, err = sealRunnerBytes(recipient, info, raw)
 	})
 	if err != nil {
 		return runnerproto.ValueEnvelope{}, ErrDeliveryMaterial
@@ -114,14 +115,15 @@ func SealRunnerKey(j runnerproto.Job, recipient []byte, key fingerprint.Key) (ru
 }
 
 // OpenRunnerKey is the runner's side of SealRunnerKey. An envelope that
-// carries a value is refused whole: a verify job never receives one. The
+// carries a value is refused whole: a read-only job never receives one. The
 // caller wipes the key. Errors never carry input.
 func OpenRunnerKey(j runnerproto.Job, recipient *ecdh.PrivateKey, env runnerproto.ValueEnvelope) (fingerprint.Key, error) {
 	parsed, err := fingerprint.Parse(j.ExpectedFingerprint)
-	if recipient == nil || err != nil || j.Validate() != nil || j.Action != runnerproto.ActionVerify || env.JobID != j.JobID || len(env.Sealed) != 0 {
+	info := readKeyInfo(j)
+	if recipient == nil || err != nil || j.Validate() != nil || info == nil || env.JobID != j.JobID || len(env.Sealed) != 0 {
 		return fingerprint.Key{}, ErrDeliveryMaterial
 	}
-	rawKey, err := openRunnerBytes(recipient, runnerproto.VerifyKeyInfo(j), env.SealedFingerprintKey)
+	rawKey, err := openRunnerBytes(recipient, info, env.SealedFingerprintKey)
 	defer clear(rawKey)
 	if err != nil {
 		return fingerprint.Key{}, ErrDeliveryMaterial
@@ -131,6 +133,17 @@ func OpenRunnerKey(j runnerproto.Job, recipient *ecdh.PrivateKey, env runnerprot
 		return fingerprint.Key{}, ErrDeliveryMaterial
 	}
 	return key, nil
+}
+
+func readKeyInfo(j runnerproto.Job) []byte {
+	switch j.Action {
+	case runnerproto.ActionVerify:
+		return runnerproto.VerifyKeyInfo(j)
+	case runnerproto.ActionAdopt:
+		return runnerproto.AdoptKeyInfo(j)
+	default:
+		return nil
+	}
 }
 
 func openRunnerBytes(recipient *ecdh.PrivateKey, info, sealed []byte) ([]byte, error) {

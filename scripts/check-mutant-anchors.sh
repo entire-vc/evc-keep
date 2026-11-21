@@ -14,6 +14,12 @@
 # Suites run $MUTANT_ANCHORS_JOBS at a time (default 4); each one passes only
 # if it exits 0, reports at least one applied mutation, prints no FAIL line,
 # and starts no go or node run (scripts/lib/apply-only/).
+#
+# Each suite's verdict line, with its duration, is printed the moment the suite
+# ends; the suites' own output follows at the end. Stopped by a signal (the CI
+# budget's `timeout` sends TERM), the driver prints the verdicts it has, names
+# every suite that had not finished and how long it ran, stops the rest and
+# exits non-zero.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -27,13 +33,18 @@ if [ "${1:-}" = --one ]; then
 	# suite is not called check-<id>-mutations.sh.
 	script=scripts/check-$id-mutations.sh
 	[ -f "$root/$script" ] || script=scripts/$id-mutations.sh
+	start=$(date +%s)
+	echo "$start" >"$dir/$id.start"
 	verdict() {
 		echo "$2" >>"$log"
+		echo "$2" >"$dir/$id.verdict"
 		echo "$1" >"$dir/$id.rc"
+		# Streamed at once: a run stopped by its budget still shows this line.
+		echo "$2"
 		exit 0
 	}
 	echo "--- $script" >"$log"
-	start=$(date +%s)
+	took() { echo $(($(date +%s) - start)); }
 	if (cd "$root" && MUTATION_APPLY_ONLY=1 MUTATION_APPLY_ONLY_TRAP="$trap_file" ./"$script" >"$dir/$id.out" 2>&1); then
 		status=0
 	else
@@ -42,18 +53,18 @@ if [ "${1:-}" = --one ]; then
 	cat "$dir/$id.out" >>"$log"
 	applied=$(grep -c -E '^ok +[^ ]+: applies$' "$dir/$id.out" || true)
 	if [ -s "$trap_file" ]; then
-		verdict 1 "FAIL $id: ran $(sort -u "$trap_file" | tr '\n' ' ')in apply-only mode; the suite must skip its tests"
+		verdict 1 "FAIL $id: ran $(sort -u "$trap_file" | tr '\n' ' ')in apply-only mode; the suite must skip its tests ($(took)s)"
 	elif [ "$status" -ne 0 ]; then
-		verdict 1 "FAIL $id: exit $status"
+		verdict 1 "FAIL $id: exit $status ($(took)s)"
 	elif grep -q '^FAIL' "$dir/$id.out"; then
-		verdict 1 "FAIL $id: exit 0 but a FAIL line was printed"
+		verdict 1 "FAIL $id: exit 0 but a FAIL line was printed ($(took)s)"
 	elif [ "$applied" -eq 0 ] && grep -q -E '^ok +apply-only: no source anchors' "$dir/$id.out"; then
 		# Its mutants are inputs or broken implementations, not source edits.
-		verdict 0 "ok   $id: no source anchors to check"
+		verdict 0 "ok   $id: no source anchors to check ($(took)s)"
 	elif [ "$applied" -eq 0 ]; then
-		verdict 1 "FAIL $id: no mutation reported as applied"
+		verdict 1 "FAIL $id: no mutation reported as applied ($(took)s)"
 	fi
-	verdict 0 "ok   $id: $applied mutations apply ($(($(date +%s) - start))s)"
+	verdict 0 "ok   $id: $applied mutations apply ($(took)s)"
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/keep-anchors.XXXXXXXX")
@@ -87,7 +98,50 @@ for id in "$@"; do
 done
 jobs=${MUTANT_ANCHORS_JOBS:-4}
 case $jobs in '' | *[!0-9]* | 0) echo 'FAIL MUTANT_ANCHORS_JOBS must be a positive number'; exit 2 ;; esac
-xargs -P "$jobs" -I '{}' "$root/scripts/check-mutant-anchors.sh" --one '{}' "$work" <"$work/ids"
+
+# Every descendant of $1, deepest last, then $1 itself: busybox timeout signals
+# only this shell, so the running suites would outlive it otherwise.
+tree() {
+	for child in $(pgrep -P "$1" 2>/dev/null || true); do tree "$child"; done
+	echo "$1"
+}
+stopped() {
+	trap - HUP INT TERM
+	now=$(date +%s)
+	echo "FAIL stopped by SIG$1 after $((now - run_start))s; finished suites:"
+	while read -r id; do
+		if [ -f "$work/$id.verdict" ]; then cat "$work/$id.verdict"; fi
+	done <"$work/ids"
+	while read -r id; do
+		if [ -f "$work/$id.verdict" ]; then continue; fi
+		if [ -f "$work/$id.start" ]; then
+			echo "FAIL $id: unfinished, ran $((now - $(cat "$work/$id.start")))s before the stop"
+		else
+			echo "FAIL $id: unfinished, not started before the stop"
+		fi
+	done <"$work/ids"
+	if [ -n "${xpid:-}" ]; then
+		# shellcheck disable=SC2046 # one pid per word
+		kill -TERM $(tree "$xpid") 2>/dev/null || true
+	fi
+	exit "$2"
+}
+run_start=$(date +%s)
+xpid=
+trap 'stopped HUP 129' HUP
+trap 'stopped INT 130' INT
+trap 'stopped TERM 143' TERM
+echo "--- $(wc -l <"$work/ids" | tr -d ' ') suites, $jobs at a time"
+# In the background, so a trapped signal interrupts `wait` instead of waiting
+# for every suite to end.
+xargs -P "$jobs" -I '{}' "$root/scripts/check-mutant-anchors.sh" --one '{}' "$work" <"$work/ids" &
+xpid=$!
+if ! wait "$xpid"; then
+	echo "FAIL the suite runner (xargs) failed"
+	fail=1
+fi
+trap - HUP INT TERM
+echo "--- suite output"
 while read -r id; do
 	if [ -f "$work/$id.log" ]; then cat "$work/$id.log"; fi
 	if [ "$(cat "$work/$id.rc" 2>/dev/null || echo 1)" != 0 ]; then
@@ -95,4 +149,5 @@ while read -r id; do
 		fail=1
 	fi
 done <"$work/ids"
+echo "--- $(($(date +%s) - run_start))s in all"
 exit $fail

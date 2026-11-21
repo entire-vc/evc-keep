@@ -34,7 +34,7 @@ func newRestartEnv(t *testing.T) restartEnv {
 	db := testPool(t)
 	org := seedOrg(t, db)
 	var buf bytes.Buffer
-	repo := restart.NewRepo(db)
+	repo := restart.NewRepo(db, "worker", "other")
 	return restartEnv{
 		db: db, org: org, repo: repo, log: &buf,
 		h:      NewRouter(obs.New(&buf), db, Deps{Restarts: repo}),
@@ -84,12 +84,12 @@ func (e restartEnv) claim(t *testing.T) []map[string]any {
 
 func TestRestartClaimReturnsExactlyTheClosedFieldsOnce(t *testing.T) {
 	e := newRestartEnv(t)
-	id, err := e.repo.Enqueue(context.Background(), e.org, "Hugh", "key-7", restartFP)
+	id, err := e.repo.Enqueue(context.Background(), e.org, "worker", "key-7", restartFP)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := e.claim(t)
-	if len(got) != 1 || len(got[0]) != 5 || len(got[0]["claim_token"].(string)) != 32 || got[0]["request_id"] != id.String() || got[0]["lane"] != "Hugh" ||
+	if len(got) != 1 || len(got[0]) != 5 || len(got[0]["claim_token"].(string)) != 32 || got[0]["request_id"] != id.String() || got[0]["lane"] != "worker" ||
 		got[0]["key_version"] != "key-7" || got[0]["fingerprint"] != restartFP {
 		t.Fatalf("claim: %v", got)
 	}
@@ -103,7 +103,7 @@ func TestRestartClaimReturnsExactlyTheClosedFieldsOnce(t *testing.T) {
 
 func TestRestartRoutesNeedThePollerRole(t *testing.T) {
 	e := newRestartEnv(t)
-	id, _ := e.repo.Enqueue(context.Background(), e.org, "Hugh", "key-7", restartFP)
+	id, _ := e.repo.Enqueue(context.Background(), e.org, "worker", "key-7", restartFP)
 	other := seedOrg(t, e.db)
 	tokens := map[string]string{
 		"org admin user":         adminToken(t, e.db, e.org),
@@ -177,7 +177,7 @@ func TestRestartPollerTokenReachesNothingElse(t *testing.T) {
 
 func TestRestartAck(t *testing.T) {
 	e := newRestartEnv(t)
-	id, _ := e.repo.Enqueue(context.Background(), e.org, "Test", "key-7", restartFP)
+	id, _ := e.repo.Enqueue(context.Background(), e.org, "other", "key-7", restartFP)
 	path := "/v1/restarts/" + id.String() + "/ack"
 	body := func(result, tok string) string { return `{"result":"` + result + `","claim_token":"` + tok + `"}` }
 	if rec := e.do("POST", path, e.poller, body("ok", strings.Repeat("ab", 16))); rec.Code != http.StatusNotFound {
@@ -216,7 +216,7 @@ func TestRestartAck(t *testing.T) {
 	}
 	// A request of another organization is as unknown as a random id.
 	otherOrg := seedOrg(t, e.db)
-	foreign, _ := e.repo.Enqueue(context.Background(), otherOrg, "Test", "key-7", restartFP)
+	foreign, _ := e.repo.Enqueue(context.Background(), otherOrg, "other", "key-7", restartFP)
 	ftok, _ := e.repo.Claim(context.Background(), otherOrg, 10)
 	rec := e.do("POST", "/v1/restarts/"+foreign.String()+"/ack", e.poller, body("ok", ftok[0].ClaimToken))
 	unknown := e.do("POST", "/v1/restarts/"+uuid.NewString()+"/ack", e.poller, body("ok", ftok[0].ClaimToken))
@@ -265,7 +265,7 @@ func TestRestartSurfacesNeverCarryAValue(t *testing.T) {
 	if !c.In("x"+c.Value(1)) || !c.In(strings.ToUpper(c.Value(1))) {
 		t.Fatal("canary detector is blind")
 	}
-	id, _ := e.repo.Enqueue(context.Background(), e.org, "Hugh", "key-7", restartFP)
+	id, _ := e.repo.Enqueue(context.Background(), e.org, "worker", "key-7", restartFP)
 	var out, issued strings.Builder
 	capture := func(b *strings.Builder, rec *httptest.ResponseRecorder) {
 		b.WriteString(rec.Body.String())
@@ -295,8 +295,8 @@ func TestRestartSurfacesNeverCarryAValue(t *testing.T) {
 	// version and fingerprint get their own probes with an allowed lane.
 	for name, in := range map[string][3]string{
 		"lane":        {c.Value(6), "key-7", restartFP},
-		"version":     {"Hugh", c.Value(6) + "!", restartFP},
-		"fingerprint": {"Hugh", "key-7", "kfp1:k1:" + c.Value(6)},
+		"version":     {"worker", c.Value(6) + "!", restartFP},
+		"fingerprint": {"worker", "key-7", "kfp1:k1:" + c.Value(6)},
 	} {
 		_, err := e.repo.Enqueue(context.Background(), e.org, in[0], in[1], in[2])
 		if err == nil {
@@ -306,7 +306,7 @@ func TestRestartSurfacesNeverCarryAValue(t *testing.T) {
 	}
 	// A successful claim is the one answer that carries request fields; it is
 	// checked with the rest.
-	if _, err := e.repo.Enqueue(context.Background(), e.org, "Hugh", "key-8", restartFP); err != nil {
+	if _, err := e.repo.Enqueue(context.Background(), e.org, "worker", "key-8", restartFP); err != nil {
 		t.Fatal("enqueue for the claim probe")
 	}
 	claimed := e.do("POST", "/v1/restarts/claim", e.poller, c.Value(8))

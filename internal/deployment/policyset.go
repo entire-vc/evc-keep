@@ -46,10 +46,10 @@ type PolicyChange struct {
 // PolicyChangeResult describes the stored (or, on a dry run, the would-be)
 // policy and the change against the previous one, by rule key only.
 type PolicyChangeResult struct {
-	Revision, PrevRevision     int64
-	MaxPerHour, PrevMaxPerHour int
-	Rules, ExecRules           int
-	Added, Removed             []string
+	Revision, PrevRevision          int64
+	MaxPerHour, PrevMaxPerHour      int
+	Rules, ExecRules, AdoptionRules int
+	Added, Removed                  []string
 }
 
 // DecodePolicy reads one policy object and nothing else: a value that is not
@@ -131,6 +131,7 @@ func (r *Repo) SetPolicy(ctx context.Context, c PolicyChange) (PolicyChangeResul
 	}
 	res.Revision = res.PrevRevision + 1
 	res.Rules, res.ExecRules = len(c.Policy.Rules), len(c.Policy.ExecRules)
+	res.AdoptionRules = len(c.Policy.AdoptionRules)
 	res.Added, res.Removed = diffKeys(policyKeys(prev), policyKeys(c.Policy))
 	if c.DryRun {
 		return res, nil
@@ -199,18 +200,26 @@ func checkPolicyRefs(ctx context.Context, tx pgx.Tx, org uuid.UUID, p Policy) er
 			return err
 		}
 	}
+	for i, rule := range p.AdoptionRules {
+		if err := check(fmt.Sprintf("adoption_rules[%d]", i), rule.SecretID, rule.RunnerID.String()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // policyKeys names each rule as secret_id/runner_id|labels/kind/path_prefix
 // (exec rules: exec:secret_id/runner_id|labels/template_id).
 func policyKeys(p Policy) []string {
-	keys := make([]string, 0, len(p.Rules)+len(p.ExecRules))
+	keys := make([]string, 0, len(p.Rules)+len(p.ExecRules)+len(p.AdoptionRules))
 	for _, rule := range p.Rules {
 		keys = append(keys, rule.SecretID.String()+"/"+hostKey(rule.RunnerID, rule.Labels)+"/"+string(rule.Kind)+"/"+rule.PathPrefix)
 	}
 	for _, rule := range p.ExecRules {
 		keys = append(keys, "exec:"+rule.SecretID.String()+"/"+hostKey(rule.RunnerID, rule.Labels)+"/"+rule.TemplateID)
+	}
+	for _, rule := range p.AdoptionRules {
+		keys = append(keys, "adopt:"+rule.SecretID.String()+"/"+rule.RunnerID.String()+"/"+string(rule.Kind)+"/"+rule.Path+"/"+rule.Field)
 	}
 	return keys
 }

@@ -88,9 +88,9 @@ func TestSelfRotateRefusals(t *testing.T) {
 
 func TestSelfRotateRestartLane(t *testing.T) {
 	selfRotateEnv(t)
-	t.Setenv("KEEP_MESH_SELF_ROTATE_RESTART_LANE", "Hugh")
+	t.Setenv("KEEP_MESH_SELF_ROTATE_RESTART_LANE", "worker")
 	g, err := meshSelfRotateFromEnv(true)
-	if err != nil || g.RestartLane != "Hugh" || g.HookPath != "" {
+	if err != nil || g.RestartLane != "worker" || g.HookPath != "" {
 		t.Fatalf("got %+v, %v", g, err)
 	}
 	// The queue and the program on the server's host are alternatives.
@@ -104,7 +104,7 @@ func TestSelfRotateRestartLane(t *testing.T) {
 	for _, k := range []string{"KEEP_MESH_SELF_ROTATE_URL", "KEEP_MESH_SELF_ROTATE_ACCOUNT_ID", "KEEP_MESH_SELF_ROTATE_ORG_ID"} {
 		t.Setenv(k, "")
 	}
-	t.Setenv("KEEP_MESH_SELF_ROTATE_RESTART_LANE", "Hugh")
+	t.Setenv("KEEP_MESH_SELF_ROTATE_RESTART_LANE", "worker")
 	if _, err := meshSelfRotateFromEnv(true); err == nil {
 		t.Fatal("a lane without KEEP_MESH_SELF_ROTATE=1 was ignored")
 	}
@@ -158,7 +158,7 @@ func TestSealOnlyRefusals(t *testing.T) {
 			t.Setenv("KEEP_MESH_SELF_ROTATE_HOOK", filepath.Join(t.TempDir(), "hook-"+c.Value(0)))
 		},
 		"interval without switch": func() { t.Setenv("KEEP_MESH_SELF_ROTATE_INTERVAL", "1h") },
-		"lane without switch":     func() { t.Setenv("KEEP_MESH_SELF_ROTATE_RESTART_LANE", "Hugh") },
+		"lane without switch":     func() { t.Setenv("KEEP_MESH_SELF_ROTATE_RESTART_LANE", "worker") },
 		"switch is not 1":         func() { t.Setenv("KEEP_MESH_SELF_ROTATE", "0") },
 	}
 	for name, mut := range cases {

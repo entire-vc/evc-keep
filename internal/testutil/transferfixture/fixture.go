@@ -45,7 +45,7 @@ func Seed(t testing.TB, ctx context.Context, db *pgxpool.Pool, org uuid.UUID, ta
 		{`INSERT INTO keep_envelope (store_org, secret_id, name, version, kek_id, wrapped_dek, ciphertext, status) VALUES ($1,$2,'secret-1',1,$3,'\x0304','\x0506','active')`, []any{o, secret.String(), "kek-" + tag}},
 		{`INSERT INTO keep_envelope (store_org, secret_id, name, version, ciphertext, status) VALUES ($1,$2,'secret-1',2,'\x07','erased')`, []any{o, secret.String()}},
 		{`INSERT INTO org_ca (org_id, ca_cert_der, ca_kek_id, ca_wrapped_dek, ca_ciphertext, sign_key_id, sign_pub_key, sign_kek_id, sign_wrapped_dek, sign_ciphertext) VALUES ($1,'\x01',$2,'\x02','\x03','sign-1',decode(repeat('ab',32),'hex'),$3,'\x04','\x05')`, []any{org, "kek-ca-" + tag, "kek-sign-" + tag}},
-		{`INSERT INTO mesh_installations (workspace_id, org_id, mesh_url, installed_by, token_signed_at, mode) VALUES ($1,$2,'https://mesh.example.test',$3,42,'store')`, []any{mws, org, u2}},
+		{`INSERT INTO mesh_installations (workspace_id, org_id, mesh_url, installed_by, token_signed_at, mode, approvals_via_mesh, settings_signed_at) VALUES ($1,$2,'https://mesh.example.test',$3,42,'store',false,43)`, []any{mws, org, u2}},
 		{`INSERT INTO mesh_events (workspace_id, event_id, event_type) VALUES ($1,'ev-1','project.created')`, []any{mws}},
 		{`INSERT INTO mesh_members (workspace_id, user_id, role, status, state_at) VALUES ($1,$2,'admin','active', now())`, []any{mws, u2}},
 		{`INSERT INTO mesh_projects (workspace_id, project_id, slug, name, status, state_at, orphaned_at) VALUES ($1,$2,'p','P','orphaned', now(), now())`, []any{mws, mproj}},

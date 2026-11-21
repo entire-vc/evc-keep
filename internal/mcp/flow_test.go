@@ -220,7 +220,7 @@ func TestDeployAnswerWithOddStringsIsRefused(t *testing.T) {
 	value := c.Value(1)
 	for name, body := range map[string]map[string]any{
 		"class":       {"ok": false, "request_id": testRequest, "error_class": "x_" + strings.ToLower(value)},
-		"fingerprint": {"ok": true, "request_id": testRequest, "fingerprint": value},
+		"fingerprint": {"ok": true, "request_id": testRequest, "version": "2", "fingerprint": value},
 		"request-id":  {"ok": true, "request_id": "../" + value},
 	} {
 		t.Run(name, func(t *testing.T) {

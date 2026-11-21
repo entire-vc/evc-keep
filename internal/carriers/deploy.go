@@ -73,7 +73,7 @@ func (e *DeployEvidence) completedJobs(ctx context.Context, org, secret uuid.UUI
  FROM deployment_jobs j
  JOIN deployment_requests dr ON dr.org_id=j.org_id AND dr.id=j.deployment_request_id
  JOIN runners r ON r.org_id=j.org_id AND r.id=j.runner_id
- WHERE j.org_id=$1 AND j.secret_id=$2 AND j.status='completed' AND r.host=$3 AND r.revoked_at IS NULL
+ WHERE j.org_id=$1 AND j.secret_id=$2 AND j.action='deploy' AND j.status='completed' AND r.host=$3 AND r.revoked_at IS NULL
    AND dr.target @> $4::jsonb
  ORDER BY j.created_at DESC, j.id DESC LIMIT $5`, org, secret, md.Host, want, maxJobsExamined)
 	if err != nil {
@@ -264,6 +264,9 @@ func (s *Service) List(ctx context.Context, org, secret uuid.UUID) ([]Carrier, e
 // withRunner names the runner of the newest delivered deployment of the
 // carrier's version to its destination. No record leaves RunnerID nil.
 func (s *Service) withRunner(ctx context.Context, c Carrier) (Carrier, error) {
+	if c.Provenance == "adoption" {
+		return c, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, evidenceTimeout)
 	defer cancel()
 	jobs, err := s.ev.completedJobs(ctx, c.OrgID, c.SecretID, c.Metadata)

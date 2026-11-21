@@ -29,16 +29,16 @@ func TestRestartRequestsMigration_DowngradeShown(t *testing.T) {
 	}
 	const insert = `INSERT INTO restart_requests (request_id, org_id, lane, key_version, fingerprint) VALUES (gen_random_uuid(), $1, $2, $3, $4)`
 	const fp = "kfp1:k1:abcdefghijklmnop"
-	if _, err := db.ExecContext(ctx, insert, org, "Hugh", "key-1", fp); err != nil {
+	if _, err := db.ExecContext(ctx, insert, org, "worker", "key-1", fp); err != nil {
 		t.Fatalf("new table rejected a valid request: %v", err)
 	}
 	for name, args := range map[string][]any{
 		"lane with a space":      {org, "Hu gh", "key-1", fp},
-		"empty version":          {org, "Hugh", "", fp},
-		"value-shaped version":   {org, "Hugh", "a b", fp},
-		"fingerprint not kfp1":   {org, "Hugh", "key-1", "sha256:abc"},
-		"fingerprint too short":  {org, "Hugh", "key-1", "kfp1:k1:abc"},
-		"organization not found": {"33333333-3333-3333-3333-333333333333", "Hugh", "key-1", fp},
+		"empty version":          {org, "worker", "", fp},
+		"value-shaped version":   {org, "worker", "a b", fp},
+		"fingerprint not kfp1":   {org, "worker", "key-1", "sha256:abc"},
+		"fingerprint too short":  {org, "worker", "key-1", "kfp1:k1:abc"},
+		"organization not found": {"33333333-3333-3333-3333-333333333333", "worker", "key-1", fp},
 	} {
 		if _, err := db.ExecContext(ctx, insert, args...); err == nil {
 			t.Errorf("table accepted: %s", name)
@@ -70,7 +70,7 @@ func TestRestartRequestsMigration_DowngradeShown(t *testing.T) {
 	if _, err := provider.Up(ctx); err != nil {
 		t.Fatal("upgrade after the downgrade failed")
 	}
-	if _, err := db.ExecContext(ctx, insert, org, "Test", "key-2", fp); err != nil {
+	if _, err := db.ExecContext(ctx, insert, org, "other", "key-2", fp); err != nil {
 		t.Fatalf("upgraded table rejected a valid request again: %v", err)
 	}
 }

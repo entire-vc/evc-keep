@@ -178,7 +178,7 @@ func (v *ProviderVersions) Adopt(ctx context.Context, ref Ref, runID uuid.UUID, 
 			orig = id
 		}
 	}
-	rec := keyRow{ref: ref, runID: runID, keyID: uuid.NewString(), old: ver.Old, new: ver.New, fp: ver.Fingerprint, orig: orig}
+	rec := keyRow{ref: ref, runID: runID, keyID: uuid.NewString(), old: ver.Old, new: ver.New, fp: ver.Fingerprint, orig: orig, adopted: true}
 	return func(ctx context.Context, tx pgx.Tx) error {
 		if err := v.d.Ledger.putTx(ctx, tx, rec); err != nil {
 			return ErrPrepare
@@ -202,6 +202,61 @@ func (v *ProviderVersions) rollback(ctx context.Context, ref Ref, runID uuid.UUI
 		}
 	}
 	_ = v.d.Incident.Open(rctx, IncidentRecord{Ref: ref, RunID: runID, Class: ClassRollbackUnconfirmed})
+}
+
+// CanRollback: the run issued a key of its own and the provider keeps the old
+// one valid, so the key can be ended while the carriers go back to the old
+// version. A forward-only provider has no way back; a version a human entered
+// has no key behind it.
+func (v *ProviderVersions) CanRollback(ctx context.Context, ref Ref, runID uuid.UUID) (bool, error) {
+	if !v.d.Provider.Capabilities().DualKey || v.d.Incident == nil {
+		return false, nil
+	}
+	rec, ok, err := v.d.Ledger.byRun(ctx, runID)
+	if err != nil {
+		return false, ErrRevoke
+	}
+	return ok && rec.ref == ref && !rec.adopted && rec.old != "", nil
+}
+
+// RollbackNew ends the key the failed run issued, confirms it with Check, and
+// disables the new version so the old one is current again. The engine calls it
+// only after every carrier that took the new version is back on the old one.
+// Idempotent per runID. Any error means the key is not confirmed ended.
+func (v *ProviderVersions) RollbackNew(ctx context.Context, ref Ref, runID uuid.UUID) error {
+	if ok, err := v.CanRollback(ctx, ref, runID); err != nil || !ok {
+		return ErrRevoke
+	}
+	rec, ok, err := v.d.Ledger.byRun(ctx, runID)
+	if err != nil || !ok {
+		return ErrRevoke
+	}
+	// Issue may hand the original key back; ending it would end the key the
+	// carriers were just put back on.
+	if rec.keyID == rec.orig {
+		return ErrRevoke
+	}
+	// Nor the key a run recorded for the old version (the original key may be
+	// unknown): the carriers are back on that one.
+	if oldKey, _, kerr := v.d.Ledger.keyOf(ctx, ref, rec.old); kerr != nil || (oldKey != "" && oldKey == rec.keyID) {
+		return ErrRevoke
+	}
+	t, err := v.d.Resolve(ctx, ref)
+	if err != nil {
+		return ErrRevoke
+	}
+	if err := v.d.Provider.Revoke(ctx, rec.keyID); err != nil {
+		return ErrRevoke
+	}
+	if st, err := v.d.Provider.Check(ctx, rec.keyID); err != nil || st.Active {
+		return ErrRevoke
+	}
+	dis := t.Ref
+	dis.Version = rec.new
+	if derr := t.Store.Disable(ctx, dis); derr != nil && !errors.Is(derr, provider.ErrNotFound) {
+		return ErrRevoke
+	}
+	return nil
 }
 
 // ProviderRevoker is the Revoker of a RotationProvider: it ends the old key
@@ -300,6 +355,7 @@ type keyRow struct {
 	old, new, fp string
 	orig         string // the key behind old when the run began; empty: unknown
 	length       int    // byte length of the new value; 0 unknown
+	adopted      bool   // a human entered the value: no key was issued
 }
 
 // intend records that the run is about to ask the provider for a key. fresh is
@@ -316,9 +372,9 @@ func (l *Ledger) put(ctx context.Context, k keyRow) error {
 			return err
 		}
 	}
-	_, err := l.pool.Exec(ctx, `INSERT INTO rotation_keys(run_id, org_id, secret_id, key_id, old_version, new_version, fingerprint, original_key_id, new_length)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (run_id) DO NOTHING`,
-		k.runID, k.ref.OrgID, k.ref.SecretID, k.keyID, k.old, k.new, k.fp, k.orig, k.length)
+	_, err := l.pool.Exec(ctx, `INSERT INTO rotation_keys(run_id, org_id, secret_id, key_id, old_version, new_version, fingerprint, original_key_id, new_length, adopted)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (run_id) DO NOTHING`,
+		k.runID, k.ref.OrgID, k.ref.SecretID, k.keyID, k.old, k.new, k.fp, k.orig, k.length, k.adopted)
 	if err == nil && l.afterPut != nil {
 		err = l.afterPut()
 	}
@@ -327,16 +383,16 @@ func (l *Ledger) put(ctx context.Context, k keyRow) error {
 
 // putTx records the row inside a transaction, so that it is taken back with it.
 func (l *Ledger) putTx(ctx context.Context, tx pgx.Tx, k keyRow) error {
-	_, err := tx.Exec(ctx, `INSERT INTO rotation_keys(run_id, org_id, secret_id, key_id, old_version, new_version, fingerprint, original_key_id, new_length)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (run_id) DO NOTHING`,
-		k.runID, k.ref.OrgID, k.ref.SecretID, k.keyID, k.old, k.new, k.fp, k.orig, k.length)
+	_, err := tx.Exec(ctx, `INSERT INTO rotation_keys(run_id, org_id, secret_id, key_id, old_version, new_version, fingerprint, original_key_id, new_length, adopted)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (run_id) DO NOTHING`,
+		k.runID, k.ref.OrgID, k.ref.SecretID, k.keyID, k.old, k.new, k.fp, k.orig, k.length, k.adopted)
 	return err
 }
 
 func (l *Ledger) byRun(ctx context.Context, runID uuid.UUID) (keyRow, bool, error) {
 	k := keyRow{runID: runID}
-	err := l.pool.QueryRow(ctx, `SELECT org_id, secret_id, key_id, old_version, new_version, fingerprint, original_key_id, new_length FROM rotation_keys WHERE run_id=$1`, runID).
-		Scan(&k.ref.OrgID, &k.ref.SecretID, &k.keyID, &k.old, &k.new, &k.fp, &k.orig, &k.length)
+	err := l.pool.QueryRow(ctx, `SELECT org_id, secret_id, key_id, old_version, new_version, fingerprint, original_key_id, new_length, adopted FROM rotation_keys WHERE run_id=$1`, runID).
+		Scan(&k.ref.OrgID, &k.ref.SecretID, &k.keyID, &k.old, &k.new, &k.fp, &k.orig, &k.length, &k.adopted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return keyRow{}, false, nil
 	}

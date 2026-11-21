@@ -130,6 +130,19 @@ const ActionSecretRotate Action = "secret.rotate"
 // out into per-carrier jobs, and each runner's report. Metadata only.
 const ActionCarrierVerify Action = "carrier.verify"
 
+// ActionCarrierDiscover records a carrier discovery: the request for a runner
+// to scan its host, and the report it returned. Ids, counts and closed
+// classes only: never a path, a variable name or a value.
+const ActionCarrierDiscover Action = "carrier.discover"
+
+// Adoption has its own provenance and audit family: it attests a read and
+// never claims that a deployment wrote the carrier.
+const (
+	ActionCarrierAdoptRequested      Action = "carrier.adopt.requested"
+	ActionCarrierAdoptPolicyDecision Action = "carrier.adopt.policy_decision"
+	ActionCarrierAdoptResult         Action = "carrier.adopt.result"
+)
+
 // The approval.* actions record a human confirmation of a deployment request:
 // the request is raised, then decided.
 const (
@@ -190,6 +203,13 @@ const (
 	// installation (DELETE /orgs/{org}/mesh/installations/{workspace}). The
 	// reason carries the workspace id and the number of erased versions.
 	ActionMeshUninstall Action = "mesh.uninstall"
+	// ActionMeshApprovalsChannel is a change of the workspace setting
+	// approvals_via_mesh that a Mesh install handshake applied (threat model
+	// §4.2.3): who decides the organisation's approvals, a Mesh card or
+	// Keep's console. The workspace is the actor; the reason is exactly
+	// approvals_via_mesh=true, =false or =default, nothing else of the
+	// snapshot.
+	ActionMeshApprovalsChannel Action = "mesh.approvals_channel"
 	// ActionTransferImported is keep-server offline-transfer import: one
 	// organization's scoped snapshot landed on this database. The reason
 	// carries the transfer id and the manifest digest, never a value.
@@ -209,7 +229,8 @@ const (
 
 // registeredActions lists every constant above; Known reads it.
 var registeredActions = []Action{
-	ActionDeployResult, ActionCarrierVerify, ActionSecretRotate,
+	ActionDeployResult, ActionCarrierVerify, ActionCarrierDiscover, ActionSecretRotate,
+	ActionCarrierAdoptRequested, ActionCarrierAdoptPolicyDecision, ActionCarrierAdoptResult,
 	ActionApprovalRequested, ActionApprovalDecided,
 	ActionIntakeIssued, ActionIntakeCompleted, ActionIntakeExpired,
 	ActionSecretCreateRef,
@@ -237,6 +258,7 @@ var registeredActions = []Action{
 	ActionMeshSecretMetadata,
 	ActionMeshToken,
 	ActionMeshUninstall,
+	ActionMeshApprovalsChannel,
 	ActionTransferImported,
 	ActionOrgBootstrap,
 	ActionStoreBindDefault,

@@ -209,6 +209,8 @@ func TestRotate_StatusShapes(t *testing.T) {
 		"failed": {rotation.RunReport{State: rotation.StateFailed, Failed: true, Class: rotation.ClassDeployFailed, Carriers: []rotation.CarrierStatus{
 			{CarrierID: c1, Phase: "verify", State: "ok"}, {CarrierID: c2, Phase: "deploy", State: "stale"}}}, 200,
 			RotateResult{ErrorClass: "deploy_failed", Carriers: []RotateCarrier{{CarrierID: c1, Phase: "verify", State: "ok"}, {CarrierID: c2, Phase: "deploy", State: "stale"}}}},
+		"failed with an incident": {rotation.RunReport{State: rotation.StateFailed, Failed: true, Class: rotation.ClassDeployFailed, IncidentOpened: true}, 200,
+			RotateResult{ErrorClass: "deploy_failed", IncidentOpened: true}},
 		"class outside the list": {rotation.RunReport{State: rotation.StateFailed, Failed: true, Class: "boom: free text"}, 200, RotateResult{ErrorClass: "internal"}},
 	} {
 		t.Run(name, func(t *testing.T) {

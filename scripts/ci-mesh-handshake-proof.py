@@ -108,7 +108,15 @@ def main():
         replace = {}
         for f in OVERLAID:
             old = Path(tmp) / Path(f).name
-            old.write_bytes(git("show", BASE + ":" + f))
+            pinned = git("show", BASE + ":" + f)
+            if f == "internal/api/mesh.go":
+                # Keep the historical handlers, but supply the new read-only
+                # UI dependency required by the current router and test tree.
+                # The pinned handlers never read it; their behavior stays old.
+                anchor = b"type MeshDeps struct {\n"
+                require(pinned.count(anchor) == 1, "pinned MeshDeps declaration missing/duplicate")
+                pinned = pinned.replace(anchor, anchor + b"\tRotations MeshUIRotations\n", 1)
+            old.write_bytes(pinned)
             for k in {str(Path(f).resolve()), os.path.join(os.environ.get("PWD", os.getcwd()), f)}:
                 replace[k] = str(old)
         # The metadata probe's files name two declarations only the current

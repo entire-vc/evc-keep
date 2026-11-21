@@ -1,0 +1,9 @@
+[Unit]
+Description=Stand host first-boot step
+Before=multi-user.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/testbed-init.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
